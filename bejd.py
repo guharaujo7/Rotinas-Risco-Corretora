@@ -49,11 +49,6 @@ CLICK_TIMEOUT_MS   = 10_000
 NAV_TIMEOUT_MS     = 35_000
 
 # ── Seletores confirmados via inspeção real do DOM ───────────────────────────
-# ATENÇÃO: o modal usa div#modal — NÃO <dialog> nem role=dialog.
-# CONFIRMAR usa FlatButton (não PrimaryButton) e é o 2º botão filho
-# de div.sc-bgxRrC.iPHKit.
-# Definido aqui fora do @dataclass para evitar o erro:
-#   ValueError: mutable default <class 'dict'> for field _SELETORES_FIXOS
 _SELETORES_FIXOS: dict[str, list[str]] = {
     # ── Painel principal ─────────────────────────────────────────────────────
     "Criar Nova Taxa": [
@@ -75,8 +70,6 @@ _SELETORES_FIXOS: dict[str, list[str]] = {
         "button:has-text('Confirmar')",
     ],
     # ── 2ª confirmação — FlatButton, 2º filho de div.sc-bgxRrC.iPHKit ────────
-    # HTML: <button version="2" class="...FlatButton...">CONFIRMAR</button>
-    # selector: #modal > div.dDmCdw > div.jVMWaB > div > div.iPHKit > button:nth-child(2)
     "CONFIRMAR": [
         "#modal div.sc-bgxRrC > button:nth-child(2)",
         "#modal div.iPHKit > button:nth-child(2)",
@@ -184,11 +177,6 @@ class TaxasPlaywrightSession:
 
     # ------------------------------------------------------------------
     def _locators_botao(self, texto: str):
-        """
-        Retorna locators em ordem de confiabilidade:
-        1. Seletores CSS/XPath fixos do DOM real  (_SELETORES_FIXOS)
-        2. Fallbacks genéricos por role/texto
-        """
         p   = self.page
         esc = re.escape(texto.strip())
         locs = []
@@ -406,6 +394,38 @@ class TaxasPlaywrightSession:
         )
 
     # ------------------------------------------------------------------
+    def _aguardar_modal_fechar(self, timeout_ms: int = 20_000) -> None:
+        """
+        Aguarda o modal (#modal) desaparecer do DOM ou ficar invisível,
+        confirmando que o servidor processou o envio com sucesso.
+        Essencial para o último cliente: garante que o CONFIRMAR surtiu
+        efeito antes de encerrar o browser.
+        """
+        self._abort()
+        p        = self.page
+        deadline = time.time() + (timeout_ms / 1000.0)
+
+        while time.time() < deadline:
+            self._abort()
+            try:
+                modal_visivel = p.evaluate("""() => {
+                    const modal = document.getElementById('modal');
+                    if (!modal) return false;
+                    const style = window.getComputedStyle(modal);
+                    return style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && modal.offsetParent !== null;
+                }""")
+                if not modal_visivel:
+                    return          # modal sumiu — envio confirmado
+            except Exception:
+                pass
+            time.sleep(0.15)
+
+        # Se o modal não sumiu, não é erro grave — apenas logamos e seguimos
+        self.log("  Aviso: modal não fechou dentro do tempo esperado.", "warn")
+
+    # ------------------------------------------------------------------
     def configurar_timeouts(self) -> None:
         self.page.set_default_timeout(DEFAULT_TIMEOUT_MS)
         self.page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
@@ -489,7 +509,23 @@ class TaxasPlaywrightSession:
             self.log("  Voltando ao painel de taxas…", "info")
             self.ir_painel_taxas(recarregar=False)
 
-    def enviar_taxa_cliente(self, nome_cliente: str, caminho_planilha: str) -> None:
+    def enviar_taxa_cliente(
+        self,
+        nome_cliente: str,
+        caminho_planilha: str,
+        *,
+        is_ultimo: bool = False,
+    ) -> None:
+        """
+        Envia a planilha de taxas de um cliente.
+
+        Parâmetro `is_ultimo`:
+          - False (padrão): após o CONFIRMAR aguarda o modal fechar e
+            navega de volta ao painel para o próximo cliente.
+          - True: após o CONFIRMAR apenas aguarda o modal fechar e
+            confirma via networkidle — NÃO navega, NÃO dispara nenhuma
+            ação que possa ser abortada pelo fechamento do browser.
+        """
         p       = self.page
         arquivo = os.path.basename(caminho_planilha)
 
@@ -521,12 +557,29 @@ class TaxasPlaywrightSession:
         self._clicar_confirmar_final(timeout_ms=25_000)
         self.log(f"  [{nome_cliente}] CONFIRMAR clicado. ✓", "info")
 
-        try:
-            p.wait_for_load_state("domcontentloaded", timeout=15_000)
-        except Exception:
-            pass
-        if URL_PAINEL not in (p.url or ""):
-            self.ir_painel_taxas(recarregar=False)
+        # ── Aguarda o modal fechar (confirma que o servidor processou) ──────
+        self.log(f"  [{nome_cliente}] Aguardando confirmação do servidor…", "info")
+        self._aguardar_modal_fechar(timeout_ms=20_000)
+        self.log(f"  [{nome_cliente}] Envio concluído pelo servidor. ✓", "ok")
+
+        if is_ultimo:
+            # Último cliente: aguarda o estado de rede estabilizar mas
+            # NÃO navega para nenhuma outra página. Isso evita que qualquer
+            # operação seja interrompida pelo encerramento do browser.
+            self.log(f"  [{nome_cliente}] Último cliente — aguardando rede estabilizar…", "info")
+            try:
+                p.wait_for_load_state("networkidle", timeout=15_000)
+            except Exception:
+                pass
+            self.log(f"  [{nome_cliente}] Tudo pronto. Browser será fechado com segurança.", "info")
+        else:
+            # Clientes intermediários: volta ao painel para o próximo envio
+            try:
+                p.wait_for_load_state("domcontentloaded", timeout=15_000)
+            except Exception:
+                pass
+            if URL_PAINEL not in (p.url or ""):
+                self.ir_painel_taxas(recarregar=False)
 
 
 # ── Rotina principal ──────────────────────────────────────────────────────────
@@ -592,9 +645,23 @@ def executar_rotina_taxas(
                 sess.ir_painel_taxas(recarregar=True)
                 log("Login concluído.", "ok")
 
-                total = len(CLIENTES)
+                # ── Monta lista apenas dos clientes que têm planilha ──────────
+                # Precisamos saber quem é o *último* cliente que será enviado
+                # antes de entrar no loop, para passar is_ultimo=True corretamente.
+                clientes_com_planilha: list[tuple[str, str]] = []
+                for cliente in CLIENTES:
+                    planilha = planilha_taxas_para_cliente(
+                        pasta_boletos, cliente, idx_subpastas
+                    )
+                    if planilha:
+                        clientes_com_planilha.append((cliente, planilha))
+
+                total_envios = len(clientes_com_planilha)
+                total        = len(CLIENTES)
+
                 log("\n─── Envio de taxas ───────────────────", "heading")
 
+                idx_envio = 0  # contador dos clientes que serão de fato enviados
                 for i, cliente in enumerate(CLIENTES):
                     if cancelado():
                         log("\nCancelado pelo usuário.", "warn")
@@ -610,9 +677,13 @@ def executar_rotina_taxas(
                         pulados += 1
                         continue
 
+                    idx_envio += 1
+                    # É o último cliente com planilha disponível?
+                    is_ultimo = (idx_envio == total_envios)
+
                     log(f"  Arquivo: {os.path.basename(planilha)}", "info")
                     try:
-                        sess.enviar_taxa_cliente(cliente, planilha)
+                        sess.enviar_taxa_cliente(cliente, planilha, is_ultimo=is_ultimo)
                         sucesso += 1
                         log("  ✓ Enviado.", "ok")
                     except InterruptedError:
@@ -949,5 +1020,4 @@ class App(tk.Tk):
                     pass
 
 
-if __name__ == "__main__":
-    App().mainloop()
+if __name__ == "__main__
