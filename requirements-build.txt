@@ -1,3 +1,0 @@
-# Apenas para gerar o .exe (não precisa na máquina do usuário final)
--r requirements.txt
-pyinstaller>=6.0
