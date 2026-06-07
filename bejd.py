@@ -1,117 +1,122 @@
-import os, sys, re, random, tkinter as tk, threading, time, tempfile, shutil, pythoncom, webbrowser
+"""
+Mesa Itaú — Risco Sacado
+Redesign editorial dark/warm (Tkinter nativo).
+Mantém toda a lógica de automação BPM, Share, Limites Invertido
+e adiciona o sistema de Rotinas com seleção de módulo.
+"""
+
+import os, sys, re, random, tkinter as tk, threading, time, tempfile, shutil, webbrowser
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from tkinter import ttk, filedialog, messagebox
-from PyPDF2 import PdfReader
-import win32com.client as win32
+from tkinter import ttk, filedialog, messagebox, font as tkfont
 from datetime import datetime, date
- 
+from PyPDF2 import PdfReader
+
+try:
+    import win32com.client as win32
+    WIN32_OK = True
+except Exception:
+    WIN32_OK = False
+
+try:
+    import pythoncom
+    PYTHONCOM_OK = True
+except Exception:
+    PYTHONCOM_OK = False
+
 try:
     from playwright.sync_api import sync_playwright
     PLAYWRIGHT_OK = True
 except Exception:
     sync_playwright = None
     PLAYWRIGHT_OK = False
- 
-LOGO_FILENAME = "itau-logo-png_seeklogo-74122.png"
- 
-def _parse_brl_to_decimal(raw: str):
-    s = (raw or "").strip()
-    if not s:
+
+# ─────────────────────────────────────────────
+#  PALETA  dark / warm-ink
+# ─────────────────────────────────────────────
+C = {
+    "bg":           "#1a1712",   # carvão quente
+    "surface":      "#211e1a",   # superfície primária
+    "surface2":     "#28241f",   # superfície elevada
+    "surface3":     "#312d27",   # card hover / selecionado
+    "ink":          "#ede8df",   # texto principal
+    "ink_muted":    "#8a8070",   # texto secundário
+    "ink_faint":    "#4a4540",   # hairline / divisor
+    "accent":       "#c8923a",   # âmbar
+    "accent_dim":   "#7a5520",   # âmbar apagado
+    "accent_soft":  "#2d2015",   # âmbar fundo suave
+    "ok":           "#4ea87a",   # verde sucesso
+    "ok_dim":       "#1e3d2e",
+    "warn":         "#c8923a",
+    "err":          "#b85050",
+    "err_dim":      "#3d1a1a",
+    "hair":         "#2e2a25",   # hairline
+    "log_step":     "#6a6258",
+    "log_ok":       "#4ea87a",
+    "log_warn":     "#c8923a",
+    "log_err":      "#b85050",
+}
+
+LOGO_FILENAME   = "itau-logo-png_seeklogo-74122.png"
+
+# ─────────────────────────────────────────────
+#  HELPERS DE FORMATAÇÃO MONETÁRIA
+# ─────────────────────────────────────────────
+def _parse_brl(raw: str):
+    s = (raw or "").strip().replace("R$","").replace("r$","").replace(" ","")
+    s = re.sub(r"[^\d,.\-]","",s)
+    if not s or s in {".",",","-","-.","-.","-.","-."}:
         return None
-    s = s.replace("R$", "").replace("r$", "").replace(" ", "")
-    s = re.sub(r"[^\d,.\-]", "", s)
-    if not s or s in {".", ",", "-", "-.", "-,"}:
-        return None
-    last_dot = s.rfind(".")
-    last_comma = s.rfind(",")
-    sep_idx = max(last_dot, last_comma)
+    ld, lc = s.rfind("."), s.rfind(",")
+    si = max(ld, lc)
     try:
-        if sep_idx == -1:
-            int_part = re.sub(r"[^\d\-]", "", s)
-            d = Decimal(int_part)
+        if si == -1:
+            d = Decimal(re.sub(r"[^\d\-]","",s))
         else:
-            decimal_sep = s[sep_idx]
-            int_part = s[:sep_idx]
-            dec_part = s[sep_idx + 1:]
-            int_part_clean = re.sub(r"[^\d\-]", "", int_part)
-            dec_part_clean = re.sub(r"[^\d]", "", dec_part)
-            if not dec_part_clean:
-                return None
-            normalized = (int_part_clean if int_part_clean not in {"", "-"} else "0") + "." + dec_part_clean
-            d = Decimal(normalized)
+            ip = re.sub(r"[^\d\-]","", s[:si])
+            dp = re.sub(r"[^\d]","", s[si+1:])
+            if not dp: return None
+            d = Decimal((ip if ip not in {"","-"} else "0")+"."+dp)
     except (InvalidOperation, ValueError):
         return None
     return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
- 
- 
-def _format_brl_currency_from_decimal(d: Decimal) -> str:
+
+def _fmt_brl(d: Decimal) -> str:
     d2 = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     sign = "-" if d2 < 0 else ""
-    d_abs = abs(d2)
-    s = f"{d_abs:.2f}"
-    int_s, dec_s = s.split(".")
-    int_s_grouped = "{:,}".format(int(int_s)).replace(",", ".")
-    return f"R$ {sign}{int_s_grouped},{dec_s}"
- 
- 
-def _format_brl_currency(raw: str) -> str:
-    d = _parse_brl_to_decimal(raw)
-    if d is None:
-        return (raw or "").strip()
-    return _format_brl_currency_from_decimal(d)
- 
- 
-def _format_brl_plain_for_web(raw: str) -> str:
-    d = _parse_brl_to_decimal(raw)
-    if d is None:
-        return ""
-    d2 = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    sign = "-" if d2 < 0 else ""
-    d_abs = abs(d2)
-    s = f"{d_abs:.2f}"
-    int_s, dec_s = s.split(".")
-    int_s_grouped = "{:,}".format(int(int_s)).replace(",", ".")
-    return f"{sign}{int_s_grouped},{dec_s}"
- 
- 
-def _bpm_round_rect(canvas: tk.Canvas, x1, y1, x2, y2, radius=18, **kwargs):
-    try:
-        x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
-    except Exception:
-        return canvas.create_rectangle(x1, y1, x2, y2, **kwargs)
-    if x2 <= x1 or y2 <= y1:
-        return canvas.create_rectangle(x1, y1, x2, y2, **kwargs)
-    r = min(radius, (x2 - x1) / 2.0, (y2 - y1) / 2.0)
-    points = [
-        x1+r, y1, x2-r, y1, x2-r, y1, x2, y1, x2, y1+r,
-        x2, y1+r, x2, y2-r, x2, y2-r, x2, y2, x2-r, y2,
-        x2-r, y2, x1+r, y2, x1+r, y2, x1, y2, x1, y2-r,
-        x1, y2-r, x1, y1+r, x1, y1+r, x1, y1, x1+r, y1,
-    ]
-    return canvas.create_polygon(points, smooth=True, **kwargs)
- 
- 
-class BPMUserCancelled(Exception):
-    """Usuário cancelou a sequência de BPM na interface."""
- 
- 
+    s = f"{abs(d2):.2f}"; i, f = s.split(".")
+    return f"R$ {sign}{'{:,}'.format(int(i)).replace(',','.')},{f}"
+
+def _fmt_brl_from_raw(raw: str) -> str:
+    d = _parse_brl(raw)
+    return _fmt_brl(d) if d is not None else (raw or "").strip()
+
+def _fmt_brl_plain_web(raw: str) -> str:
+    d = _parse_brl(raw)
+    if d is None: return ""
+    s = f"{abs(d):.2f}"; i, f = s.split(".")
+    sign = "-" if d < 0 else ""
+    return f"{sign}{'{:,}'.format(int(i)).replace(',','.')},{f}"
+
+# ─────────────────────────────────────────────
+#  DADOS DOS CLIENTES
+# ─────────────────────────────────────────────
 BPM_CLIENT_DATA = {
-    "Transdourada": {"CNPJ": "01259730000174", "PLATAFORMA": "2939", "AG": "1643", "CONTA": "99451-8"},
-    "RPB": {"CNPJ": "07075892000139", "PLATAFORMA": "8973", "AG": "6627", "CONTA": "06471-7"},
-    "Posto Arinos": {"CNPJ": "05798923000154", "PLATAFORMA": "8250", "AG": "1364", "CONTA": "98355-9"},
-    "Brasnorte": {"CNPJ": "00514301000133", "PLATAFORMA": "8250", "AG": "1364", "CONTA": "98654-5"},
-    "Mirian Varzea": {"CNPJ": "16519674000137", "PLATAFORMA": "8250", "AG": "1689", "CONTA": "05136-3"},
-    "Mirian Cuiaba": {"CNPJ": "41240105000103", "PLATAFORMA": "8250", "AG": "1689", "CONTA": "58145-0"},
-    "Petrocal": {"CNPJ": "12781233000158", "PLATAFORMA": "7948", "AG": "8251", "CONTA": "44190-6"},
-    "Posto Sapucaia": {"CNPJ": "22787055000126", "PLATAFORMA": "0352", "AG": "1334", "CONTA": "57853-9"},
-    "PetroMix": {"CNPJ": "05684913000198", "PLATAFORMA": "7948", "AG": "8251", "CONTA": "99886-3"},
-    "Auto Posto M Timbozao": {"CNPJ": "04632746000179", "PLATAFORMA": "0352", "AG": "8296", "CONTA": "18100-4"},
-    "PetroVel": {"CNPJ": "01294927000144", "PLATAFORMA": "7948", "AG": "8251", "CONTA": "99887-1"},
-    "Posto Gasol Timbo III": {"CNPJ": "32179707000101", "PLATAFORMA": "0352", "AG": "8296", "CONTA": "06655-1"},
-    "Posto Timbozao Itaperuna": {"CNPJ": "25032853000136", "PLATAFORMA": "0352", "AG": "1334", "CONTA": "49413-3"},
-    "Posto Pioneiro": {"CNPJ": "23184831000166", "PLATAFORMA": "0352", "AG": "5255", "CONTA": "12888-5"},
+    "Transdourada":             {"CNPJ":"01259730000174","PLATAFORMA":"2939","AG":"1643","CONTA":"99451-8"},
+    "RPB":                      {"CNPJ":"07075892000139","PLATAFORMA":"8973","AG":"6627","CONTA":"06471-7"},
+    "Posto Arinos":             {"CNPJ":"05798923000154","PLATAFORMA":"8250","AG":"1364","CONTA":"98355-9"},
+    "Brasnorte":                {"CNPJ":"00514301000133","PLATAFORMA":"8250","AG":"1364","CONTA":"98654-5"},
+    "Mirian Varzea":            {"CNPJ":"16519674000137","PLATAFORMA":"8250","AG":"1689","CONTA":"05136-3"},
+    "Mirian Cuiaba":            {"CNPJ":"41240105000103","PLATAFORMA":"8250","AG":"1689","CONTA":"58145-0"},
+    "Petrocal":                 {"CNPJ":"12781233000158","PLATAFORMA":"7948","AG":"8251","CONTA":"44190-6"},
+    "Posto Sapucaia":           {"CNPJ":"22787055000126","PLATAFORMA":"0352","AG":"1334","CONTA":"57853-9"},
+    "PetroMix":                 {"CNPJ":"05684913000198","PLATAFORMA":"7948","AG":"8251","CONTA":"99886-3"},
+    "Auto Posto M Timbozao":    {"CNPJ":"04632746000179","PLATAFORMA":"0352","AG":"8296","CONTA":"18100-4"},
+    "PetroVel":                 {"CNPJ":"01294927000144","PLATAFORMA":"7948","AG":"8251","CONTA":"99887-1"},
+    "Posto Gasol Timbo III":    {"CNPJ":"32179707000101","PLATAFORMA":"0352","AG":"8296","CONTA":"06655-1"},
+    "Posto Timbozao Itaperuna": {"CNPJ":"25032853000136","PLATAFORMA":"0352","AG":"1334","CONTA":"49413-3"},
+    "Posto Pioneiro":           {"CNPJ":"23184831000166","PLATAFORMA":"0352","AG":"5255","CONTA":"12888-5"},
 }
- 
+
 LIMITE_CLIENT_URLS = {
     "Transdourada":  "https://digital.itau/CF_Digital/IntegracaoQK/IntegracaoQK/redir.aspx?usuario=987400146&senha=1R10K6&tppes=J&subgrupo=01259730000174&plataforma=2939&ambiente=PRD#/omni/",
     "RPB":           "https://digital.itau/CF_Digital/IntegracaoQK/IntegracaoQK/redir.aspx?usuario=987400146&senha=1D1AK3&tppes=J&subgrupo=26727190000137&plataforma=8973&ambiente=PRD#/omni/",
@@ -120,1188 +125,1210 @@ LIMITE_CLIENT_URLS = {
     "Petrocal":      "https://digital.itau/CF_Digital/IntegracaoQK/IntegracaoQK/redir.aspx?usuario=987400146&senha=1H1UK3&tppes=J&subgrupo=12781233000158&plataforma=7948&ambiente=PRD",
     "Posto Sapucaia":"https://digital.itau/CF_Digital/IntegracaoQK/IntegracaoQK/redir.aspx?usuario=987400146&senha=1H1UK3&tppes=J&subgrupo=32179707000101&plataforma=0352&ambiente=PRD#/omni/",
 }
- 
+
 LIMITE_SHARED_RESULTS = {
     "Posto Arinos":   ["Brasnorte"],
     "Mirian Varzea":  ["Mirian Cuiaba"],
-    "Petrocal":       ["PetroMix", "PetroVel"],
-    "Posto Sapucaia": ["Auto Posto M Timbozao", "Posto Gasol Timbo III", "Posto Timbozao Itaperuna", "Posto Pioneiro"],
+    "Petrocal":       ["PetroMix","PetroVel"],
+    "Posto Sapucaia": ["Auto Posto M Timbozao","Posto Gasol Timbo III","Posto Timbozao Itaperuna","Posto Pioneiro"],
 }
- 
-RE_SPACES = re.compile(r"\s+")
-RE_CNPJ = re.compile(r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})")
-RE_CNPJ_LABEL = re.compile(r"CNPJ[^\d]*([\d./-]{14,20})", re.IGNORECASE)
-RE_VALOR_1 = re.compile(r"Valor\s+da\s+Opera[cç][aã]o[^\d]*(R\$\s*[\d\.,]+)", re.IGNORECASE)
-RE_VALOR_2 = re.compile(r"R\$\s*[\d\.]{1,},\d{2}")
-RE_VALOR_3 = re.compile(r"(R\$\s*[\d\.,]{3,})")
-RE_PLATAFORMA = re.compile(r"Plataforma\D{0,20}(\d{4})", re.IGNORECASE)
-RE_REGIAO_PLAT = re.compile(r"Regi[aã]o(?:\s+da)?\s+Plataforma\D{0,20}(\d{2})", re.IGNORECASE)
-RE_REGIAO = re.compile(r"Regi[aã]o\D{0,20}(\d{2})", re.IGNORECASE)
-RE_SPREAD_1 = re.compile(r"(?:Taxa\/Spread|Spread)\D{0,25}([\d\.,]+)\s*%?", re.IGNORECASE)
-RE_SPREAD_2 = re.compile(r"Spread\s+m[íi]nimo\D{0,25}([\d\.,]+)\s*%?", re.IGNORECASE)
-RE_PRAZO_MIN_1 = re.compile(r"Prazo\s+M[ií]n[ií]mo\s+NF\D{0,25}(\d{1,4})", re.IGNORECASE)
-RE_PRAZO_MAX_1 = re.compile(r"Prazo\s+M[áa]ximo\s+NF\D{0,25}(\d{1,4})", re.IGNORECASE)
-RE_MODALIDADE_1 = re.compile(r"Modalidade[:\s]+([^\n\.;]+)", re.IGNORECASE)
-RE_AUTORIZADAS_CSV = re.compile(r"\bautorizadas\s+csv\b", re.IGNORECASE)
-RE_AUTORIZADAS_SISPAG = re.compile(r"\bautorizadas\s+sispag\b", re.IGNORECASE)
-RE_RAZAO_1 = re.compile(r"Raz[aã]o\s+Social[:\s]*([^\n]+)", re.IGNORECASE)
-RE_RAZAO_ATE_PROXIMO = re.compile(
-    r"Raz[aã]o\s+Social\s*[:\s]*\s*(.+?)(?=\n\s*(?:CNPJ|Plataforma|Modalidade|Regi[aã]o|Conta\s+Corrente|Valor\s+da|Spread|Prazo)\b)",
-    re.IGNORECASE | re.DOTALL,
-)
-RE_CONTA_AG_CC = re.compile(r"\b(\d{4})\s*[/\s]\s*(\d{3,10}(?:[-‑–—−]\d)?)\b")
-RE_CONTA_LABEL = re.compile(r"conta\s+corrente(?:\s+do\s+cliente)?\s*[:\s-]*", re.IGNORECASE)
-RE_LIQ_CRED = re.compile(r"Cr[ée]dito\s+em\s+CC", re.IGNORECASE)
-RE_PREMIO = re.compile(r"com\s+pr[êe]mio", re.IGNORECASE)
- 
+
+MAPPED_CLIENTS = {"Transdourada","RPB","Posto Arinos","Mirian Varzea","Petrocal","Posto Sapucaia"}
+MIRROR_CLIENTS = {
+    "Brasnorte":"Posto Arinos","Mirian Cuiaba":"Mirian Varzea",
+    "PetroMix":"Petrocal","PetroVel":"Petrocal",
+    "Auto Posto M Timbozao":"Posto Sapucaia","Posto Gasol Timbo III":"Posto Sapucaia",
+    "Posto Timbozao Itaperuna":"Posto Sapucaia","Posto Pioneiro":"Posto Sapucaia",
+}
+
 REGIAO_TRADER_ESPEC = {
-    "21": ("Debora", "Vinicios Luz"),
-    "22": ("Thiago", "Paula Costa"),
-    "23": ("Thiago", "Paula Costa"),
-    "24": ("Gabriel", "Luiz Gustavo Sarmento"),
-    "25": ("Giovanna", "Lucas Capeli"),
-    "26": ("Gabriel", "Vinicios Luz"),
-    "28": ("Thiago", "Paula Costa"),
-    "29": ("Debora", "Renata Leviski"),
-    "30": ("Adriana", "Luiz Gustavo Sarmento"),
-    "32": ("Debora", "Renata Leviski"),
-    "33": ("Giovanna", "Lucas Capeli"),
+    "21":("Debora","Vinicios Luz"),"22":("Thiago","Paula Costa"),
+    "23":("Thiago","Paula Costa"),"24":("Gabriel","Luiz Gustavo Sarmento"),
+    "25":("Giovanna","Lucas Capeli"),"26":("Gabriel","Vinicios Luz"),
+    "28":("Thiago","Paula Costa"),"29":("Debora","Renata Leviski"),
+    "30":("Adriana","Luiz Gustavo Sarmento"),"32":("Debora","Renata Leviski"),
+    "33":("Giovanna","Lucas Capeli"),
 }
- 
- 
+
+# ─────────────────────────────────────────────
+#  REGEX EXTRAÇÃO PDF
+# ─────────────────────────────────────────────
+RE_SPACES        = re.compile(r"\s+")
+RE_CNPJ          = re.compile(r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})")
+RE_CNPJ_LABEL    = re.compile(r"CNPJ[^\d]*([\d./-]{14,20})", re.IGNORECASE)
+RE_VALOR_1       = re.compile(r"Valor\s+da\s+Opera[cç][aã]o[^\d]*(R\$\s*[\d\.,]+)", re.IGNORECASE)
+RE_VALOR_2       = re.compile(r"R\$\s*[\d\.]{1,},\d{2}")
+RE_VALOR_3       = re.compile(r"(R\$\s*[\d\.,]{3,})")
+RE_PLATAFORMA    = re.compile(r"Plataforma\D{0,20}(\d{4})", re.IGNORECASE)
+RE_REGIAO_PLAT   = re.compile(r"Regi[aã]o(?:\s+da)?\s+Plataforma\D{0,20}(\d{2})", re.IGNORECASE)
+RE_REGIAO        = re.compile(r"Regi[aã]o\D{0,20}(\d{2})", re.IGNORECASE)
+RE_SPREAD_1      = re.compile(r"(?:Taxa\/Spread|Spread)\D{0,25}([\d\.,]+)\s*%?", re.IGNORECASE)
+RE_SPREAD_2      = re.compile(r"Spread\s+m[íi]nimo\D{0,25}([\d\.,]+)\s*%?", re.IGNORECASE)
+RE_PRAZO_MIN_1   = re.compile(r"Prazo\s+M[ií]n[ií]mo\s+NF\D{0,25}(\d{1,4})", re.IGNORECASE)
+RE_PRAZO_MAX_1   = re.compile(r"Prazo\s+M[áa]ximo\s+NF\D{0,25}(\d{1,4})", re.IGNORECASE)
+RE_MODALIDADE_1  = re.compile(r"Modalidade[:\s]+([^\n\.;]+)", re.IGNORECASE)
+RE_AUTORIZADAS_CSV   = re.compile(r"\bautorizadas\s+csv\b", re.IGNORECASE)
+RE_AUTORIZADAS_SIS   = re.compile(r"\bautorizadas\s+sispag\b", re.IGNORECASE)
+RE_RAZAO_1       = re.compile(r"Raz[aã]o\s+Social[:\s]*([^\n]+)", re.IGNORECASE)
+RE_RAZAO_ATE     = re.compile(r"Raz[aã]o\s+Social\s*[:\s]*\s*(.+?)(?=\n\s*(?:CNPJ|Plataforma|Modalidade|Regi[aã]o|Conta\s+Corrente|Valor\s+da|Spread|Prazo)\b)", re.IGNORECASE|re.DOTALL)
+RE_CONTA_AG_CC   = re.compile(r"\b(\d{4})\s*[/\s]\s*(\d{3,10}(?:[-‑–—−]\d)?)\b")
+RE_CONTA_LABEL   = re.compile(r"conta\s+corrente(?:\s+do\s+cliente)?\s*[:\s-]*", re.IGNORECASE)
+RE_LIQ_CRED      = re.compile(r"Cr[ée]dito\s+em\s+CC", re.IGNORECASE)
+RE_PREMIO        = re.compile(r"com\s+pr[êe]mio", re.IGNORECASE)
+
+# ─────────────────────────────────────────────
+#  FUNÇÕES UTILITÁRIAS
+# ─────────────────────────────────────────────
 def app_base_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
- 
- 
+    return os.path.dirname(sys.executable) if getattr(sys,"frozen",False) else os.path.dirname(os.path.abspath(__file__))
+
 def resource_path(p):
-    base = getattr(sys, "_MEIPASS", app_base_dir())
-    return os.path.join(base, p)
- 
- 
+    return os.path.join(getattr(sys,"_MEIPASS",app_base_dir()), p)
+
 def only_digits(s):
-    return re.sub(r"\D", "", s or "")
- 
- 
-def format_cnpj(c):
-    return only_digits(c or "")
- 
- 
-def normalize_hyphens(s):
-    return (s or "").replace("‑", "-").replace("–", "-").replace("—", "-").replace("−", "-")
- 
- 
-def normalize_razao_social_text(s):
-    if not s:
-        return s
-    t = normalize_hyphens(s)
-    t = t.replace("\u00a0", " ").replace("\u200b", "").replace("\ufeff", "")
-    t = RE_SPACES.sub(" ", t).strip()
-    return t
- 
- 
+    return re.sub(r"\D","",s or "")
+
 def normalize_text_variants(t):
-    return RE_SPACES.sub(" ", t).strip(), re.sub(r"\s+", "", t or "")
- 
- 
+    return RE_SPACES.sub(" ",t).strip(), re.sub(r"\s+","",t or "")
+
 def extract_text_from_pdf(p):
     r = PdfReader(p, strict=False)
-    layout_parts = []
-    plain_parts = []
+    lo, pl = [], []
     for pg in r.pages:
-        layout = ""
-        plain = ""
         try:
-            try:
-                layout = pg.extract_text(extraction_mode="layout") or ""
-            except TypeError:
-                layout = pg.extract_text() or ""
-        except Exception:
-            layout = ""
-        try:
-            plain = pg.extract_text() or ""
-        except Exception:
-            plain = layout
-        layout_parts.append(layout)
-        plain_parts.append(plain)
-    return "\n".join(layout_parts), "\n".join(plain_parts)
- 
- 
-def find_first(P, t):
-    for pat in P:
-        m = pat.search(t)
-        if m:
-            return m
-    return None
- 
- 
+            try: lo.append(pg.extract_text(extraction_mode="layout") or "")
+            except TypeError: lo.append(pg.extract_text() or "")
+        except: lo.append("")
+        try: pl.append(pg.extract_text() or "")
+        except: pl.append(lo[-1])
+    return "\n".join(lo), "\n".join(pl)
+
 def normalize_modalidade(m):
-    s = (m or "").strip()
-    s = RE_SPACES.sub(" ", s)
-    sl = s.lower()
-    if "sispag" in sl.replace(" ", ""):
-        return "Autorizadas SISPAG"
-    if RE_AUTORIZADAS_SISPAG.search(s):
-        return "Autorizadas SISPAG"
-    if RE_AUTORIZADAS_CSV.search(s):
-        return "Autorizadas CSV"
-    if re.search(r"\bsispag\b", s, re.IGNORECASE):
-        return "Autorizadas SISPAG"
-    if re.search(r"\bcsv\b", s, re.IGNORECASE):
-        return "Autorizadas CSV"
+    s = RE_SPACES.sub(" ", (m or "").strip()); sl = s.lower().replace(" ","")
+    if "sispag" in sl: return "Autorizadas SISPAG"
+    if RE_AUTORIZADAS_SIS.search(s): return "Autorizadas SISPAG"
+    if RE_AUTORIZADAS_CSV.search(s): return "Autorizadas CSV"
+    if re.search(r"\bsispag\b",s,re.I): return "Autorizadas SISPAG"
+    if re.search(r"\bcsv\b",s,re.I): return "Autorizadas CSV"
     return s
- 
- 
-def infer_troca_from_modalidade(m):
-    m = (m or "").strip()
-    ml = m.lower()
-    compact = ml.replace(" ", "")
-    if "sispag" in compact:
-        return "Sispag"
-    if re.search(r"\bsispag\b", m, re.IGNORECASE):
-        return "Sispag"
-    if re.search(r"\bcsv\b", m, re.IGNORECASE) or "csv" in compact:
-        return "CSV"
+
+def infer_troca(m):
+    ml = (m or "").lower().replace(" ","")
+    if "sispag" in ml: return "Sispag"
     return "CSV"
- 
- 
+
 def normalize_percent_br(p):
-    if not p:
-        return ""
-    v = p.strip().replace(" ", "").replace(",", ".")
+    if not p: return ""
+    v = p.strip().replace(" ","").replace(",",".")
     try:
-        n = float(re.sub(r"[^\d\.]", "", v))
-        return f"{int(n)},00% a.a." if n.is_integer() else f"{n:.2f}".replace(".", ",") + "% a.a."
-    except Exception:
-        v = p.strip().replace(".", ",")
-        if not v.endswith("%"):
-            v += "%"
-        return v + ("" if "a.a" in v.lower() else " a.a.")
- 
- 
-def sanitize_razao_social_display(s: str) -> str:
-    if not s:
-        return s
-    s = normalize_razao_social_text(s)
-    s = re.sub(r"\s*\(\s*/[^)]+\)", "", s)
-    s = re.sub(r"\s*\(\s*[^)]*[/\\][^)]+\)", "", s)
-    s = re.sub(r"\s*\(\s*[A-Za-z0-9]{14,}\s*\)", "", s)
-    s = re.split(r"\bCNPJ\b", s, maxsplit=1, flags=re.I)[0]
-    s = re.sub(r"\s*\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\s*$", "", s)
-    s = RE_SPACES.sub(" ", s).strip(" :-–—.,;")
-    return s
- 
- 
-def _razao_end_markers():
-    return [
-        re.compile(r"\bCNPJ\b", re.I),
-        re.compile(r"\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}"),
-        re.compile(r"\bPlataforma\b", re.I),
-        re.compile(r"\bModalidade\b", re.I),
-        re.compile(r"\bRegi[aã]o\b", re.I),
-        re.compile(r"Conta\s+Corrente", re.I),
-        re.compile(r"\bValor\s+da\s+Opera", re.I),
-    ]
- 
- 
-def _extract_razao_between_labels(t: str) -> str | None:
-    m = re.search(r"raz[aã]o\s+social\s*[:\s]*", t, re.I)
-    if not m:
-        return None
-    rest = t[m.end():]
-    end = len(rest)
-    for pat in _razao_end_markers():
-        rm = pat.search(rest)
-        if rm is not None and rm.start() < end:
-            end = rm.start()
-    chunk = rest[:end].strip()
-    if "\n\n" in chunk:
-        chunk = chunk.split("\n\n")[0].strip()
-    if len(chunk) < 2:
-        return None
-    return chunk
- 
- 
-def _is_razao_stop_line(ln: str) -> bool:
-    s = (ln or "").strip()
-    if not s:
-        return False
-    low = s.lower()
-    if re.match(r"^\s*cnpj\b", low): return True
-    if re.match(r"^\s*plataforma\b", low): return True
-    if re.match(r"^\s*modalidade\b", low): return True
-    if re.match(r"^\s*regi[aã]o\b", low): return True
-    if re.match(r"^\s*conta\s+corrente", low): return True
-    if re.match(r"^\s*valor\s+da\s+opera", low): return True
-    if re.match(r"^\s*spread\b", low): return True
-    if re.match(r"^\s*prazo\b", low): return True
-    if re.match(r"^\s*liquida", low): return True
-    if len(only_digits(s)) >= 14 and len(s) < 40: return True
-    return False
- 
- 
-def _extract_razao_line_block(lines: list[str]) -> str | None:
-    for i, line in enumerate(lines):
-        if not re.search(r"raz[aã]o\s+social", line, re.I):
-            continue
-        m = re.search(r"raz[aã]o\s+social\s*[:\s]*\s*(.+)$", line, re.I)
-        if m:
-            rest = m.group(1).strip()
-            if rest and len(rest) >= 2 and not re.match(r"^[\d./\s\-]+$", rest):
-                if not _is_razao_stop_line(rest):
-                    return rest
-        parts = []
-        for j in range(i + 1, min(i + 25, len(lines))):
-            ln = lines[j].strip()
-            if not ln:
-                if parts: break
-                continue
-            if _is_razao_stop_line(ln): break
-            if re.search(r"[A-Za-zÀ-ÿ0-9]", ln):
-                parts.append(ln)
-        if parts:
-            return " ".join(parts)
-    return None
- 
- 
-def _extract_razao_regex_blocks(t: str) -> str | None:
-    m = RE_RAZAO_ATE_PROXIMO.search(t)
-    if m:
-        c = RE_SPACES.sub(" ", m.group(1).strip()).strip()
-        if len(c) >= 2: return c
-    m = RE_RAZAO_1.search(t)
-    if m:
-        c = m.group(1).strip()
-        if not re.match(r"^[(/\s]*\d", c):
-            c = RE_SPACES.sub(" ", c).strip()
-            if len(c) >= 2: return c
-    m = re.search(r"Raz[aã]o\s+Social\s*[:\s]*\s*(.+?)(?=\n\s*\n|\Z)", t, re.I | re.DOTALL)
-    if m:
-        c = RE_SPACES.sub(" ", m.group(1).strip()).strip()
-        if len(c) >= 2: return c
-    return None
- 
- 
+        n = float(re.sub(r"[^\d\.]","",v))
+        return f"{int(n)},00% a.a." if n.is_integer() else f"{n:.2f}".replace(".",",")+"%  a.a."
+    except:
+        v = p.strip().replace(".",",")
+        if not v.endswith("%"): v += "%"
+        return v+("" if "a.a" in v.lower() else " a.a.")
+
+def trader_espec_from_regiao(reg):
+    d = only_digits(reg)
+    if len(d) >= 2:
+        return REGIAO_TRADER_ESPEC.get(d[-2:], ("",""))
+    m = RE_REGIAO_PLAT.search(reg) or RE_REGIAO.search(reg)
+    if m: return REGIAO_TRADER_ESPEC.get(m.group(1),("",""))
+    return ("","")
+
+def sanitize_razao(s):
+    if not s: return s
+    s = RE_SPACES.sub(" ", s).strip()
+    s = re.sub(r"\s*\(\s*/[^)]+\)","",s)
+    s = re.split(r"\bCNPJ\b",s,maxsplit=1,flags=re.I)[0]
+    s = re.sub(r"\s*\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\s*$","",s)
+    return RE_SPACES.sub(" ",s).strip(" :-–—.,;")
+
+def _razao_stop(ln):
+    s = (ln or "").strip().lower()
+    if not s: return False
+    return bool(re.match(r"^\s*(?:cnpj|plataforma|modalidade|regi[aã]o|conta\s+corrente|valor\s+da\s+opera|spread|prazo|liquida)\b",s)) \
+           or (len(only_digits(s))>=14 and len(s)<40)
+
 def extract_razao_social(t, lines, tn, tc, t_plain=None):
-    for block in ([t] + ([t_plain] if t_plain else [])):
-        if not block: continue
-        r = _extract_razao_between_labels(block)
-        if r: return sanitize_razao_social_display(r)
-        r = _extract_razao_line_block(block.splitlines())
-        if r: return sanitize_razao_social_display(r)
-        r = _extract_razao_regex_blocks(block)
-        if r: return sanitize_razao_social_display(r)
-    idx = tc.lower().find("razaosocial")
-    if idx != -1:
-        tail = tc[idx: idx + 220]
-        m2 = re.search(r"razaosocial[:\-]?(.*?)(cnpj|\d{11,})", tail, re.I)
-        if m2:
-            c = m2.group(1).strip(" :-")
-            if len(c) >= 4: return sanitize_razao_social_display(c)
+    for blk in ([t]+([t_plain] if t_plain else [])):
+        if not blk: continue
+        m = re.search(r"raz[aã]o\s+social\s*[:\s]*",blk,re.I)
+        if m:
+            rest = blk[m.end():]; end = len(rest)
+            for pat in [re.compile(r"\bCNPJ\b",re.I), RE_CNPJ,
+                        re.compile(r"\bPlataforma\b",re.I), re.compile(r"\bModalidade\b",re.I)]:
+                rm = pat.search(rest)
+                if rm and rm.start() < end: end = rm.start()
+            chunk = rest[:end].strip()
+            if "\n\n" in chunk: chunk = chunk.split("\n\n")[0].strip()
+            if len(chunk) >= 2: return sanitize_razao(chunk)
     return None
- 
- 
+
 def extract_cnpj(t, tn, tc):
     m = RE_CNPJ_LABEL.search(t)
     if m: return m.group(1).strip()
     m = RE_CNPJ.search(t)
     if m: return m.group(1).strip()
-    m2 = re.search(r"cnpj.*?(\d{14})", tc, re.IGNORECASE)
-    if m2: return m2.group(1)
+    m = re.search(r"cnpj.*?(\d{14})",tc,re.I)
+    if m: return m.group(1)
     return None
- 
- 
-def trader_espec_from_regiao(reg: str):
-    reg = (reg or "").strip()
-    d = only_digits(reg)
-    if len(d) >= 2:
-        key = d[-2:]
-        return REGIAO_TRADER_ESPEC.get(key, ("", ""))
-    m = RE_REGIAO_PLAT.search(reg) or RE_REGIAO.search(reg)
-    if m: return REGIAO_TRADER_ESPEC.get(m.group(1), ("", ""))
-    return ("", "")
- 
- 
-def premio_str(prem: str) -> str:
-    if re.search(r"\bcom\s+pr", prem or "", re.IGNORECASE):
-        return "com prêmio"
-    return "sem prêmio"
- 
- 
-def _sanitize_conta_corrente(val: str) -> str:
-    val = (val or "").strip()
-    if not val: return val
-    for splitter in (r"\bCNPJ\b", r"\bPlataforma\b", r"\bModalidade\b", r"\bRegi[aã]o\b", r"\bRaz[aã]o\s+Social\b", r"\bValor\s+da\s+Opera"):
-        val = re.split(splitter, val, maxsplit=1, flags=re.I)[0].strip()
-    val = re.sub(r"\s*\([^)]*[/\\][^)]*\)", "", val)
-    val = re.sub(r"\s*\(\s*[A-Za-z0-9]{12,}\s*\)", "", val)
-    val = RE_SPACES.sub(" ", val).strip(" :-–—.,;")
-    return val
- 
- 
-def _conta_stop_line(ln: str) -> bool:
-    low = (ln or "").strip().lower()
-    if not low: return True
-    return bool(re.match(r"^\s*(?:cnpj|plataforma|modalidade|regi[aã]o|raz[aã]o\s+social|valor|spread|prazo)\b", low))
- 
- 
+
 def extract_conta_corrente(lines, tn, tc):
     for hay in (tn, tc):
         if not hay: continue
         m = RE_CONTA_AG_CC.search(hay)
         if m: return f"{m.group(1)} / {m.group(2)}"
-    for i, line in enumerate(lines):
-        if not re.search(r"conta\s+corrente", line, re.I): continue
+    for i,line in enumerate(lines):
+        if not re.search(r"conta\s+corrente",line,re.I): continue
         mm = RE_CONTA_LABEL.search(line)
         if not mm: continue
         rest = line[mm.end():].strip()
-        if rest and not _conta_stop_line(rest): return _sanitize_conta_corrente(rest)
-        if i + 1 < len(lines):
-            nxt = lines[i + 1].strip()
-            if nxt and not _conta_stop_line(nxt): return _sanitize_conta_corrente(nxt)
-    m = RE_CONTA_LABEL.search(tn)
-    if m:
-        tail = tn[m.end(): m.end() + 120]
-        tail = tail.split("\n")[0].strip()
-        if tail: return _sanitize_conta_corrente(tail)
+        if rest and not _razao_stop(rest): return rest
+        if i+1 < len(lines):
+            nxt = lines[i+1].strip()
+            if nxt and not _razao_stop(nxt): return nxt
     return None
- 
- 
+
 def extract_plataforma(t, tn, tc):
     m = RE_PLATAFORMA.search(tn) or RE_PLATAFORMA.search(t)
     return m.group(1) if m else None
- 
- 
-def extract_regiao_plataforma(t, tn, tc):
+
+def extract_regiao(t, tn, tc):
     m = RE_REGIAO_PLAT.search(tn) or RE_REGIAO_PLAT.search(t)
     if m: return m.group(1)
     m = RE_REGIAO.search(tn) or RE_REGIAO.search(t)
     return m.group(1) if m else None
- 
- 
-def extract_valor_operacao(t, tn, tc):
-    m = find_first([RE_VALOR_1, RE_VALOR_2, RE_VALOR_3], tn)
-    return m.group(1).strip() if m else None
- 
- 
+
+def extract_valor(t, tn, tc):
+    for pat in [RE_VALOR_1, RE_VALOR_2, RE_VALOR_3]:
+        m = pat.search(tn)
+        if m: return (m.group(1) if pat is RE_VALOR_1 else m.group(0)).strip()
+    return None
+
 def extract_spread(t, tn, tc):
-    m = find_first([RE_SPREAD_1, RE_SPREAD_2], tn)
+    m = RE_SPREAD_1.search(tn) or RE_SPREAD_2.search(tn)
     return m.group(1).strip() if m else None
- 
- 
-def extract_prazo_minimo_nf(t, tn, tc):
+
+def extract_prazo_min(t, tn, tc):
     m = RE_PRAZO_MIN_1.search(tn)
     return m.group(1) if m else None
- 
- 
-def extract_prazo_maximo_nf(t, tn, tc):
+
+def extract_prazo_max(t, tn, tc):
     m = RE_PRAZO_MAX_1.search(tn)
     return m.group(1) if m else None
- 
- 
+
 def extract_modalidade(t, tn, tc):
     for hay in (tn, t, tc):
         if not hay: continue
         m = RE_MODALIDADE_1.search(hay)
         if m: return normalize_modalidade(m.group(1).strip())
     return None
- 
- 
-class HomeFrame(ttk.Frame):
-    CLIENTS = [
-        "Posto Arinos", "Auto Posto M Timbozao", "Posto Sapucaia", "Brasnorte",
-        "Mirian Varzea", "Mirian Cuiaba", "RPB", "Petrocal", "PetroMix",
-        "Transdourada", "PetroVel", "Posto Gasol Timbo III",
-        "Posto Timbozao Itaperuna", "Posto Pioneiro",
+
+class BPMUserCancelled(Exception): pass
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  COMPONENTES VISUAIS REUTILIZÁVEIS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def make_hairline(parent, orient="h", **kwargs):
+    kw = {"bg": C["hair"]}
+    kw.update(kwargs)
+    if orient == "h":
+        return tk.Frame(parent, height=1, **kw)
+    else:
+        return tk.Frame(parent, width=1, **kw)
+
+
+def styled_label(parent, text, size=10, weight="normal", color=None, **kwargs):
+    return tk.Label(parent, text=text,
+                    font=("Georgia", size, weight) if weight == "bold" or size >= 14 else ("Segoe UI", size, weight),
+                    fg=color or C["ink"],
+                    bg=kwargs.pop("bg", C["surface"]),
+                    **kwargs)
+
+
+def styled_button(parent, text, command, accent=False, danger=False, small=False, **kwargs):
+    bg   = C["accent_dim"] if accent else (C["err_dim"] if danger else C["surface3"])
+    fg   = C["accent"] if accent else (C["err"] if danger else C["ink"])
+    abg  = C["accent"] if accent else (C["err"] if danger else C["surface2"])
+    afg  = C["bg"] if accent else C["ink"]
+    pad  = (8, 4) if small else (14, 7)
+    btn  = tk.Button(parent, text=text, command=command,
+                     bg=bg, fg=fg, activebackground=abg, activeforeground=afg,
+                     font=("Segoe UI", 8 if small else 9),
+                     relief="flat", bd=0, padx=pad[0], pady=pad[1],
+                     cursor="hand2", **kwargs)
+    btn.bind("<Enter>", lambda _: btn.configure(bg=abg, fg=afg))
+    btn.bind("<Leave>", lambda _: btn.configure(bg=bg, fg=fg))
+    return btn
+
+
+def styled_entry(parent, textvariable=None, width=20, show=None, **kwargs):
+    e = tk.Entry(parent, textvariable=textvariable, width=width, show=show or "",
+                 bg=C["bg"], fg=C["ink"], insertbackground=C["accent"],
+                 relief="flat", highlightthickness=1,
+                 highlightbackground=C["hair"], highlightcolor=C["accent"],
+                 font=("Segoe UI", 10), **kwargs)
+    return e
+
+
+def card_frame(parent, **kwargs):
+    kw = {"bg": C["surface"], "highlightthickness": 1,
+          "highlightbackground": C["hair"], "bd": 0}
+    kw.update(kwargs)
+    return tk.Frame(parent, **kw)
+
+
+# ─────────────────────────────────────────────
+#  SCROLLABLE FRAME
+# ─────────────────────────────────────────────
+class ScrollableFrame(tk.Frame):
+    def __init__(self, parent, bg=None, **kwargs):
+        bg = bg or C["bg"]
+        super().__init__(parent, bg=bg, **kwargs)
+        self._canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
+        self._vbar   = tk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._vbar.set)
+        self._vbar.pack(side="right", fill="y")
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self.inner   = tk.Frame(self._canvas, bg=bg)
+        self._win    = self._canvas.create_window((0,0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", self._on_inner)
+        self._canvas.bind("<Configure>", self._on_canvas)
+        self._canvas.bind_all("<MouseWheel>",  self._mw)
+        self._canvas.bind_all("<Button-4>",    self._mw)
+        self._canvas.bind_all("<Button-5>",    self._mw)
+
+    def _on_inner(self, _): self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+    def _on_canvas(self, e): self._canvas.itemconfigure(self._win, width=e.width)
+    def _mw(self, e):
+        if getattr(e,"delta",0): self._canvas.yview_scroll(int(-e.delta/120),"units")
+        elif e.num==4: self._canvas.yview_scroll(-3,"units")
+        elif e.num==5: self._canvas.yview_scroll(3,"units")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SIDEBAR  (navegação permanente à esquerda)
+# ═══════════════════════════════════════════════════════════════════════════════
+class Sidebar(tk.Frame):
+    NAV = [
+        ("Home",             "⌂",  "Início"),
+        ("Rotinas",          "◈",  "Rotinas"),
+        ("Share",            "⊕",  "Cadastro Share"),
+        ("BPM",              "⚡",  "BPM"),
+        ("LimitesInvertido", "⬡",  "Limites Invertido"),
     ]
- 
-    def __init__(self, parent, controller):
-        super().__init__(parent, style="Root.TFrame")
+
+    def __init__(self, parent, controller, **kwargs):
+        super().__init__(parent, bg=C["surface"], width=200, **kwargs)
+        self.pack_propagate(False)
         self.controller = controller
-        self.COLORS = controller.COLORS
-        self._mode_dialog = None
-        self._mode_overlay = None
-        self._dialog_body = None
-        self._selected_clients = {}
-        self._confirm_btn = None
-        self._cred_continue_btn = None
-        self._bpm_func_var = None
-        self._bpm_senha_var = None
-        self._build_ui()
- 
-    def _build_ui(self):
-        bg = self.COLORS["bg"]
+        self._btns = {}
+        self._build()
 
-        outer = tk.Frame(self, bg=bg)
-        outer.pack(fill="both", expand=True)
-        center = tk.Frame(outer, bg=bg)
-        center.place(relx=0.5, rely=0.5, anchor="center")
+    def _build(self):
+        # Logo / título
+        top = tk.Frame(self, bg=C["surface"])
+        top.pack(fill="x", padx=16, pady=(22, 0))
 
-        # Logo + titulo
-        logo_row = tk.Frame(center, bg=bg)
-        logo_row.pack()
-        self.logo_label = tk.Label(logo_row, bg=bg)
-        lp = resource_path(LOGO_FILENAME)
-        if os.path.exists(lp):
-            try:
-                img = tk.PhotoImage(file=lp)
-                img2 = img.subsample(2, 2)
-                self._logo_ref = img2
-                self.logo_label.configure(image=img2)
-                self.logo_label.pack(side="left", padx=(0, 12))
-            except Exception:
-                pass
-        title_col = tk.Frame(logo_row, bg=bg)
-        title_col.pack(side="left")
-        title_row = tk.Frame(title_col, bg=bg)
-        title_row.pack(anchor="w")
-        tk.Label(title_row, text="Mesa", bg=bg, fg="#f2f2f2",
-                 font=("Segoe UI", 20, "bold")).pack(side="left")
-        tk.Label(title_row, text="Itaú", bg=bg, fg="#ec7000",
-                 font=("Segoe UI", 20, "bold")).pack(side="left", padx=(6, 0))
-        tk.Label(title_col, text="Risco Sacado", bg=bg, fg="#ec7000",
-                 font=("Segoe UI", 10)).pack(anchor="w")
+        logo_row = tk.Frame(top, bg=C["surface"])
+        logo_row.pack(fill="x")
+        tk.Label(logo_row, text="Mesa", bg=C["surface"], fg=C["ink"],
+                 font=("Georgia", 14, "bold")).pack(side="left")
+        tk.Label(logo_row, text=" Itaú", bg=C["surface"], fg=C["accent"],
+                 font=("Georgia", 14, "bold")).pack(side="left")
+        tk.Label(top, text="Risco Sacado", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(2,0))
 
-        # Divisor
-        tk.Frame(center, bg="#1e1e1e", height=1).pack(fill="x", pady=(24, 20))
+        make_hairline(self).pack(fill="x", padx=0, pady=(16, 12))
 
-        tk.Label(center, text="MODULOS", bg=bg, fg="#2e2e2e",
-                 font=("Segoe UI", 8, "bold")).pack(pady=(0, 12))
+        # Nav links
+        nav_frame = tk.Frame(self, bg=C["surface"])
+        nav_frame.pack(fill="x", padx=10)
 
-        # Grid 2 colunas usando grid geometry manager
-        cards_frame = tk.Frame(center, bg=bg)
-        cards_frame.pack()
-        cards_frame.columnconfigure(0, weight=1, uniform="c")
-        cards_frame.columnconfigure(1, weight=1, uniform="c")
+        for name, icon, label in self.NAV:
+            btn_frame = tk.Frame(nav_frame, bg=C["surface"], cursor="hand2")
+            btn_frame.pack(fill="x", pady=1)
+            icon_lbl = tk.Label(btn_frame, text=icon, bg=C["surface"], fg=C["ink_muted"],
+                                font=("Segoe UI", 11), width=3, anchor="e")
+            icon_lbl.pack(side="left")
+            text_lbl = tk.Label(btn_frame, text=label, bg=C["surface"], fg=C["ink_muted"],
+                                font=("Segoe UI", 9), anchor="w")
+            text_lbl.pack(side="left", padx=(6,0))
+            accent_bar = tk.Frame(btn_frame, bg=C["surface"], width=3)
+            accent_bar.pack(side="right", fill="y")
 
-        def _make_card(parent, col, title, subtitle, accent, command):
-            border = "#1a3d28" if accent else "#1f1f1f"
-            card_bg = "#111c15" if accent else "#161616"
-            bar_color = "#2fb875" if accent else "#242424"
-            title_fg = "#e8e8e8" if accent else "#b0b0b0"
-            sub_fg = "#2a7a50" if accent else "#3a3a3a"
+            def on_click(n=name): self.controller.show_frame(n)
+            def on_enter(e, f=btn_frame, il=icon_lbl, tl=text_lbl):
+                f.configure(bg=C["surface2"]); il.configure(bg=C["surface2"]); tl.configure(bg=C["surface2"])
+            def on_leave(e, f=btn_frame, il=icon_lbl, tl=text_lbl, n=name):
+                active = getattr(self.controller, "_active_frame", None)
+                if active != n:
+                    f.configure(bg=C["surface"]); il.configure(bg=C["surface"]); tl.configure(bg=C["surface"])
 
-            wrap = tk.Frame(parent, bg=card_bg, highlightthickness=1,
-                            highlightbackground=border, cursor="hand2")
-            wrap.grid(row=0, column=col, sticky="nsew",
-                      padx=(0, 6) if col == 0 else (6, 0))
+            for w in (btn_frame, icon_lbl, text_lbl):
+                w.bind("<Button-1>", lambda _,n=name: on_click(n))
+                w.bind("<Enter>", on_enter)
+                w.bind("<Leave>", on_leave)
 
-            tk.Frame(wrap, bg=bar_color, height=2).pack(fill="x")
+            self._btns[name] = {
+                "frame": btn_frame, "icon": icon_lbl,
+                "text": text_lbl, "bar": accent_bar
+            }
 
-            body = tk.Frame(wrap, bg=card_bg, padx=16, pady=14)
-            body.pack(fill="both", expand=True)
+        # Data/hora rodapé
+        self._clock_lbl = tk.Label(self, text="", bg=C["surface"], fg=C["ink_faint"],
+                                   font=("Segoe UI", 8))
+        self._clock_lbl.pack(side="bottom", pady=10)
+        self._tick_clock()
 
-            tk.Label(body, text=title, bg=card_bg, fg=title_fg,
-                     font=("Segoe UI", 11, "bold")).pack(anchor="w")
-            tk.Label(body, text=subtitle, bg=card_bg, fg=sub_fg,
-                     font=("Segoe UI", 8), wraplength=140,
-                     justify="left").pack(anchor="w", pady=(4, 0))
+    def _tick_clock(self):
+        now = datetime.now()
+        self._clock_lbl.configure(text=now.strftime("%d/%m  %H:%M"))
+        self.after(30_000, self._tick_clock)
 
-            def on_enter(_):
-                hbg = "#152416" if accent else "#1c1c1c"
-                hbd = "#2fb875" if accent else "#2e2e2e"
-                wrap.configure(bg=hbg, highlightbackground=hbd)
-                body.configure(bg=hbg)
-                for w in body.winfo_children():
-                    try: w.configure(bg=hbg)
-                    except Exception: pass
-
-            def on_leave(_):
-                wrap.configure(bg=card_bg, highlightbackground=border)
-                body.configure(bg=card_bg)
-                for w in body.winfo_children():
-                    try: w.configure(bg=card_bg)
-                    except Exception: pass
-
-            for widget in (wrap, body):
-                widget.bind("<Button-1>", lambda _e, cmd=command: cmd())
-                widget.bind("<Enter>", on_enter)
-                widget.bind("<Leave>", on_leave)
-            for child in body.winfo_children():
-                child.bind("<Button-1>", lambda _e, cmd=command: cmd())
-                child.bind("<Enter>", on_enter)
-                child.bind("<Leave>", on_leave)
-
-        _make_card(cards_frame, 0, "Cadastro Share", "Analise pdf - Share",
-                   accent=True, command=lambda: self.controller.show_frame("Share"))
-        _make_card(cards_frame, 1, "BPM", "Abertura das solicitações",
-                   accent=False, command=self.open_bpm_mode_dialog)
-
-        # Limites Invertido full-width
-        lim_bg = "#0f1a2a"
-        lim_border = "#1a2e45"
-        lim = tk.Frame(center, bg=lim_bg, highlightthickness=1,
-                       highlightbackground=lim_border, cursor="hand2")
-        lim.pack(fill="x", pady=(10, 0))
-        tk.Frame(lim, bg="#1e4060", height=2).pack(fill="x")
-        lim_inner = tk.Frame(lim, bg=lim_bg, padx=16, pady=12)
-        lim_inner.pack(fill="x")
-        tk.Label(lim_inner, text="Limites Invertido", bg=lim_bg, fg="#7ec8e3",
-                 font=("Segoe UI", 11, "bold")).pack(side="left")
-        tk.Label(lim_inner, text="Consulta do LTC e limites disponiveis",
-                 bg=lim_bg, fg="#1e4060", font=("Segoe UI", 8)).pack(side="left", padx=(10, 0))
-
-        def lim_cmd(): self.controller.show_frame("LimitesInvertido")
-        def lim_enter(_):
-            lim.configure(bg="#0d1f35", highlightbackground="#2a4d70")
-            lim_inner.configure(bg="#0d1f35")
-            for w in lim_inner.winfo_children():
-                try: w.configure(bg="#0d1f35")
-                except Exception: pass
-        def lim_leave(_):
-            lim.configure(bg=lim_bg, highlightbackground=lim_border)
-            lim_inner.configure(bg=lim_bg)
-            for w in lim_inner.winfo_children():
-                try: w.configure(bg=lim_bg)
-                except Exception: pass
-        for widget in (lim, lim_inner):
-            widget.bind("<Button-1>", lambda _e: lim_cmd())
-            widget.bind("<Enter>", lim_enter)
-            widget.bind("<Leave>", lim_leave)
-        for child in lim_inner.winfo_children():
-            child.bind("<Button-1>", lambda _e: lim_cmd())
-            child.bind("<Enter>", lim_enter)
-            child.bind("<Leave>", lim_leave)
-
-        # Rodape
-        tk.Label(center, text="Mesa de Operacao  ·  Risco Sacado  ·  Middle",
-                 bg=bg, fg="#242424", font=("Segoe UI", 8)).pack(pady=(26, 0))
- 
-    def open_bpm_mode_dialog(self):
-        if self._mode_overlay is not None and self._mode_overlay.winfo_exists():
-            self._mode_overlay.lift()
-            return
-        self.update_idletasks()
-        overlay = tk.Frame(self, bg="#121212", bd=0, highlightthickness=0)
-        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
-        overlay.lift()
-        self._mode_overlay = overlay
-        dialog = tk.Frame(overlay, bg="#1a1a1a", highlightthickness=1, highlightbackground="#2e2e2e", bd=0, padx=24, pady=28)
-        dialog.place(relx=0.5, rely=0.5, anchor="center", width=468)
-        self._mode_dialog = dialog
-        self._dialog_body = tk.Frame(dialog, bg="#1a1a1a")
-        self._dialog_body.pack(fill="both", expand=True)
-        self._render_mode_step()
-        overlay.bind("<Button-1>", lambda *_: self.close_bpm_mode_dialog())
-        dialog.bind("<Button-1>", lambda e: "break")
- 
-    def close_bpm_mode_dialog(self):
-        if self._mode_overlay is not None and self._mode_overlay.winfo_exists():
-            self._mode_overlay.destroy()
-        self._mode_dialog = None
-        self._mode_overlay = None
-        self._dialog_body = None
-        self._selected_clients = {}
-        self._confirm_btn = None
-        self._cred_continue_btn = None
-        self._bpm_func_var = None
-        self._bpm_senha_var = None
- 
-    def _clear_dialog_body(self):
-        if self._dialog_body is None: return
-        for child in self._dialog_body.winfo_children():
-            child.destroy()
- 
-    def _animate_dialog_step(self):
-        if (self._mode_dialog is None or not self._mode_dialog.winfo_exists()
-                or self._dialog_body is None or not self._dialog_body.winfo_exists()):
-            return
-        self._mode_dialog.update_idletasks()
-        start_y = 10
-        steps = 12
-        duration = 300
-        step_ms = max(1, duration // steps)
-        self._dialog_body.pack_forget()
-        self._dialog_body.place(x=0, y=start_y, relwidth=1, relheight=1)
- 
-        def tick(i=0):
-            if self._dialog_body is None or not self._dialog_body.winfo_exists(): return
-            y = start_y - int((start_y * i) / steps)
-            self._dialog_body.place_configure(y=y)
-            if i < steps:
-                self._dialog_body.after(step_ms, lambda: tick(i + 1))
+    def set_active(self, name):
+        for n, w in self._btns.items():
+            if n == name:
+                w["frame"].configure(bg=C["surface2"])
+                w["icon"].configure(bg=C["surface2"], fg=C["accent"])
+                w["text"].configure(bg=C["surface2"], fg=C["ink"])
+                w["bar"].configure(bg=C["accent"])
             else:
-                self._dialog_body.place_forget()
-                self._dialog_body.pack(fill="both", expand=True)
-        tick()
- 
-    def _render_mode_step(self):
-        self._clear_dialog_body()
-        card = self._dialog_body
-        active_bg = "#1f1f1f"
-        active_hover = "#292929"
-        active_border = "#343434"
-        accent = "#2fb875"
-        disabled_bg = "#171717"
-        disabled_fg = "#4d4d4d"
- 
-        tk.Label(card, text="Selecione o modo", bg="#1a1a1a", fg="#f2f2f2", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=24, pady=(28, 0))
-        tk.Label(card, text="Escolha como deseja operar.", bg="#1a1a1a", fg="#8c8c8c", font=("Segoe UI", 9)).pack(anchor="w", padx=24, pady=(2, 14))
- 
-        list_box = tk.Frame(card, bg="#1a1a1a")
-        list_box.pack(fill="x", padx=24, pady=(0, 6))
- 
-        active_card = tk.Frame(list_box, bg=active_bg, highlightthickness=1, highlightbackground=active_border, cursor="hand2", padx=20, pady=18)
-        active_card.pack(fill="x", pady=(0, 10))
-        head = tk.Frame(active_card, bg=active_bg)
+                w["frame"].configure(bg=C["surface"])
+                w["icon"].configure(bg=C["surface"], fg=C["ink_muted"])
+                w["text"].configure(bg=C["surface"], fg=C["ink_muted"])
+                w["bar"].configure(bg=C["surface"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HOME FRAME — dashboard
+# ═══════════════════════════════════════════════════════════════════════════════
+class HomeFrame(tk.Frame):
+    MODULES = [
+        {
+            "name":  "Cadastro Share",
+            "sub":   "Extração e análise de PDF",
+            "icon":  "⊕",
+            "frame": "Share",
+            "accent": False,
+        },
+        {
+            "name":  "BPM",
+            "sub":   "Abertura de solicitações",
+            "icon":  "⚡",
+            "frame": "BPM_CONFIG",
+            "accent": False,
+        },
+        {
+            "name":  "Limites Invertido",
+            "sub":   "Consulta LTC e limites disponíveis",
+            "icon":  "⬡",
+            "frame": "LimitesInvertido",
+            "accent": True,
+        },
+        {
+            "name":  "Rotinas",
+            "sub":   "Sequências configuráveis",
+            "icon":  "◈",
+            "frame": "Rotinas",
+            "accent": False,
+        },
+    ]
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._build()
+
+    def _build(self):
+        sf = ScrollableFrame(self)
+        sf.pack(fill="both", expand=True)
+        inner = sf.inner
+        inner.configure(bg=C["bg"])
+        inner.columnconfigure(0, weight=1)
+
+        # ── Saudação ──────────────────────────────
+        greet_frame = tk.Frame(inner, bg=C["bg"])
+        greet_frame.pack(fill="x", padx=40, pady=(36, 0))
+        now = datetime.now()
+        hour = now.hour
+        saudacao = "Bom dia" if hour < 12 else ("Boa tarde" if hour < 18 else "Boa noite")
+        tk.Label(greet_frame, text=f"{saudacao}.", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 22, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(greet_frame, text=now.strftime("%A, %d de %B de %Y").capitalize(),
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 10)).pack(anchor="w", pady=(4,0))
+
+        make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=40, pady=(24, 28))
+
+        # ── Módulos grid ─────────────────────────
+        tk.Label(inner, text="MÓDULOS", bg=C["bg"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=40, pady=(0,12))
+
+        grid_frame = tk.Frame(inner, bg=C["bg"])
+        grid_frame.pack(fill="x", padx=40)
+        grid_frame.columnconfigure(0, weight=1, uniform="mod")
+        grid_frame.columnconfigure(1, weight=1, uniform="mod")
+
+        for i, mod in enumerate(self.MODULES):
+            row, col = divmod(i, 2)
+            self._make_module_card(grid_frame, mod, row, col)
+
+        make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=40, pady=(32, 24))
+
+        # ── Atalhos rápidos ───────────────────────
+        tk.Label(inner, text="ATALHOS RÁPIDOS", bg=C["bg"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=40, pady=(0,10))
+
+        quick = tk.Frame(inner, bg=C["bg"])
+        quick.pack(fill="x", padx=40, pady=(0, 40))
+        for label, frame in [
+            ("→  Nova solicitação BPM",   "BPM_CONFIG"),
+            ("→  Consultar limites",       "LimitesInvertido"),
+            ("→  Extrair dados de PDF",    "Share"),
+            ("→  Gerenciar rotinas",       "Rotinas"),
+        ]:
+            btn = tk.Button(quick, text=label, command=lambda f=frame: self.controller.show_frame(f),
+                            bg=C["bg"], fg=C["ink_muted"], activebackground=C["surface"],
+                            activeforeground=C["ink"], font=("Segoe UI", 9),
+                            relief="flat", bd=0, anchor="w", padx=0, pady=5, cursor="hand2")
+            btn.pack(anchor="w")
+            btn.bind("<Enter>", lambda e, b=btn: b.configure(fg=C["accent"]))
+            btn.bind("<Leave>", lambda e, b=btn: b.configure(fg=C["ink_muted"]))
+
+        # rodapé
+        tk.Label(inner, text="Mesa de Operação  ·  Risco Sacado  ·  Middle",
+                 bg=C["bg"], fg=C["ink_faint"], font=("Segoe UI", 7)).pack(pady=(0, 20))
+
+    def _make_module_card(self, parent, mod, row, col):
+        is_accent = mod["accent"]
+        bg   = C["surface"]
+        bord = C["accent_dim"] if is_accent else C["hair"]
+        fg_name = C["accent"] if is_accent else C["ink"]
+        pad  = (0, 6) if col == 0 else (6, 0)
+
+        outer = tk.Frame(parent, bg=bg, highlightthickness=1, highlightbackground=bord,
+                         cursor="hand2")
+        outer.grid(row=row, column=col, sticky="nsew", padx=pad, pady=6)
+
+        top_bar = tk.Frame(outer, bg=C["accent"] if is_accent else C["hair"], height=2)
+        top_bar.pack(fill="x")
+
+        body = tk.Frame(outer, bg=bg, padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+
+        head = tk.Frame(body, bg=bg)
         head.pack(fill="x")
-        tk.Label(head, text="Invertido", bg=active_bg, fg="#ececec", font=("Segoe UI", 10, "normal")).pack(side="left")
-        arrow = tk.Label(head, text="->", bg=active_bg, fg=accent, font=("Segoe UI", 11, "bold"))
-        arrow.pack(side="right")
-        arrow.pack_forget()
-        tk.Label(active_card, text="Operacao disponivel agora para execucao.", bg=active_bg, fg="#9a9a9a", font=("Segoe UI", 9), justify="left", wraplength=380).pack(anchor="w", pady=(6, 0))
- 
-        def on_active_enter(_):
-            active_card.configure(bg=active_hover, highlightbackground=accent)
-            head.configure(bg=active_hover)
-            for w in head.winfo_children(): w.configure(bg=active_hover)
-            for w in active_card.winfo_children():
-                if isinstance(w, tk.Label): w.configure(bg=active_hover)
-            if not arrow.winfo_ismapped(): arrow.pack(side="right")
- 
-        def on_active_leave(_):
-            active_card.configure(bg=active_bg, highlightbackground=active_border)
-            head.configure(bg=active_bg)
-            for w in head.winfo_children(): w.configure(bg=active_bg)
-            for w in active_card.winfo_children():
-                if isinstance(w, tk.Label): w.configure(bg=active_bg)
-            if arrow.winfo_ismapped(): arrow.pack_forget()
- 
-        for widget in (active_card, head):
-            widget.bind("<Enter>", on_active_enter)
-            widget.bind("<Leave>", on_active_leave)
-            widget.bind("<Button-1>", lambda _e: self._render_credenciais_step())
-        for widget in active_card.winfo_children():
-            widget.bind("<Enter>", on_active_enter)
-            widget.bind("<Leave>", on_active_leave)
-            widget.bind("<Button-1>", lambda _e: self._render_credenciais_step())
- 
-        def disabled_option(title):
-            row = tk.Frame(list_box, bg=disabled_bg, padx=20, pady=18, cursor="no")
-            row.pack(fill="x", pady=(0, 10))
-            title_row = tk.Frame(row, bg=disabled_bg)
-            title_row.pack(fill="x")
-            tk.Label(title_row, text=title, bg=disabled_bg, fg=disabled_fg, font=("Segoe UI", 10, "normal")).pack(side="left")
-            badge = tk.Frame(title_row, bg="#333333", bd=0, padx=10, pady=2)
-            badge.pack(side="left", padx=(8, 0))
-            tk.Label(badge, text="EM BREVE", bg="#333333", fg="#737373", font=("Segoe UI", 7, "bold")).pack()
-            tk.Label(row, text="Modo indisponivel no momento.", bg=disabled_bg, fg=disabled_fg, font=("Segoe UI", 9), justify="left").pack(anchor="w", pady=(6, 0))
- 
-        disabled_option("Via Mesa")
-        disabled_option("Nova Plataforma")
-        ttk.Button(card, text="Fechar", style="Dark.TButton", command=self.close_bpm_mode_dialog).pack(anchor="e", padx=24, pady=(6, 24))
-        self._animate_dialog_step()
- 
-    @staticmethod
-    def _bpm_only_digits(s: str) -> str:
+        tk.Label(head, text=mod["icon"], bg=bg, fg=C["accent"], font=("Segoe UI",16)).pack(side="left")
+        tk.Label(body, text=mod["name"], bg=bg, fg=fg_name,
+                 font=("Segoe UI", 11, "bold"), anchor="w").pack(anchor="w", pady=(8,2))
+        tk.Label(body, text=mod["sub"], bg=bg, fg=C["ink_muted"],
+                 font=("Segoe UI", 8), anchor="w", wraplength=160, justify="left").pack(anchor="w")
+
+        def cmd(f=mod["frame"]): self.controller.show_frame(f)
+        def enter(e, o=outer, b=body, bg_h=C["surface2"]):
+            o.configure(bg=bg_h, highlightbackground=C["accent"])
+            b.configure(bg=bg_h)
+            for w in b.winfo_children():
+                try: w.configure(bg=bg_h)
+                except: pass
+            for w in head.winfo_children():
+                try: w.configure(bg=bg_h)
+                except: pass
+        def leave(e, o=outer, b=body):
+            o.configure(bg=bg, highlightbackground=bord)
+            b.configure(bg=bg)
+            for w in b.winfo_children():
+                try: w.configure(bg=bg)
+                except: pass
+            for w in head.winfo_children():
+                try: w.configure(bg=bg)
+                except: pass
+
+        for w in [outer, body, head] + list(body.winfo_children()) + list(head.winfo_children()):
+            try:
+                w.bind("<Button-1>", lambda _: cmd())
+                w.bind("<Enter>", enter)
+                w.bind("<Leave>", leave)
+            except: pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ROTINAS FRAME — gestão de rotinas configuráveis
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Rotinas pré-definidas com seus módulos
+ROTINAS_PREDEFINIDAS = [
+    {
+        "nome": "Abertura de Solicitações (Invertido)",
+        "icon": "⚡",
+        "descricao": "Sequência completa: verificar limites → abrir BPM para clientes selecionados.",
+        "passos": [
+            {"nome": "Consultar limites (Limites Invertido)", "modulo": "LimitesInvertido", "obrigatorio": True},
+            {"nome": "Configurar e executar BPM",              "modulo": "BPM_CONFIG",       "obrigatorio": True},
+        ],
+    },
+    {
+        "nome": "Cadastro e Revisão Share",
+        "icon": "⊕",
+        "descricao": "Extrai dados do PDF e gera resumo para cadastro.",
+        "passos": [
+            {"nome": "Extrair PDF (Cadastro Share)", "modulo": "Share",  "obrigatorio": True},
+        ],
+    },
+    {
+        "nome": "Rotina Completa do Dia",
+        "icon": "◈",
+        "descricao": "Limites → Share → BPM: fluxo completo de operações.",
+        "passos": [
+            {"nome": "Verificar limites",    "modulo": "LimitesInvertido", "obrigatorio": True},
+            {"nome": "Revisar cadastros Share", "modulo": "Share",         "obrigatorio": False},
+            {"nome": "Executar BPM",         "modulo": "BPM_CONFIG",       "obrigatorio": True},
+        ],
+    },
+]
+
+
+class RotinasFrame(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._rotinas   = list(ROTINAS_PREDEFINIDAS)  # cópia mutável
+        self._custom    = []   # rotinas criadas pelo usuário
+        self._exec_idx  = None
+        self._exec_step = 0
+        self._build()
+
+    # ─── build ──────────────────────────────────────────────────
+    def _build(self):
+        # header
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        tk.Label(hdr, text="Rotinas", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left")
+        styled_button(hdr, "+ Nova rotina", self._open_new_rotina_dialog,
+                      accent=True).pack(side="right")
+
+        tk.Label(hdr, text="Sequências configuráveis de módulos", bg=C["bg"],
+                 fg=C["ink_muted"], font=("Segoe UI", 9)).pack(side="left", padx=(12,0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(18,0))
+
+        # lista de rotinas
+        self._list_frame = ScrollableFrame(self, bg=C["bg"])
+        self._list_frame.pack(fill="both", expand=True)
+        self._refresh_list()
+
+    def _refresh_list(self):
+        for w in self._list_frame.inner.winfo_children():
+            w.destroy()
+        inner = self._list_frame.inner
+        inner.configure(bg=C["bg"])
+
+        all_rotinas = self._rotinas + self._custom
+        if not all_rotinas:
+            tk.Label(inner, text="Nenhuma rotina cadastrada.", bg=C["bg"],
+                     fg=C["ink_muted"], font=("Segoe UI",10)).pack(pady=40)
+            return
+
+        for i, rot in enumerate(all_rotinas):
+            self._make_rotina_card(inner, rot, i)
+
+    def _make_rotina_card(self, parent, rot, idx):
+        is_custom = idx >= len(self._rotinas)
+        card = card_frame(parent)
+        card.pack(fill="x", padx=32, pady=(12 if idx==0 else 6, 0))
+
+        # cabeçalho
+        head = tk.Frame(card, bg=C["surface"], padx=18, pady=14)
+        head.pack(fill="x")
+
+        tk.Label(head, text=rot["icon"], bg=C["surface"], fg=C["accent"],
+                 font=("Segoe UI",15)).pack(side="left")
+        title_col = tk.Frame(head, bg=C["surface"])
+        title_col.pack(side="left", padx=(10,0), fill="x", expand=True)
+        tk.Label(title_col, text=rot["nome"], bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 11, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(title_col, text=rot.get("descricao",""), bg=C["surface"],
+                 fg=C["ink_muted"], font=("Segoe UI",8), anchor="w",
+                 wraplength=380, justify="left").pack(anchor="w", pady=(2,0))
+
+        # passos
+        steps_frame = tk.Frame(card, bg=C["surface"], padx=18, pady=(0,10))
+        steps_frame.pack(fill="x")
+        for j, passo in enumerate(rot.get("passos",[])):
+            row = tk.Frame(steps_frame, bg=C["surface"])
+            row.pack(fill="x", pady=2)
+            dot_color = C["accent"] if passo.get("obrigatorio") else C["ink_faint"]
+            tk.Label(row, text="●", bg=C["surface"], fg=dot_color,
+                     font=("Segoe UI",7)).pack(side="left")
+            tk.Label(row, text=passo["nome"], bg=C["surface"], fg=C["ink_muted"],
+                     font=("Segoe UI",8)).pack(side="left", padx=(6,0))
+            mod_tag = passo.get("modulo","")
+            if mod_tag:
+                tk.Label(row, text=f"[{mod_tag}]", bg=C["surface"], fg=C["ink_faint"],
+                         font=("Segoe UI",7)).pack(side="left", padx=(4,0))
+
+        make_hairline(card, bg=C["hair"]).pack(fill="x", padx=0)
+
+        # footer ações
+        foot = tk.Frame(card, bg=C["surface"], padx=18, pady=10)
+        foot.pack(fill="x")
+        styled_button(foot, "▶  Executar rotina",
+                      lambda r=rot: self._execute_rotina(r),
+                      accent=True, small=True).pack(side="left")
+        styled_button(foot, "Editar",
+                      lambda r=rot, i=idx: self._open_edit_dialog(r, i),
+                      small=True).pack(side="left", padx=(6,0))
+        if is_custom:
+            styled_button(foot, "Remover",
+                          lambda i=idx: self._remove_rotina(i),
+                          danger=True, small=True).pack(side="left", padx=(6,0))
+
+    def _execute_rotina(self, rot):
+        """Inicia a rotina: navega pelos módulos na sequência."""
+        passos = rot.get("passos", [])
+        if not passos:
+            messagebox.showinfo("Rotina vazia", "Esta rotina não tem passos configurados.")
+            return
+        primeiro = passos[0].get("modulo","")
+        if primeiro:
+            # Guarda contexto de execução no controller
+            self.controller.rotina_em_execucao = {
+                "nome": rot["nome"],
+                "passos": passos,
+                "step_atual": 0,
+            }
+            messagebox.showinfo(
+                "Iniciar Rotina",
+                f"Rotina: {rot['nome']}\n\nPasso 1 de {len(passos)}: {passos[0]['nome']}\n\nClique OK para iniciar.",
+                parent=self
+            )
+            self.controller.show_frame(primeiro)
+
+    def _remove_rotina(self, idx):
+        ci = idx - len(self._rotinas)
+        if ci >= 0 and ci < len(self._custom):
+            nome = self._custom[ci]["nome"]
+            if messagebox.askyesno("Remover rotina", f"Remover '{nome}'?"):
+                self._custom.pop(ci)
+                self._refresh_list()
+
+    # ─── diálogo: nova / editar ──────────────────────────────────
+    def _open_new_rotina_dialog(self):
+        self._open_rotina_dialog(None, None)
+
+    def _open_edit_dialog(self, rot, idx):
+        self._open_rotina_dialog(rot, idx)
+
+    def _open_rotina_dialog(self, rot, idx):
+        dlg = tk.Toplevel(self)
+        dlg.title("Nova Rotina" if rot is None else "Editar Rotina")
+        dlg.configure(bg=C["surface"])
+        dlg.geometry("520x560")
+        dlg.resizable(False, True)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="Nova Rotina" if rot is None else "Editar Rotina",
+                 bg=C["surface"], fg=C["ink"],
+                 font=("Georgia", 14, "bold")).pack(anchor="w", padx=24, pady=(20,4))
+        make_hairline(dlg, bg=C["hair"]).pack(fill="x", padx=0, pady=(0,16))
+
+        form = tk.Frame(dlg, bg=C["surface"])
+        form.pack(fill="both", expand=True, padx=24)
+
+        # Nome
+        tk.Label(form, text="Nome", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI",8)).pack(anchor="w")
+        nome_var = tk.StringVar(value=(rot or {}).get("nome",""))
+        styled_entry(form, textvariable=nome_var).pack(fill="x", pady=(4,12))
+
+        # Ícone
+        tk.Label(form, text="Ícone (emoji)", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI",8)).pack(anchor="w")
+        icon_var = tk.StringVar(value=(rot or {}).get("icon","◈"))
+        styled_entry(form, textvariable=icon_var, width=5).pack(anchor="w", pady=(4,12))
+
+        # Descrição
+        tk.Label(form, text="Descrição", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI",8)).pack(anchor="w")
+        desc_var = tk.StringVar(value=(rot or {}).get("descricao",""))
+        styled_entry(form, textvariable=desc_var).pack(fill="x", pady=(4,12))
+
+        # Passos
+        tk.Label(form, text="Passos (módulos em sequência)", bg=C["surface"],
+                 fg=C["ink_muted"], font=("Segoe UI",8)).pack(anchor="w")
+
+        MODULOS_DISP = [
+            ("LimitesInvertido", "Limites Invertido"),
+            ("Share",            "Cadastro Share"),
+            ("BPM_CONFIG",       "BPM"),
+        ]
+
+        passos_vars = []  # lista de (nome_var, modulo_var, obr_var)
+
+        passos_frame = tk.Frame(form, bg=C["surface"])
+        passos_frame.pack(fill="x", pady=(4,0))
+
+        def refresh_passos():
+            for w in passos_frame.winfo_children(): w.destroy()
+            for pi, (nv, mv, ov) in enumerate(passos_vars):
+                pr = tk.Frame(passos_frame, bg=C["surface2"], pady=6, padx=8)
+                pr.pack(fill="x", pady=2)
+                tk.Label(pr, text=f"{pi+1}.", bg=C["surface2"], fg=C["ink_muted"],
+                         font=("Segoe UI",9), width=2).pack(side="left")
+                styled_entry(pr, textvariable=nv, width=16).pack(side="left", padx=(4,4))
+                # dropdown módulo
+                opts = [m[1] for m in MODULOS_DISP]
+                combo = ttk.Combobox(pr, textvariable=mv, values=opts, width=14, state="readonly")
+                # mapeia label → key
+                cur_key = mv.get()
+                for k, lbl in MODULOS_DISP:
+                    if k == cur_key: combo.set(lbl); break
+                else: combo.set(opts[0])
+                def on_combo_change(e, mv2=mv, c=combo):
+                    lbl = c.get()
+                    for k, l in MODULOS_DISP:
+                        if l == lbl: mv2.set(k); break
+                combo.bind("<<ComboboxSelected>>", on_combo_change)
+                combo.pack(side="left", padx=(0,4))
+                ck = tk.Checkbutton(pr, text="Obrig.", variable=ov,
+                                    bg=C["surface2"], fg=C["ink_muted"],
+                                    selectcolor=C["bg"], activebackground=C["surface2"],
+                                    font=("Segoe UI",7))
+                ck.pack(side="left")
+                styled_button(pr, "✕", lambda p=pi: remove_passo(p), danger=True, small=True).pack(side="right")
+
+        def add_passo():
+            passos_vars.append((tk.StringVar(value="Novo passo"),
+                                tk.StringVar(value="LimitesInvertido"),
+                                tk.BooleanVar(value=True)))
+            refresh_passos()
+
+        def remove_passo(pi):
+            if pi < len(passos_vars): passos_vars.pop(pi)
+            refresh_passos()
+
+        # preenche passos existentes
+        for p in (rot or {}).get("passos",[]):
+            passos_vars.append((tk.StringVar(value=p.get("nome","Passo")),
+                                tk.StringVar(value=p.get("modulo","LimitesInvertido")),
+                                tk.BooleanVar(value=p.get("obrigatorio",True))))
+        refresh_passos()
+
+        styled_button(form, "+ Adicionar passo", add_passo, small=True).pack(anchor="w", pady=(6,0))
+
+        # footer
+        make_hairline(dlg, bg=C["hair"]).pack(fill="x", padx=0, pady=(12,0))
+        foot = tk.Frame(dlg, bg=C["surface"])
+        foot.pack(fill="x", padx=24, pady=12)
+
+        def salvar():
+            nome = nome_var.get().strip()
+            if not nome:
+                messagebox.showwarning("Campo obrigatório", "Informe um nome para a rotina.", parent=dlg)
+                return
+            nova = {
+                "nome": nome,
+                "icon": icon_var.get().strip() or "◈",
+                "descricao": desc_var.get().strip(),
+                "passos": [
+                    {"nome": nv.get(), "modulo": mv.get(), "obrigatorio": bool(ov.get())}
+                    for nv, mv, ov in passos_vars
+                ],
+            }
+            if rot is None or idx is None or idx >= len(self._rotinas):
+                self._custom.append(nova)
+            else:
+                # edita predefinida → vira custom substituindo na lista
+                self._rotinas[idx] = nova
+            dlg.destroy()
+            self._refresh_list()
+
+        styled_button(foot, "Cancelar", dlg.destroy, small=True).pack(side="right", padx=(6,0))
+        styled_button(foot, "Salvar", salvar, accent=True, small=True).pack(side="right")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  BPM CONFIG FRAME — seleção de clientes + credenciais
+# ═══════════════════════════════════════════════════════════════════════════════
+class BPMConfigFrame(tk.Frame):
+    CLIENTS = list(BPM_CLIENT_DATA.keys())
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._selected  = {}  # nome → StringVar(valor)
+        self._func_var  = tk.StringVar()
+        self._senha_var = tk.StringVar()
+        self._build()
+
+    def _only_digits(self, s):
         return "".join(c for c in (s or "") if c.isdigit())
 
-    def _refresh_cred_continue_state(self):
-        btn = getattr(self, "_cred_continue_btn", None)
-        if btn is None or not btn.winfo_exists():
-            return
-        f = self._bpm_only_digits((self._bpm_func_var.get() if self._bpm_func_var else "") or "")
-        s = self._bpm_only_digits((self._bpm_senha_var.get() if self._bpm_senha_var else "") or "")
-        ok = bool(f) and (1 <= len(s) <= 6)
-        if ok:
-            btn.configure(state="normal", bg="#2fb875", fg="#ffffff", activebackground="#2aa66a", cursor="hand2")
-        else:
-            btn.configure(state="disabled", bg="#242424", fg="#6f6f6f", activebackground="#242424", cursor="no")
- 
-    def _credenciais_continue(self):
-        f = self._bpm_only_digits((self._bpm_func_var.get() if self._bpm_func_var else "") or "")
-        s = self._bpm_only_digits((self._bpm_senha_var.get() if self._bpm_senha_var else "") or "")
-        if not f:
-            messagebox.showwarning("Identificação", "Funcional deve conter apenas números.")
-            return
-        if not (1 <= len(s) <= 6):
-            messagebox.showwarning("Identificação", "Senha: apenas números, com até 6 dígitos.")
-            return
-        self.controller.bpm_funcional = f
-        self.controller.bpm_password = s
-        self._render_clients_step()
- 
-    def _render_credenciais_step(self):
-        self._clear_dialog_body()
-        card = self._dialog_body
-        fv = self._bpm_only_digits(getattr(self.controller, "bpm_funcional", "") or "")
-        sv = self._bpm_only_digits(getattr(self.controller, "bpm_password", "") or "")[:6]
-        self._bpm_func_var = tk.StringVar(value=fv)
-        self._bpm_senha_var = tk.StringVar(value=sv)
- 
-        tk.Label(
-            card, text="Identificação",
-            bg="#1a1a1a", fg="#f2f2f2", font=("Segoe UI", 11, "bold"),
-        ).pack(anchor="w", padx=24, pady=(28, 0))
-        tk.Label(
-            card,
-            text="Informe funcional e senha do Painel de Serviços (login da rotina BPM).",
-            bg="#1a1a1a", fg="#8c8c8c", font=("Segoe UI", 9),
-            wraplength=400, justify="left",
-        ).pack(anchor="w", padx=24, pady=(4, 0))
- 
-        form = tk.Frame(card, bg="#1a1a1a")
-        form.pack(fill="x", padx=24, pady=(18, 8))
- 
-        row_f = tk.Frame(form, bg="#1a1a1a")
-        row_f.pack(fill="x", pady=(0, 14))
-        tk.Label(row_f, text="Funcional", bg="#1a1a1a", fg="#8c8c8c", font=("Segoe UI", 9)).pack(anchor="w")
-        ent_f = tk.Entry(
-            row_f, textvariable=self._bpm_func_var,
-            bg="#121212", fg="#f2f2f2", insertbackground="#f2f2f2",
-            relief="flat", highlightthickness=1, highlightbackground="#2e2e2e", highlightcolor="#2fb875",
-            font=("Segoe UI", 10),
-        )
-        ent_f.pack(fill="x", pady=(6, 0))
-        tk.Label(
-            row_f, text="Apenas números (sem letras).",
-            bg="#1a1a1a", fg="#5a5a5a", font=("Segoe UI", 8),
-        ).pack(anchor="w", pady=(4, 0))
- 
-        row_s = tk.Frame(form, bg="#1a1a1a")
-        row_s.pack(fill="x", pady=(0, 8))
-        tk.Label(row_s, text="Senha", bg="#1a1a1a", fg="#8c8c8c", font=("Segoe UI", 9)).pack(anchor="w")
-        ent_s = tk.Entry(
-            row_s, textvariable=self._bpm_senha_var, show="•",
-            bg="#121212", fg="#f2f2f2", insertbackground="#f2f2f2",
-            relief="flat", highlightthickness=1, highlightbackground="#2e2e2e", highlightcolor="#2fb875",
-            font=("Segoe UI", 10),
-        )
-        ent_s.pack(fill="x", pady=(6, 0))
-        tk.Label(
-            row_s, text="Apenas números, até 6 dígitos.",
-            bg="#1a1a1a", fg="#5a5a5a", font=("Segoe UI", 8),
-        ).pack(anchor="w", pady=(4, 0))
- 
-        _SENHA_MAX = 6
- 
-        def _key_funcional(e):
-            if e.keysym in ("BackSpace", "Delete", "Tab", "Return", "Left", "Right", "Home", "End"):
-                return
-            if e.state & 0x4:
-                return
-            if e.char and e.char.isdigit():
-                return
-            if e.char:
-                return "break"
- 
+    def on_show(self):
+        # Preenche credenciais já salvas
+        self._func_var.set(getattr(self.controller, "bpm_funcional", "") or "")
+        self._senha_var.set(getattr(self.controller, "bpm_password", "") or "")
+
+    def _build(self):
+        # header
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24,0))
+        tk.Label(hdr, text="Configurar BPM", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia",18,"bold")).pack(side="left")
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14,0))
+
+        sf = ScrollableFrame(self, bg=C["bg"])
+        sf.pack(fill="both", expand=True)
+        body = sf.inner
+        body.configure(bg=C["bg"])
+
+        # ── Credenciais ─────────────────────────────────────────
+        sec = card_frame(body)
+        sec.pack(fill="x", padx=32, pady=(20,0))
+        tk.Label(sec, text="Credenciais do Painel de Serviços", bg=C["surface"],
+                 fg=C["ink"], font=("Segoe UI",10,"bold")).pack(anchor="w", padx=18, pady=(14,0))
+        tk.Label(sec, text="Funcional e senha para login no Painel BPM",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI",8)).pack(anchor="w", padx=18, pady=(2,10))
+        make_hairline(sec, bg=C["hair"]).pack(fill="x")
+
+        cred_form = tk.Frame(sec, bg=C["surface"], padx=18, pady=14)
+        cred_form.pack(fill="x")
+        cred_form.columnconfigure(0, weight=1)
+        cred_form.columnconfigure(1, weight=1)
+
+        # Funcional
+        fc = tk.Frame(cred_form, bg=C["surface"])
+        fc.grid(row=0, column=0, sticky="ew", padx=(0,8))
+        tk.Label(fc, text="Funcional (somente números)", bg=C["surface"],
+                 fg=C["ink_muted"], font=("Segoe UI",8)).pack(anchor="w")
+        self._ent_func = styled_entry(fc, textvariable=self._func_var)
+        self._ent_func.pack(fill="x", pady=(4,0))
+
+        # Senha
+        sc2 = tk.Frame(cred_form, bg=C["surface"])
+        sc2.grid(row=0, column=1, sticky="ew", padx=(8,0))
+        tk.Label(sc2, text="Senha (até 6 dígitos)", bg=C["surface"],
+                 fg=C["ink_muted"], font=("Segoe UI",8)).pack(anchor="w")
+        self._ent_senha = styled_entry(sc2, textvariable=self._senha_var, show="•")
+        self._ent_senha.pack(fill="x", pady=(4,0))
+
+        def _key_func(e):
+            if e.keysym in ("BackSpace","Delete","Tab","Return","Left","Right","Home","End"): return
+            if e.state & 0x4: return
+            if e.char and e.char.isdigit(): return
+            if e.char: return "break"
+
         def _key_senha(e):
-            if e.keysym in ("BackSpace", "Delete", "Tab", "Return", "Left", "Right", "Home", "End"):
-                return
-            if e.state & 0x4:
-                return
-            if not e.char:
-                return
-            if not e.char.isdigit():
+            if e.keysym in ("BackSpace","Delete","Tab","Return","Left","Right","Home","End"): return
+            if e.state & 0x4: return
+            if not e.char: return
+            if not e.char.isdigit(): return "break"
+            if len(self._ent_senha.get()) >= 6 and not self._ent_senha.selection_present():
                 return "break"
-            try:
-                has_sel = bool(e.widget.selection_present())
-            except Exception:
-                has_sel = False
-            if len(e.widget.get()) >= _SENHA_MAX and not has_sel:
-                return "break"
- 
-        def _paste_funcional(_e=None):
-            try:
-                clip = self.clipboard_get()
-            except Exception:
-                return "break"
-            d = self._bpm_only_digits(clip)
-            self._bpm_func_var.set(d)
-            self._refresh_cred_continue_state()
+
+        self._ent_func.bind("<KeyPress>", _key_func)
+        self._ent_senha.bind("<KeyPress>", _key_senha)
+
+        # ── Seleção de clientes ──────────────────────────────────
+        sec2 = card_frame(body)
+        sec2.pack(fill="x", padx=32, pady=(16,0))
+        tk.Label(sec2, text="Clientes e Valores", bg=C["surface"],
+                 fg=C["ink"], font=("Segoe UI",10,"bold")).pack(anchor="w", padx=18, pady=(14,0))
+        tk.Label(sec2, text="Selecione os clientes e informe o valor da operação",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI",8)).pack(anchor="w", padx=18, pady=(2,10))
+        make_hairline(sec2, bg=C["hair"]).pack(fill="x")
+
+        clients_frame = tk.Frame(sec2, bg=C["surface"], padx=18, pady=12)
+        clients_frame.pack(fill="x")
+
+        self._client_rows = {}
+        for cli in self.CLIENTS:
+            self._make_client_row(clients_frame, cli)
+
+        make_hairline(body, bg=C["hair"]).pack(fill="x", padx=32, pady=(20,0))
+
+        # ── Footer ──────────────────────────────────────────────
+        foot = tk.Frame(body, bg=C["bg"])
+        foot.pack(fill="x", padx=32, pady=16)
+        styled_button(foot, "← Voltar",
+                      lambda: self.controller.show_frame("Home")).pack(side="left")
+        self._run_btn = styled_button(foot, "▶  Iniciar BPM",
+                                      self._start_bpm, accent=True)
+        self._run_btn.pack(side="right")
+
+    def _make_client_row(self, parent, cli):
+        row = tk.Frame(parent, bg=C["surface"], pady=3)
+        row.pack(fill="x")
+        row.columnconfigure(1, weight=1)
+
+        selected = tk.BooleanVar(value=False)
+        val_var  = tk.StringVar(value="R$ 0,00")
+        val_digits = [""]   # mutável via lista
+
+        cb = tk.Checkbutton(row, variable=selected, bg=C["surface"],
+                            selectcolor=C["bg"], activebackground=C["surface"],
+                            fg=C["ink_muted"], font=("Segoe UI",9))
+        cb.grid(row=0, column=0, sticky="w")
+
+        name_lbl = tk.Label(row, text=cli, bg=C["surface"], fg=C["ink_muted"],
+                            font=("Segoe UI",9))
+        name_lbl.grid(row=0, column=1, sticky="w", padx=(4,8))
+
+        ent = styled_entry(row, textvariable=val_var, width=14)
+        ent.grid(row=0, column=2, sticky="e")
+        ent.configure(state="disabled", disabledbackground=C["bg"], disabledforeground=C["ink_faint"])
+
+        def fmt_val():
+            if not val_digits[0]: val_var.set("R$ 0,00"); return
+            d = Decimal(int(val_digits[0])) / Decimal("100")
+            val_var.set(_fmt_brl(d))
+
+        def on_key(e):
+            if e.keysym == "BackSpace": val_digits[0] = val_digits[0][:-1]; fmt_val(); return "break"
+            if e.char and e.char.isdigit(): val_digits[0] += e.char; fmt_val(); return "break"
+            if e.keysym in {"Tab","Left","Right","Home","End"}: return
             return "break"
- 
-        def _paste_senha(_e=None):
-            try:
-                clip = self.clipboard_get()
-            except Exception:
-                return "break"
-            d = self._bpm_only_digits(clip)[:_SENHA_MAX]
-            self._bpm_senha_var.set(d)
-            self._refresh_cred_continue_state()
-            return "break"
- 
-        ent_f.bind("<KeyPress>", _key_funcional)
-        ent_f.bind("<<Paste>>", _paste_funcional)
-        ent_f.bind("<Control-v>", _paste_funcional)
-        ent_s.bind("<KeyPress>", _key_senha)
-        ent_s.bind("<<Paste>>", _paste_senha)
-        ent_s.bind("<Control-v>", _paste_senha)
- 
-        def _on_cred_change(*_):
-            self._refresh_cred_continue_state()
- 
-        self._bpm_func_var.trace_add("write", _on_cred_change)
-        self._bpm_senha_var.trace_add("write", _on_cred_change)
- 
-        footer = tk.Frame(card, bg="#1a1a1a")
-        footer.pack(fill="x", padx=24, pady=(16, 24))
-        tk.Button(
-            footer, text="Voltar",
-            bg="#1a1a1a", fg="#8c8c8c", bd=0, relief="flat",
-            activebackground="#1a1a1a", activeforeground="#f2f2f2",
-            cursor="hand2", command=self._render_mode_step, padx=16, pady=8,
-        ).pack(side="left")
-        self._cred_continue_btn = tk.Button(
-            footer, text="Continuar",
-            bg="#242424", fg="#6f6f6f", bd=0, relief="flat",
-            state="disabled", cursor="no", padx=16, pady=8,
-            command=self._credenciais_continue,
-        )
-        self._cred_continue_btn.pack(side="left", fill="x", expand=True, padx=(10, 0))
-        self._refresh_cred_continue_state()
-        ent_f.focus_set()
-        self._animate_dialog_step()
- 
-    def _render_clients_step(self):
-        self._selected_clients = {}
-        self._clear_dialog_body()
-        card = self._dialog_body
- 
-        tk.Label(card, text="Selecione os clientes", bg="#1a1a1a", fg="#f2f2f2", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=24, pady=(28, 0))
-        tk.Label(card, text="Escolha os clientes e informe o valor de cada operacao.", bg="#1a1a1a", fg="#8c8c8c", font=("Segoe UI", 9)).pack(anchor="w", padx=24, pady=(4, 0))
- 
-        list_wrap = tk.Frame(card, bg="#1a1a1a")
-        list_wrap.pack(fill="both", expand=True, padx=24, pady=(16, 8))
-        canvas = tk.Canvas(list_wrap, bg="#1a1a1a", highlightthickness=0, bd=0, height=340)
-        scrollbar = ttk.Scrollbar(list_wrap, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        body = tk.Frame(canvas, bg="#1a1a1a")
-        window = canvas.create_window((0, 0), window=body, anchor="nw")
- 
-        def on_body_cfg(_e): canvas.configure(scrollregion=canvas.bbox("all"))
-        def on_canvas_cfg(e): canvas.itemconfigure(window, width=e.width)
-        body.bind("<Configure>", on_body_cfg)
-        canvas.bind("<Configure>", on_canvas_cfg)
- 
-        def add_client_row(client_name):
-            row = tk.Frame(body, bg="#1f1f1f", highlightthickness=1, highlightbackground="#343434", padx=14, pady=10)
-            row.pack(fill="x", pady=3)
-            row.columnconfigure(1, weight=1)
-            row.selected = False
-            row.client_name = client_name
-            row.value_var = tk.StringVar()
-            row.value_digits = ""
-            cb = tk.Label(row, text="", bg="#1f1f1f", fg="#ffffff", width=2, relief="flat", highlightthickness=1, highlightbackground="#343434")
-            cb.grid(row=0, column=0, sticky="w")
-            name = tk.Label(row, text=client_name, bg="#1f1f1f", fg="#9a9a9a", font=("Segoe UI", 9, "normal"))
-            name.grid(row=0, column=1, sticky="w", padx=(10, 8))
-            entry = tk.Entry(row, textvariable=row.value_var, width=14, justify="right", bg="#121212", fg="#f2f2f2", insertbackground="#f2f2f2", relief="flat", highlightthickness=1, highlightbackground="#2e2e2e", highlightcolor="#2e2e2e", disabledbackground="#121212", disabledforeground="#7a7a7a")
-            row.value_var.set("R$ 0,00")
-            entry.configure(state="disabled")
-            entry.grid(row=0, column=2, sticky="e")
-            entry.grid_remove()
- 
-            def on_focus_in(_): entry.icursor("end")
-            def on_focus_out(_):
-                if not row.value_digits: row.value_var.set("R$ 0,00")
-                self._refresh_confirm_state()
- 
-            def _set_value_from_digits():
-                if not row.value_digits:
-                    row.value_var.set("R$ 0,00")
-                    return
-                d = Decimal(int(row.value_digits)) / Decimal("100")
-                row.value_var.set(_format_brl_currency_from_decimal(d))
- 
-            def toggle(_=None):
-                row.selected = not row.selected
-                if row.selected:
-                    row.configure(highlightbackground="#2fb875")
-                    cb.configure(text="✓", bg="#2fb875", highlightbackground="#2fb875")
-                    name.configure(fg="#f2f2f2")
-                    entry.configure(state="normal")
-                    entry.grid()
-                    entry.focus_set()
-                    row.value_digits = ""
-                    row.value_var.set("R$ 0,00")
-                    self._selected_clients[row.client_name] = row.value_var
-                else:
-                    row.configure(highlightbackground="#343434")
-                    cb.configure(text="", bg="#1f1f1f", highlightbackground="#343434")
-                    name.configure(fg="#9a9a9a")
-                    row.value_digits = ""
-                    row.value_var.set("R$ 0,00")
-                    entry.configure(state="disabled")
-                    entry.grid_remove()
-                    self._selected_clients.pop(row.client_name, None)
-                self._refresh_confirm_state()
- 
-            def on_hover(_):
-                if not row.selected:
-                    row.configure(bg="#292929"); cb.configure(bg="#292929"); name.configure(bg="#292929")
-            def on_leave(_):
-                if not row.selected:
-                    row.configure(bg="#1f1f1f"); cb.configure(bg="#1f1f1f"); name.configure(bg="#1f1f1f")
- 
-            def on_key_press(e):
-                if e.keysym == "BackSpace":
-                    row.value_digits = row.value_digits[:-1]; _set_value_from_digits(); self._refresh_confirm_state(); return "break"
-                if e.char and e.char.isdigit():
-                    row.value_digits += e.char; _set_value_from_digits(); self._refresh_confirm_state(); return "break"
-                if e.keysym in {"Tab", "Left", "Right", "Home", "End"}: return None
-                return "break"
- 
-            def on_paste(_e):
-                try: clip = self.clipboard_get()
-                except Exception: return "break"
-                d = _parse_brl_to_decimal(clip)
-                if d is None: return "break"
-                cents = int((d * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-                row.value_digits = str(max(cents, 0)); _set_value_from_digits(); self._refresh_confirm_state(); return "break"
- 
-            for w in (row, cb, name):
-                w.bind("<Button-1>", toggle); w.bind("<Enter>", on_hover); w.bind("<Leave>", on_leave)
-            entry.bind("<KeyPress>", on_key_press); entry.bind("<<Paste>>", on_paste)
-            entry.bind("<Control-v>", on_paste); entry.bind("<FocusIn>", on_focus_in); entry.bind("<FocusOut>", on_focus_out)
- 
-        for client in self.CLIENTS:
-            add_client_row(client)
- 
-        footer = tk.Frame(card, bg="#1a1a1a")
-        footer.pack(fill="x", padx=24, pady=(16, 24))
-        tk.Button(footer, text="Voltar", bg="#1a1a1a", fg="#8c8c8c", bd=0, relief="flat", activebackground="#1a1a1a", activeforeground="#f2f2f2", cursor="hand2", command=self._render_credenciais_step, padx=16, pady=8).pack(side="left")
-        self._confirm_btn = tk.Button(footer, text="Confirmar (0)", bg="#242424", fg="#6f6f6f", bd=0, relief="flat", state="disabled", cursor="no", padx=16, pady=8, command=self._confirm_clients_selection)
-        self._confirm_btn.pack(side="left", fill="x", expand=True, padx=(10, 0))
-        self._refresh_confirm_state()
-        self._animate_dialog_step()
- 
-    def _refresh_confirm_state(self):
-        if self._confirm_btn is None or not self._confirm_btn.winfo_exists(): return
-        selected = len(self._selected_clients)
-        all_filled = selected > 0
-        for v in self._selected_clients.values():
-            raw = (v.get() or "").strip()
-            d = _parse_brl_to_decimal(raw)
-            if d is None or d == Decimal("0.00"):
-                all_filled = False; break
-        self._confirm_btn.configure(text=f"Confirmar ({selected})")
-        if all_filled:
-            self._confirm_btn.configure(state="normal", bg="#2fb875", fg="#ffffff", activebackground="#2aa66a", cursor="hand2")
-        else:
-            self._confirm_btn.configure(state="disabled", bg="#242424", fg="#6f6f6f", activebackground="#242424", cursor="no")
- 
-    def _confirm_clients_selection(self):
+
+        def on_paste(_):
+            try: clip = row.clipboard_get()
+            except: return "break"
+            d = _parse_brl(clip)
+            if d is None: return "break"
+            val_digits[0] = str(max(int((d*100).quantize(Decimal("1"))),0))
+            fmt_val(); return "break"
+
+        def on_toggle(*_):
+            if selected.get():
+                ent.configure(state="normal", bg=C["bg"], fg=C["ink"])
+                self._selected[cli] = val_var
+            else:
+                ent.configure(state="disabled", disabledbackground=C["bg"], disabledforeground=C["ink_faint"])
+                self._selected.pop(cli, None)
+
+        cb.configure(command=on_toggle)
+        ent.bind("<KeyPress>", on_key)
+        ent.bind("<<Paste>>", on_paste)
+        ent.bind("<Control-v>", on_paste)
+        self._client_rows[cli] = {"selected": selected, "val_var": val_var, "val_digits": val_digits, "entry": ent}
+
+    def _start_bpm(self):
+        func = self._only_digits(self._func_var.get())
+        senha = self._only_digits(self._senha_var.get())
+        if not func:
+            messagebox.showwarning("Funcional obrigatório", "Informe o funcional (somente números)."); return
+        if not (1 <= len(senha) <= 6):
+            messagebox.showwarning("Senha inválida", "Senha deve ter 1 a 6 dígitos."); return
+
         selection = []
-        for client_name in self.CLIENTS:
-            var = self._selected_clients.get(client_name)
-            if var is None: continue
-            raw = (var.get() or "").strip()
-            d = _parse_brl_to_decimal(raw)
-            if d is not None and d != Decimal("0.00"):
-                selection.append({"cliente": client_name, "valor": _format_brl_currency(raw)})
+        for cli in self.CLIENTS:
+            row = self._client_rows[cli]
+            if not row["selected"].get(): continue
+            raw = row["val_var"].get()
+            d = _parse_brl(raw)
+            if d is None or d == Decimal("0.00"):
+                messagebox.showwarning("Valor inválido", f"Informe um valor válido para {cli}."); return
+            selection.append({"cliente": cli, "valor": _fmt_brl_from_raw(raw)})
+
+        if not selection:
+            messagebox.showwarning("Seleção vazia", "Selecione ao menos um cliente."); return
+
+        self.controller.bpm_funcional    = func
+        self.controller.bpm_password     = senha
         self.controller.bpm_run_selection = selection
-        self.close_bpm_mode_dialog()
         self.controller.show_frame("BPM")
- 
- 
-class ShareFrame(ttk.Frame):
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SHARE FRAME — extração PDF + resumo
+# ═══════════════════════════════════════════════════════════════════════════════
+class ShareFrame(tk.Frame):
     def __init__(self, parent, controller):
-        super().__init__(parent, style="Root.TFrame")
+        super().__init__(parent, bg=C["bg"])
         self.controller = controller
-        self.COLORS = controller.COLORS
-        self.vars = {k: tk.StringVar() for k in ["razao_social","cnpj","conta","plataforma","regiao","trader_espec","valor_operacao","spread","prazo_min","prazo_max","modalidade"]}
-        self.hidden = {"premio": "sem prêmio", "liquidacao": "Débito em CC", "cnpj8": ""}
-        self.vars["modalidade"].trace_add("write", lambda *_: self.update_resumo())
-        self.vars["regiao"].trace_add("write", lambda *_: self.update_trader_espec_from_regiao())
-        self._build_ui()
- 
-    def _scroll_mousewheel(self, event):
-        cvs = self._scroll_canvas
-        if not cvs:
-            return
-        if getattr(event, "delta", 0):
-            cvs.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        elif event.num == 4:
-            cvs.yview_scroll(-3, "units")
-        elif event.num == 5:
-            cvs.yview_scroll(3, "units")
+        self.vars = {k: tk.StringVar() for k in [
+            "razao_social","cnpj","conta","plataforma","regiao",
+            "trader_espec","valor_operacao","spread","prazo_min","prazo_max","modalidade"
+        ]}
+        self.hidden = {"premio":"sem prêmio","liquidacao":"Débito em CC","cnpj8":""}
+        self.vars["modalidade"].trace_add("write", lambda *_: self._update_resumo())
+        self.vars["regiao"].trace_add("write",    lambda *_: self._update_trader_espec())
+        self._build()
 
-    def _bind_mousewheel_tree(self, widget):
-        widget.bind("<MouseWheel>", self._scroll_mousewheel)
-        widget.bind("<Button-4>", self._scroll_mousewheel)
-        widget.bind("<Button-5>", self._scroll_mousewheel)
-        for child in widget.winfo_children():
-            self._bind_mousewheel_tree(child)
+    def _build(self):
+        # header
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24,0))
+        tk.Label(hdr, text="Cadastro Share", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia",18,"bold")).pack(side="left")
+        styled_button(hdr, "📄  Abrir PDF…", self._on_open_pdf, accent=True).pack(side="right")
+        styled_button(hdr, "← Voltar",
+                      lambda: self.controller.show_frame("Home")).pack(side="right", padx=(0,6))
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14,0))
 
-    def _install_scroll_bindings(self):
-        if self._scroll_canvas:
-            self._bind_mousewheel_tree(self)
+        sf = ScrollableFrame(self, bg=C["bg"])
+        sf.pack(fill="both", expand=True)
+        body = sf.inner
+        body.configure(bg=C["bg"])
 
-    def _make_scrollable(self, parent):
-        self._scroll_canvas = None
-        w = ttk.Frame(parent, style="Root.TFrame")
-        w.pack(fill="both", expand=True)
-        cvs = tk.Canvas(w, bg=self.COLORS["bg"], highlightthickness=0, bd=0)
-        self._scroll_canvas = cvs
-        sb = ttk.Scrollbar(w, orient="vertical", command=cvs.yview)
-        cvs.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        cvs.pack(side="left", fill="both", expand=True)
-        inner = ttk.Frame(cvs, style="Root.TFrame")
-        win = cvs.create_window((0, 0), window=inner, anchor="nw")
-        def oncfg(_): cvs.configure(scrollregion=cvs.bbox("all"))
-        def oncc(e): cvs.itemconfigure(win, width=e.width)
-        inner.bind("<Configure>", oncfg)
-        cvs.bind("<Configure>", oncc)
-        return inner
- 
-    def _panel(self, parent, **k):
-        p = ttk.Frame(parent, style="Dark.TFrame")
-        p.pack(**k)
-        return p
- 
-    def _build_ui(self):
-        top = self._panel(self, padx=14, pady=12, fill="x")
-        ttk.Button(top, text="← Voltar", style="Dark.TButton", command=lambda: self.controller.show_frame("Home")).pack(side="left")
-        ttk.Button(top, text="📄 Abrir PDF…", style="Dark.TButton", command=self.on_open_pdf).pack(side="left", padx=(10, 0))
-        ttk.Label(top, text="Cadastro Share (extração do PDF + resumo)", style="Sub.TLabel").pack(side="left", padx=10)
-        scroll = self._make_scrollable(self)
-        main = ttk.Frame(scroll, style="Root.TFrame")
-        main.pack(fill="both", expand=True, padx=14, pady=10)
-        card = ttk.Frame(main, style="Dark.TFrame")
-        card.pack(fill="x")
-        ci = ttk.Frame(card, style="Dark.TFrame")
-        ci.pack(fill="x", padx=12, pady=12)
-        ttk.Label(ci, text="Campos extraídos (edite se necessário)", style="Sub.TLabel").pack(anchor="w", pady=(0, 10))
-        grid = ttk.Frame(ci, style="Dark.TFrame")
+        # grid campos
+        fields_card = card_frame(body)
+        fields_card.pack(fill="x", padx=32, pady=(20,0))
+        tk.Label(fields_card, text="Campos extraídos", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI",10,"bold")).pack(anchor="w", padx=18, pady=(14,0))
+        tk.Label(fields_card, text="Edite se necessário antes de gerar o resumo.",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI",8)).pack(anchor="w", padx=18, pady=(2,10))
+        make_hairline(fields_card, bg=C["hair"]).pack(fill="x")
+
+        grid = tk.Frame(fields_card, bg=C["surface"], padx=18, pady=14)
         grid.pack(fill="x")
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
- 
-        def add(parent, key, label, row, col, width=36, widget="entry", state="normal"):
-            b = ttk.Frame(parent, style="Dark.TFrame")
-            b.grid(row=row, column=col, sticky="ew", padx=(0 if col == 0 else 10, 0), pady=8)
-            ttk.Label(b, text=label, style="Dark.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=(0, 6))
-            r = ttk.Frame(b, style="Dark.TFrame")
-            r.grid(row=1, column=0, sticky="ew")
-            r.columnconfigure(0, weight=1)
-            if widget == "combo":
-                w = ttk.Combobox(r, textvariable=self.vars[key], values=["Autorizadas CSV", "Autorizadas SISPAG"], state="normal", width=width)
-                w.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-                ew = w
+
+        def field(key, label, row, col, combo=False, width=28, readonly=False):
+            b = tk.Frame(grid, bg=C["surface"])
+            b.grid(row=row, column=col, sticky="ew", padx=(0 if col==0 else 10, 0), pady=6)
+            tk.Label(b, text=label, bg=C["surface"], fg=C["ink_muted"],
+                     font=("Segoe UI",8)).pack(anchor="w", pady=(0,4))
+            row_f = tk.Frame(b, bg=C["surface"])
+            row_f.pack(fill="x")
+            row_f.columnconfigure(0, weight=1)
+            if combo:
+                w = ttk.Combobox(row_f, textvariable=self.vars[key],
+                                 values=["Autorizadas CSV","Autorizadas SISPAG"],
+                                 state="normal", width=width)
+                w.grid(row=0, column=0, sticky="ew", padx=(0,6))
             else:
-                e = ttk.Entry(r, textvariable=self.vars[key], width=width, style="Dark.TEntry")
-                if state == "readonly": e.state(["readonly"])
-                e.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-                ew = e
-            ttk.Button(r, text="Copiar", style="Dark.TButton", command=lambda k=key: self.copy_var(k)).grid(row=0, column=1, sticky="e")
-            return ew
- 
+                e = styled_entry(row_f, textvariable=self.vars[key], width=width)
+                if readonly: e.configure(state="readonly", readonlybackground=C["bg"])
+                e.grid(row=0, column=0, sticky="ew", padx=(0,6))
+            styled_button(row_f, "↗", lambda k=key: self._copy(k), small=True).grid(row=0,column=1)
+
         specs = [
-            ("razao_social", "Razão Social:", 52, "entry", "normal"),
-            ("cnpj", "CNPJ:", 30, "entry", "normal"),
-            ("conta", "Conta Corrente do Cliente:", 30, "entry", "normal"),
-            ("valor_operacao", "Valor da Operação:", 30, "entry", "normal"),
-            ("plataforma", "Plataforma:", 20, "entry", "normal"),
-            ("regiao", "Região da Plataforma:", 20, "entry", "normal"),
-            ("trader_espec", "Trader e Espec:", 32, "entry", "readonly"),
-            ("spread", "Spread:", 20, "entry", "normal"),
-            ("prazo_min", "Prazo Mínimo NF (dias):", 20, "entry", "normal"),
-            ("prazo_max", "Prazo Máximo NF (dias):", 20, "entry", "normal"),
-            ("modalidade", "Modalidade:", 28, "combo", "normal"),
+            ("razao_social","Razão Social",0,0,False,28,False),
+            ("cnpj","CNPJ",0,1,False,22,False),
+            ("conta","Conta Corrente",1,0,False,22,False),
+            ("valor_operacao","Valor da Operação",1,1,False,22,False),
+            ("plataforma","Plataforma",2,0,False,14,False),
+            ("regiao","Região da Plataforma",2,1,False,14,False),
+            ("trader_espec","Trader / Espec",3,0,False,28,True),
+            ("spread","Spread",3,1,False,14,False),
+            ("prazo_min","Prazo Mínimo NF",4,0,False,14,False),
+            ("prazo_max","Prazo Máximo NF",4,1,False,14,False),
+            ("modalidade","Modalidade",5,0,True,28,False),
         ]
-        r = 0; c = 0
-        for k, l, w, t, st in specs:
-            add(grid, k, l, r, c, width=w, widget=t, state=st)
-            c += 1
-            if c > 1: c = 0; r += 1
- 
-        act = ttk.Frame(main, style="Dark.TFrame")
-        act.pack(fill="x", pady=10)
-        ttk.Button(act, text="🔄 Gerar/Atualizar Resumo", style="Dark.TButton", command=self.update_resumo).pack(side="left")
-        ttk.Button(act, text="🧽 Limpar", style="Dark.TButton", command=self.clear_all).pack(side="left", padx=8)
-        ttk.Separator(main, orient="horizontal", style="Dark.TSeparator").pack(fill="x", pady=(6, 12))
-        res = ttk.LabelFrame(main, text="Resumo pronto para copiar", style="Dark.TLabelframe")
-        res.pack(fill="both", expand=True)
-        tw = ttk.Frame(res, style="Dark.TFrame")
-        tw.pack(fill="both", expand=True, padx=10, pady=10)
-        tw.columnconfigure(0, weight=1); tw.rowconfigure(0, weight=1)
-        self.txt_resumo = tk.Text(tw, height=10, wrap="word", bd=0, relief="flat", background=self.COLORS["muted"], foreground=self.COLORS["text"], insertbackground=self.COLORS["text"], highlightthickness=1, highlightbackground=self.COLORS["border"], highlightcolor=self.COLORS["accent"], padx=10, pady=10)
-        self.txt_resumo.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        sc = ttk.Scrollbar(tw, orient="vertical", command=self.txt_resumo.yview)
+        for k,l,r,c,combo,w,ro in specs:
+            field(k,l,r,c,combo,w,ro)
+
+        # ações
+        act = tk.Frame(body, bg=C["bg"])
+        act.pack(fill="x", padx=32, pady=(14,0))
+        styled_button(act,"🔄  Gerar Resumo",  self._update_resumo, accent=True).pack(side="left")
+        styled_button(act,"🧽  Limpar",          self._clear_all).pack(side="left", padx=(6,0))
+
+        # resumo
+        res_card = card_frame(body)
+        res_card.pack(fill="x", padx=32, pady=(14,0))
+        tk.Label(res_card, text="Resumo", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI",10,"bold")).pack(anchor="w", padx=18, pady=(14,0))
+        make_hairline(res_card, bg=C["hair"]).pack(fill="x")
+
+        txt_wrap = tk.Frame(res_card, bg=C["surface"], padx=18, pady=14)
+        txt_wrap.pack(fill="x")
+        txt_wrap.columnconfigure(0, weight=1)
+        self.txt_resumo = tk.Text(txt_wrap, height=7, wrap="word", bd=0, relief="flat",
+                                  bg=C["bg"], fg=C["ink"], insertbackground=C["accent"],
+                                  highlightthickness=1, highlightbackground=C["hair"],
+                                  font=("Segoe UI",9), padx=10, pady=8)
+        self.txt_resumo.grid(row=0, column=0, sticky="ew", padx=(0,6))
+        sc = tk.Scrollbar(txt_wrap, orient="vertical", command=self.txt_resumo.yview)
         sc.grid(row=0, column=1, sticky="ns")
         self.txt_resumo.configure(yscrollcommand=sc.set)
-        btm = ttk.Frame(main, style="Dark.TFrame")
-        btm.pack(fill="x", pady=10)
-        ttk.Button(btm, text="📋 Copiar Resumo", style="Dark.TButton", command=self.copy_resumo).pack(side="left")
-        ttk.Button(btm, text="💾 Salvar Resumo (.txt)", style="Dark.TButton", command=self.save_resumo).pack(side="left", padx=8)
-        self._install_scroll_bindings()
 
-    def on_show(self):
-        self._install_scroll_bindings()
+        foot = tk.Frame(body, bg=C["bg"])
+        foot.pack(fill="x", padx=32, pady=(12,30))
+        styled_button(foot,"📋  Copiar Resumo", self._copy_resumo, accent=True).pack(side="left")
+        styled_button(foot,"💾  Salvar .txt",   self._save_resumo).pack(side="left", padx=(6,0))
 
-    def copy_var(self, k):
-        v = self.vars[k].get(); self.clipboard_clear(); self.clipboard_append(v); self._toast(f"Copiado: {k}")
- 
-    def copy_resumo(self):
-        v = self.txt_resumo.get("1.0", "end-1c"); self.clipboard_clear(); self.clipboard_append(v); self._toast("Resumo copiado!")
- 
-    def save_resumo(self):
-        c = self.txt_resumo.get("1.0", "end-1c").strip()
-        if not c: messagebox.showinfo("Salvar Resumo", "Nada para salvar."); return
-        p = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Arquivo de Texto", "*.txt")], title="Salvar Resumo")
+    def _copy(self, k):
+        v = self.vars[k].get()
+        self.clipboard_clear(); self.clipboard_append(v)
+
+    def _copy_resumo(self):
+        v = self.txt_resumo.get("1.0","end-1c")
+        self.clipboard_clear(); self.clipboard_append(v)
+
+    def _save_resumo(self):
+        c = self.txt_resumo.get("1.0","end-1c").strip()
+        if not c: messagebox.showinfo("Vazio","Nada para salvar."); return
+        p = filedialog.asksaveasfilename(defaultextension=".txt",
+                                        filetypes=[("Texto","*.txt")], title="Salvar Resumo")
         if p:
-            try: open(p, "w", encoding="utf-8").write(c); self._toast("Resumo salvo.")
-            except Exception as e: messagebox.showerror("Erro", f"Não foi possível salvar: {e}")
- 
-    def update_trader_espec_from_regiao(self):
-        reg = (self.vars["regiao"].get() or "").strip()
+            try: open(p,"w",encoding="utf-8").write(c)
+            except Exception as e: messagebox.showerror("Erro",str(e))
+
+    def _update_trader_espec(self):
+        reg = self.vars["regiao"].get().strip()
         tr, sp = trader_espec_from_regiao(reg)
         self.vars["trader_espec"].set(f"{tr} / {sp}".strip(" /") if (tr or sp) else "")
-        self.update_resumo()
- 
-    def on_open_pdf(self):
-        p = filedialog.askopenfilename(title="Selecione um PDF", filetypes=[("Arquivos PDF", "*.pdf")])
+        self._update_resumo()
+
+    def _on_open_pdf(self):
+        p = filedialog.askopenfilename(title="Selecione um PDF",
+                                       filetypes=[("PDF","*.pdf")])
         if not p: return
         try:
-            t_layout, t_plain = extract_text_from_pdf(p)
-            t = t_layout
-            if not (t or "").strip(): messagebox.showwarning("PDF sem texto", "Não foi possível extrair texto do PDF."); return
+            tl, tp = extract_text_from_pdf(p)
+            t = tl
+            if not t.strip():
+                messagebox.showwarning("PDF sem texto","Não foi possível extrair texto."); return
             lines = t.splitlines()
             tn, tc = normalize_text_variants(t)
-            raz = extract_razao_social(t, lines, tn, tc, t_plain=t_plain) or ""
-            cn = extract_cnpj(t, tn, tc) or ""
-            cnf = format_cnpj(cn)
-            cn8 = only_digits(cn)[:8] if len(only_digits(cn)) >= 8 else ""
-            conta = extract_conta_corrente(lines, tn, tc) or ""
-            plat = extract_plataforma(t, tn, tc) or ""
-            reg = extract_regiao_plataforma(t, tn, tc) or ""
-            val = extract_valor_operacao(t, tn, tc) or ""
-            sp_raw = extract_spread(t, tn, tc) or ""
-            sp_fmt = normalize_percent_br(sp_raw) if sp_raw else ""
-            pmin = extract_prazo_minimo_nf(t, tn, tc) or ""
-            pmax = extract_prazo_maximo_nf(t, tn, tc) or ""
-            mod = extract_modalidade(t, tn, tc) or ""
-            liq = "Débito em CC" if not RE_LIQ_CRED.search(t) else "Crédito em CC"
+            raz  = extract_razao_social(t,lines,tn,tc,t_plain=tp) or ""
+            cn   = extract_cnpj(t,tn,tc) or ""
+            conta= extract_conta_corrente(lines,tn,tc) or ""
+            plat = extract_plataforma(t,tn,tc) or ""
+            reg  = extract_regiao(t,tn,tc) or ""
+            val  = extract_valor(t,tn,tc) or ""
+            sp   = extract_spread(t,tn,tc) or ""
+            pmin = extract_prazo_min(t,tn,tc) or ""
+            pmax = extract_prazo_max(t,tn,tc) or ""
+            mod  = extract_modalidade(t,tn,tc) or ""
+            liq  = "Débito em CC" if not RE_LIQ_CRED.search(t) else "Crédito em CC"
             prem = "com prêmio" if RE_PREMIO.search(t) else "sem prêmio"
-            self.vars["razao_social"].set(raz); self.vars["cnpj"].set(cnf or cn); self.vars["conta"].set(conta)
-            self.vars["plataforma"].set(plat); self.vars["regiao"].set(reg); self.vars["valor_operacao"].set(val)
-            self.vars["spread"].set(sp_fmt or sp_raw); self.vars["prazo_min"].set(pmin); self.vars["prazo_max"].set(pmax)
+            self.vars["razao_social"].set(raz)
+            self.vars["cnpj"].set(only_digits(cn) if cn else "")
+            self.vars["conta"].set(conta)
+            self.vars["plataforma"].set(plat)
+            self.vars["regiao"].set(reg)
+            self.vars["valor_operacao"].set(val)
+            self.vars["spread"].set(normalize_percent_br(sp) if sp else "")
+            self.vars["prazo_min"].set(pmin)
+            self.vars["prazo_max"].set(pmax)
             self.vars["modalidade"].set(mod)
-            tr, sp = trader_espec_from_regiao(reg)
-            self.vars["trader_espec"].set(f"{tr} / {sp}".strip(" /") if (tr or sp) else "")
-            self.hidden["premio"] = prem; self.hidden["liquidacao"] = liq; self.hidden["cnpj8"] = cn8
-            self.update_resumo()
+            tr, spe = trader_espec_from_regiao(reg)
+            self.vars["trader_espec"].set(f"{tr} / {spe}".strip(" /") if (tr or spe) else "")
+            self.hidden["premio"] = prem
+            self.hidden["liquidacao"] = liq
+            self._update_resumo()
         except Exception as e:
             messagebox.showerror("Erro ao ler PDF", str(e))
- 
-    def update_resumo(self):
-        spread = (self.vars["spread"].get() or "").strip()
-        pmin = (self.vars["prazo_min"].get() or "").strip()
-        pmax = (self.vars["prazo_max"].get() or "").strip()
-        plat = (self.vars["plataforma"].get() or "").strip()
-        reg = (self.vars["regiao"].get() or "").strip()
-        mod = normalize_modalidade(self.vars["modalidade"].get() or "")
-        prem = self.hidden.get("premio", "sem prêmio")
-        liq = self.hidden.get("liquidacao", "Débito em CC")
-        te = (self.vars["trader_espec"].get() or "").strip()
+
+    def _update_resumo(self):
+        spread = self.vars["spread"].get().strip()
+        pmin   = self.vars["prazo_min"].get().strip()
+        pmax   = self.vars["prazo_max"].get().strip()
+        plat   = self.vars["plataforma"].get().strip()
+        reg    = self.vars["regiao"].get().strip()
+        mod    = normalize_modalidade(self.vars["modalidade"].get() or "")
+        prem   = self.hidden.get("premio","sem prêmio")
+        liq    = self.hidden.get("liquidacao","Débito em CC")
+        te     = self.vars["trader_espec"].get().strip()
         if spread and "a.a" not in spread.lower(): spread = normalize_percent_br(spread)
-        troca = infer_troca_from_modalidade(mod)
-        prazo = ""
+        troca  = infer_troca(mod)
+        prazo  = ""
         if pmin and pmax: prazo = f"Prazo {pmin} a {pmax} dias"
         elif pmin: prazo = f"Prazo mínimo {pmin} dias"
         elif pmax: prazo = f"Prazo máximo {pmax} dias"
@@ -1309,1517 +1336,878 @@ class ShareFrame(ttk.Frame):
         if plat and reg: pr = f"Plataforma {plat} – Região {reg}"
         elif plat: pr = f"Plataforma {plat}"
         elif reg: pr = f"Região {reg}"
-        L = []
-        if spread: L.append(f"Spread mínimo {spread} – {premio_str(prem)} – Troca de Arquivo {troca}")
-        else: L.append(f"Spread mínimo – {premio_str(prem)} – Troca de Arquivo {troca}")
+        L = [f"Spread mínimo {spread} – {prem} – Troca de Arquivo {troca}" if spread
+             else f"Spread mínimo – {prem} – Troca de Arquivo {troca}"]
         if prazo: L.append(prazo)
-        if liq: L.append(f"Liquidação {liq}")
-        if pr: L.append(pr)
-        if te: L.append(f"Trader/Espec {te}")
-        r = "\n".join(L).strip()
-        self.txt_resumo.delete("1.0", "end"); self.txt_resumo.insert("1.0", r)
- 
-    def clear_all(self):
+        if liq:   L.append(f"Liquidação {liq}")
+        if pr:    L.append(pr)
+        if te:    L.append(f"Trader/Espec {te}")
+        self.txt_resumo.delete("1.0","end")
+        self.txt_resumo.insert("1.0", "\n".join(L).strip())
+
+    def _clear_all(self):
         for v in self.vars.values(): v.set("")
-        self.hidden["premio"] = "sem prêmio"; self.hidden["liquidacao"] = "Débito em CC"; self.hidden["cnpj8"] = ""
-        self.txt_resumo.delete("1.0", "end")
- 
-    def _toast(self, msg):
-        t = tk.Toplevel(self); t.overrideredirect(True); t.attributes("-topmost", True); t.configure(bg=self.COLORS["muted"])
-        lbl = tk.Label(t, text=msg, bg=self.COLORS["muted"], fg=self.COLORS["text"], padx=12, pady=8); lbl.pack()
-        self.update_idletasks()
-        x = self.winfo_rootx() + self.winfo_width() - lbl.winfo_reqwidth() - 36
-        y = self.winfo_rooty() + 24
-        t.geometry(f"+{x}+{y}"); t.after(1200, t.destroy)
- 
- 
-class LimitesInvertidoFrame(ttk.Frame):
-    """Frame para consulta de limites do Invertido."""
- 
-    LIMIT_GREEN = "#2ecc71"
-    LIMIT_ORANGE = "#f39c12"
-    LIMIT_RED = "#e74c3c"
-    CARD_W = 212
-    CARD_H = 180
-    CARD_R = 18
- 
-    MAPPED_CLIENTS = {
-        "Transdourada", "RPB", "Posto Arinos", "Mirian Varzea",
-        "Petrocal", "Posto Sapucaia",
-    }
-    MIRROR_CLIENTS = {
-        "Brasnorte":                "Posto Arinos",
-        "Mirian Cuiaba":            "Mirian Varzea",
-        "PetroMix":                 "Petrocal",
-        "PetroVel":                 "Petrocal",
-        "Auto Posto M Timbozao":    "Posto Sapucaia",
-        "Posto Gasol Timbo III":    "Posto Sapucaia",
-        "Posto Timbozao Itaperuna": "Posto Sapucaia",
-        "Posto Pioneiro":           "Posto Sapucaia",
-    }
- 
+        self.hidden["premio"] = "sem prêmio"
+        self.hidden["liquidacao"] = "Débito em CC"
+        self.txt_resumo.delete("1.0","end")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LIMITES INVERTIDO FRAME
+# ═══════════════════════════════════════════════════════════════════════════════
+class LimitesInvertidoFrame(tk.Frame):
+    COL_OK   = C["ok"]
+    COL_WARN = C["warn"]
+    COL_ERR  = C["err"]
+
     def __init__(self, parent, controller):
-        super().__init__(parent, style="Root.TFrame")
-        self.controller = controller
-        self.COLORS = controller.COLORS
-        self._cards = []
-        self._worker_running = False
-        self._cancel_requested = False
-        self._browser = None
-        self._started = False
+        super().__init__(parent, bg=C["bg"])
+        self.controller  = controller
+        self._cards      = []
+        self._worker_running  = False
+        self._cancel_requested= False
+        self._browser    = None
+        self._started    = False
         self._restart_pending = False
-        self._build_ui()
- 
+        self._build()
+
     def _ui(self, fn):
-        try:
-            self.after(0, fn)
-        except Exception:
-            pass
- 
-    def _build_ui(self):
-        page_bg = self.COLORS["bg"]
- 
-        header_bar = tk.Frame(self, bg=page_bg)
-        header_bar.pack(fill="x", padx=20, pady=(18, 0))
-        tk.Button(
-            header_bar, text="← Voltar", command=self._go_back,
-            bg=page_bg, fg="#8c8c8c", bd=0, relief="flat",
-            activebackground=page_bg, activeforeground="#f2f2f2",
-            cursor="hand2", font=("Segoe UI", 9), padx=0, pady=0,
-        ).pack(side="left")
- 
-        title_bar = tk.Frame(self, bg=page_bg)
-        title_bar.pack(fill="x", pady=(20, 0))
-        self._title_lbl = tk.Label(
-            title_bar, text="Limites Invertido",
-            bg=page_bg, fg="#f2f2f2", font=("Segoe UI", 15, "bold"),
-        )
-        self._title_lbl.pack()
-        self._subtitle_lbl = tk.Label(
-            title_bar, text="Consulte o LTC e o limite disponível de cada cliente.",
-            bg=page_bg, fg="#8c8c8c", font=("Segoe UI", 10, "normal"),
-        )
-        self._subtitle_lbl.pack(pady=(6, 0))
-        self._btn_restart = tk.Button(
-            title_bar,
-            text="↻",
-            command=self._restart_limites,
-            bg=page_bg, fg="#6f6f6f", bd=0, relief="flat",
-            activebackground=page_bg, activeforeground="#f2f2f2",
-            cursor="hand2", font=("Segoe UI", 11), padx=2, pady=2,
-            takefocus=0,
-        )
-        self._btn_restart.pack(pady=(8, 0))
- 
-        scroll_wrap = tk.Frame(self, bg=page_bg)
-        scroll_wrap.pack(fill="both", expand=True, padx=0, pady=(18, 0))
- 
-        self._canvas = tk.Canvas(scroll_wrap, bg=page_bg, highlightthickness=0, bd=0)
-        self._vscroll = ttk.Scrollbar(scroll_wrap, orient="vertical", command=self._canvas.yview)
-        self._canvas.configure(yscrollcommand=self._vscroll.set)
-        self._vscroll.pack(side="right", fill="y")
-        self._canvas.pack(side="left", fill="both", expand=True)
- 
-        self._scroll_inner = tk.Frame(self._canvas, bg=page_bg)
-        self._scroll_win = self._canvas.create_window((0, 0), window=self._scroll_inner, anchor="nw")
- 
-        def _on_inner_cfg(_e):
-            self._canvas.configure(scrollregion=self._canvas.bbox("all"))
- 
-        def _on_canvas_cfg(e):
-            # Mantém o container interno com a largura do viewport do canvas.
-            # Assim o frame de cards pode ser centralizado corretamente.
-            self._canvas.itemconfigure(self._scroll_win, width=e.width)
- 
-        self._scroll_inner.bind("<Configure>", _on_inner_cfg)
-        self._canvas.bind("<Configure>", _on_canvas_cfg)
- 
-        def _mw(e):
-            if getattr(e, "delta", 0):
-                self._canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-            elif e.num == 4:
-                self._canvas.yview_scroll(-3, "units")
-            elif e.num == 5:
-                self._canvas.yview_scroll(3, "units")
- 
-        self._canvas.bind_all("<MouseWheel>", _mw)
-        self._canvas.bind_all("<Button-4>", _mw)
-        self._canvas.bind_all("<Button-5>", _mw)
- 
-        self._grid = tk.Frame(self._scroll_inner, bg=page_bg)
-        self._grid.pack(padx=20, pady=(10, 20), anchor="n")
-        self._grid.columnconfigure(0, weight=1, uniform="lcards")
-        self._grid.columnconfigure(1, weight=1, uniform="lcards")
-        self._grid.columnconfigure(2, weight=1, uniform="lcards")
- 
-        self._footer = tk.Frame(self._scroll_inner, bg=page_bg)
-        self._footer.pack(fill="x", padx=20, pady=(0, 20))
- 
-    def _go_back(self):
-        self.controller.show_frame("Home")
+        try: self.after(0, fn)
+        except: pass
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24,0))
+        styled_button(hdr, "← Voltar",
+                      lambda: self.controller.show_frame("Home")).pack(side="left")
+        self._restart_btn = styled_button(hdr, "↻  Atualizar",
+                                          self._restart_limites)
+        self._restart_btn.pack(side="right")
+
+        tk.Label(hdr, text="Limites Invertido", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia",18,"bold")).pack(side="left", padx=(14,0))
+
+        sub = tk.Frame(self, bg=C["bg"])
+        sub.pack(fill="x", padx=32)
+        tk.Label(sub, text="Consulta o LTC e o limite disponível de cada cliente.",
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI",9)).pack(anchor="w", pady=(4,0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16,0))
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._grid_outer = self._sf.inner
+        self._grid_outer.configure(bg=C["bg"])
+
+        self._grid = tk.Frame(self._grid_outer, bg=C["bg"])
+        self._grid.pack(padx=32, pady=(16,24), fill="x")
+        for c in range(3):
+            self._grid.columnconfigure(c, weight=1, uniform="lcards")
+
+    def on_show(self):
+        if self._started: return
+        self._started = True
+        self._cancel_requested = False
+        self._setup_cards()
+        self._start_worker()
 
     def _restart_limites(self):
-        """Limpa os cards atuais e refaz a rotina sob demanda."""
-        self._restart_pending = True
+        self._restart_pending  = True
         self._cancel_requested = True
-        br = getattr(self, "_browser", None)
-        if br is not None:
+        br = getattr(self,"_browser",None)
+        if br:
             try: br.close()
-            except Exception: pass
-        self.after(200, self._start_restart_if_possible)
+            except: pass
+        self.after(200, self._check_restart)
 
-    def _start_restart_if_possible(self):
-        if not self._restart_pending:
-            return
-        if self._worker_running:
-            self.after(220, self._start_restart_if_possible)
-            return
+    def _check_restart(self):
+        if not self._restart_pending: return
+        if self._worker_running: self.after(220, self._check_restart); return
         self._restart_pending = False
         self._cards = []
-        for w in self._grid.winfo_children():
-            w.destroy()
+        for w in self._grid.winfo_children(): w.destroy()
         self._started = False
         self._cancel_requested = False
         self._setup_cards()
         self._started = True
         self._start_worker()
- 
-    def on_show(self):
-        if self._started:
-            return
-        self._started = True
-        self._cancel_requested = False
-        self._setup_cards()
-        self._start_worker()
- 
-    @staticmethod
-    def _hex_to_rgb(h):
-        h = h.lstrip("#")
-        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
- 
-    @staticmethod
-    def _rgb_to_hex(r, g, b):
-        return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
- 
-    def _lerp_hex(self, a, b, t):
-        t = max(0.0, min(1.0, t))
-        ar, ag, ab = self._hex_to_rgb(a)
-        br, bg_, bb = self._hex_to_rgb(b)
-        return self._rgb_to_hex(ar+(br-ar)*t, ag+(bg_-ag)*t, ab+(bb-ab)*t)
- 
-    def _stop_spinner(self, idx):
-        if idx < 0 or idx >= len(self._cards): return
-        c = self._cards[idx]
-        aid = c.get("anim_after_id")
-        if aid is not None:
-            try: self.after_cancel(aid)
-            except Exception: pass
-        c["anim_after_id"] = None
- 
-    def _tick_spinner(self, idx):
-        if idx < 0 or idx >= len(self._cards): return
-        c = self._cards[idx]
-        if c.get("state") not in ("processing", "waiting_mapped"): return
-        c["angle"][0] = (c["angle"][0] + 20) % 360
-        ang = c["angle"][0]
-        if c.get("icon_arc_id") is not None:
-            c["icon_canvas"].itemconfigure(c["icon_arc_id"], start=ang)
-        if c.get("status_arc_id") is not None:
-            c["status_spin"].itemconfigure(c["status_arc_id"], start=ang)
-        c["anim_after_id"] = self.after(70, lambda i=idx: self._tick_spinner(i))
- 
-    def _apply_shell(self, c, inner_bg, border_color):
-        c["inner"].configure(bg=inner_bg)
-        c["icon_canvas"].configure(bg=inner_bg)
-        c["status_spin"].configure(bg=inner_bg)
-        c["status_row"].configure(bg=inner_bg)
-        c["card_canvas"].itemconfigure(c["round_rect_id"], fill=inner_bg, outline=border_color, width=2)
- 
-    def _render_icon_waiting(self, c, bg):
-        ic = c["icon_canvas"]; ic.delete("all"); ic.configure(bg=bg)
-        _bpm_round_rect(ic, 1, 1, 43, 43, 8, fill="#252525", outline="#333333", width=1)
-        ic.create_text(22, 22, text="–", fill="#555555", font=("Segoe UI", 16, "bold"))
- 
-    def _render_icon_processing(self, c, bg, color=None):
-        color = color or self.LIMIT_GREEN
-        ic = c["icon_canvas"]; ic.delete("all"); ic.configure(bg=bg)
-        _bpm_round_rect(ic, 1, 1, 43, 43, 8, fill="#252525", outline="#333333", width=1)
-        c["icon_arc_id"] = ic.create_arc(10, 10, 34, 34, start=0, extent=270, style=tk.ARC, width=2, outline=color)
- 
-    def _render_icon_ok(self, c, bg):
-        ic = c["icon_canvas"]; ic.delete("all"); ic.configure(bg=bg)
-        _bpm_round_rect(ic, 1, 1, 43, 43, 8, fill="#252525", outline=self.LIMIT_GREEN, width=1)
-        ic.create_text(22, 22, text="✓", fill=self.LIMIT_GREEN, font=("Segoe UI", 17, "bold"))
- 
-    def _render_icon_warn(self, c, bg):
-        ic = c["icon_canvas"]; ic.delete("all"); ic.configure(bg=bg)
-        _bpm_round_rect(ic, 1, 1, 43, 43, 8, fill="#252525", outline=self.LIMIT_ORANGE, width=1)
-        ic.create_text(22, 22, text="!", fill=self.LIMIT_ORANGE, font=("Segoe UI", 17, "bold"))
- 
-    def _render_icon_error(self, c, bg):
-        ic = c["icon_canvas"]; ic.delete("all"); ic.configure(bg=bg)
-        _bpm_round_rect(ic, 1, 1, 43, 43, 8, fill="#252525", outline=self.LIMIT_RED, width=1)
-        ic.create_text(22, 22, text="✗", fill=self.LIMIT_RED, font=("Segoe UI", 17, "bold"))
- 
-    def _render_icon_pending(self, c, bg):
-        ic = c["icon_canvas"]; ic.delete("all"); ic.configure(bg=bg)
-        _bpm_round_rect(ic, 1, 1, 43, 43, 8, fill="#252525", outline="#444444", width=1)
-        ic.create_text(22, 22, text="⧗", fill="#555555", font=("Segoe UI", 14))
- 
-    def _render_spinner_status(self, c, bg, color=None):
-        color = color or self.LIMIT_GREEN
-        sc = c["status_spin"]; sc.delete("all"); sc.configure(bg=bg)
-        c["status_arc_id"] = sc.create_arc(2, 2, 20, 20, start=0, extent=270, style=tk.ARC, width=2, outline=color)
- 
+
     def _setup_cards(self):
         for w in self._grid.winfo_children(): w.destroy()
         self._cards = []
- 
         all_clients = list(BPM_CLIENT_DATA.keys())
-        page_bg = self.COLORS["bg"]
- 
-        for idx, client_name in enumerate(all_clients):
-            is_mapped = client_name in self.MAPPED_CLIENTS
-            is_mirror = client_name in self.MIRROR_CLIENTS
-            row = idx // 3
-            col = idx % 3
-            bg_init = "#171717"
-            bord_init = "#2e2e2e"
- 
-            outer = tk.Frame(self._grid, bg=page_bg)
-            outer.grid(row=row, column=col, sticky="nsew", padx=6, pady=6)
- 
-            card_canvas = tk.Canvas(outer, width=self.CARD_W, height=self.CARD_H, highlightthickness=0, bg=page_bg)
-            card_canvas.pack()
- 
-            rr_id = _bpm_round_rect(card_canvas, 0, 0, self.CARD_W, self.CARD_H, self.CARD_R, fill=bg_init, outline=bord_init, width=2)
- 
-            inner = tk.Frame(card_canvas, bg=bg_init)
-            card_canvas.create_window(self.CARD_W // 2, self.CARD_H // 2, window=inner, width=self.CARD_W - 28, height=self.CARD_H - 28)
- 
-            icon_canvas = tk.Canvas(inner, width=44, height=44, highlightthickness=0, bg=bg_init)
-            icon_canvas.pack(pady=(2, 4))
- 
-            name_lbl = tk.Label(inner, text=client_name, bg=bg_init,
-                                fg="#c0c0c0" if (is_mapped or is_mirror) else "#8c8c8c",
-                                font=("Segoe UI", 9, "bold"))
-            name_lbl.pack()
- 
-            if is_mirror:
-                source = self.MIRROR_CLIENTS[client_name]
-                badge_lbl = tk.Label(inner, text=f"via {source}", bg=bg_init, fg="#555555",
-                                     font=("Segoe UI", 7, "italic"))
-                badge_lbl.pack()
-            else:
-                badge_lbl = None
- 
-            info_lbl = tk.Label(inner, text="", bg=bg_init, fg="#8c8c8c",
-                                font=("Segoe UI", 8), wraplength=170, justify="center")
-            info_lbl.pack(pady=(3, 0))
- 
-            status_row = tk.Frame(inner, bg=bg_init)
-            status_row.pack(pady=(8, 2))
- 
-            status_spin = tk.Canvas(status_row, width=22, height=22, highlightthickness=0, bg=bg_init)
-            if is_mapped:
-                status_text = "EM ESPERA"
-            elif is_mirror:
-                status_text = "AGUARDANDO"
-            else:
-                status_text = "A MAPEAR"
-            status_txt = tk.Label(status_row, bg=bg_init, fg="#8c8c8c",
-                                  font=("Segoe UI", 8, "bold"), text=status_text)
-            status_txt.pack(side=tk.LEFT)
- 
-            card_data = {
-                "outer": outer,
-                "card_canvas": card_canvas,
-                "round_rect_id": rr_id,
-                "inner": inner,
-                "icon_canvas": icon_canvas,
-                "badge_lbl": badge_lbl,
-                "status_spin": status_spin,
-                "status_row": status_row,
-                "status_txt": status_txt,
-                "name_lbl": name_lbl,
-                "info_lbl": info_lbl,
-                "angle": [0],
-                "state": "init",
-                "anim_after_id": None,
-                "icon_arc_id": None,
-                "status_arc_id": None,
-                "is_mapped": is_mapped,
-                "is_mirror": is_mirror,
-                "client_name": client_name,
-            }
-            self._cards.append(card_data)
- 
-            if is_mapped:
-                self._render_icon_waiting(card_data, bg_init)
-            elif is_mirror:
-                self._render_icon_waiting(card_data, bg_init)
-            else:
-                self._render_icon_pending(card_data, bg_init)
- 
-        for idx in range(len(self._cards)):
-            self.after(60 * idx, lambda i=idx: self._reveal_card(i))
- 
+        for idx, name in enumerate(all_clients):
+            is_mapped = name in MAPPED_CLIENTS
+            is_mirror = name in MIRROR_CLIENTS
+            row, col  = divmod(idx, 3)
+            c = self._make_card(name, row, col, is_mapped, is_mirror)
+            self._cards.append(c)
+        for i in range(len(self._cards)):
+            self.after(50*i, lambda i=i: self._reveal_card(i))
+
+    def _make_card(self, name, row, col, is_mapped, is_mirror):
+        bg = C["surface"]; bord = C["hair"]
+        outer = tk.Frame(self._grid, bg=C["bg"])
+        outer.grid(row=row, column=col, sticky="nsew", padx=5, pady=5)
+        outer.grid_remove()
+
+        card = tk.Frame(outer, bg=bg, highlightthickness=1, highlightbackground=bord, bd=0)
+        card.pack(fill="both", expand=True)
+        top_bar = tk.Frame(card, bg=bord, height=2)
+        top_bar.pack(fill="x")
+
+        body = tk.Frame(card, bg=bg, padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+
+        icon_lbl = tk.Label(body, text="–", bg=bg, fg=C["ink_faint"],
+                            font=("Segoe UI",14,"bold"))
+        icon_lbl.pack()
+        tk.Label(body, text=name, bg=bg, fg=C["ink_muted"],
+                 font=("Segoe UI",9,"bold")).pack(pady=(6,0))
+        if is_mirror:
+            src = MIRROR_CLIENTS[name]
+            tk.Label(body, text=f"via {src}", bg=bg, fg=C["ink_faint"],
+                     font=("Segoe UI",7,"italic")).pack()
+
+        info_lbl = tk.Label(body, text="", bg=bg, fg=C["ink_muted"],
+                            font=("Segoe UI",8), wraplength=160, justify="center")
+        info_lbl.pack(pady=(6,0))
+
+        status_row = tk.Frame(body, bg=bg)
+        status_row.pack(pady=(8,0))
+        status_lbl = tk.Label(status_row, text="EM ESPERA" if is_mapped or is_mirror else "A MAPEAR",
+                              bg=bg, fg=C["ink_faint"], font=("Segoe UI",7,"bold"))
+        status_lbl.pack()
+
+        spin_id = [None]
+        angle   = [0]
+
+        def tick():
+            angle[0] = (angle[0]+20)%360
+            if spin_id[0] is not None:
+                status_lbl.configure(text=["◐","◓","◑","◒"][angle[0]//90])
+            spin_id[0] = outer.after(120, tick) if spin_id[0] else None
+
+        return {
+            "outer":outer,"card":card,"top_bar":top_bar,"body":body,
+            "icon_lbl":icon_lbl,"info_lbl":info_lbl,"status_lbl":status_lbl,
+            "spin_id":spin_id,"angle":angle,"tick":tick,
+            "is_mapped":is_mapped,"is_mirror":is_mirror,"name":name,"state":"init"
+        }
+
     def _reveal_card(self, idx):
-        if idx < 0 or idx >= len(self._cards): return
+        if idx >= len(self._cards): return
         c = self._cards[idx]
-        if c["is_mapped"]:
-            self._set_card_state(idx, "waiting")
-        elif c["is_mirror"]:
-            self._set_card_state(idx, "mirror_waiting")
-        else:
-            self._set_card_state(idx, "pending")
- 
-    def _set_card_state(self, idx, state, info_text=""):
-        if idx < 0 or idx >= len(self._cards): return
+        c["outer"].grid()
+        state = "waiting" if c["is_mapped"] else ("mirror_waiting" if c["is_mirror"] else "pending")
+        self._set_state(idx, state)
+
+    def _set_state(self, idx, state, info=""):
+        if idx >= len(self._cards): return
         c = self._cards[idx]
-        self._stop_spinner(idx)
+        # cancel spinner
+        if c["spin_id"][0]:
+            try: c["outer"].after_cancel(c["spin_id"][0])
+            except: pass
+            c["spin_id"][0] = None
         c["state"] = state
-        G = self.LIMIT_GREEN
-        O = self.LIMIT_ORANGE
-        R = self.LIMIT_RED
- 
-        if state == "waiting":
-            bg = "#171717"; bord = "#2e2e2e"
-            self._apply_shell(c, bg, bord)
-            c["name_lbl"].configure(bg=bg, fg="#c0c0c0")
-            c["info_lbl"].configure(bg=bg, text="")
-            c["status_spin"].pack_forget(); c["status_txt"].pack_forget()
-            c["status_txt"].configure(bg=bg, fg="#8c8c8c", text="EM ESPERA")
-            c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_waiting(c, bg)
- 
-        elif state == "processing":
-            bg = self.COLORS["muted"]; bord = G
-            self._apply_shell(c, bg, bord)
-            c["name_lbl"].configure(bg=bg, fg="#f2f2f2")
-            c["info_lbl"].configure(bg=bg, text="")
-            c["status_spin"].pack_forget(); c["status_txt"].pack_forget()
-            c["status_spin"].pack(side=tk.LEFT, padx=(0, 6))
-            c["status_txt"].configure(bg=bg, fg=G, text="CONSULTANDO")
-            c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_processing(c, bg)
-            self._render_spinner_status(c, bg)
-            self._tick_spinner(idx)
- 
-        elif state == "ok":
-            bg = self.COLORS["muted"]; bord = G
-            self._apply_shell(c, bg, bord)
-            c["name_lbl"].configure(bg=bg, fg="#f2f2f2")
-            c["info_lbl"].configure(bg=bg, fg="#a8e6c4", text=info_text)
-            c["status_spin"].pack_forget(); c["status_txt"].pack_forget()
-            c["status_txt"].configure(bg=bg, fg=G, text="LIMITE OK")
-            c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_ok(c, bg)
- 
-        elif state == "warn":
-            bg = self.COLORS["muted"]; bord = O
-            self._apply_shell(c, bg, bord)
-            c["name_lbl"].configure(bg=bg, fg="#f2f2f2")
-            c["info_lbl"].configure(bg=bg, fg="#f0c070", text=info_text)
-            c["status_spin"].pack_forget(); c["status_txt"].pack_forget()
-            c["status_txt"].configure(bg=bg, fg=O, text="ATENÇÃO")
-            c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_warn(c, bg)
- 
-        elif state == "error":
-            bg = self.COLORS["muted"]; bord = R
-            self._apply_shell(c, bg, bord)
-            c["name_lbl"].configure(bg=bg, fg="#f2f2f2")
-            c["info_lbl"].configure(bg=bg, fg="#f08080", text=info_text)
-            c["status_spin"].pack_forget(); c["status_txt"].pack_forget()
-            c["status_txt"].configure(bg=bg, fg=R, text="ERRO")
-            c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_error(c, bg)
- 
-        elif state == "ltc_expired":
-            bg = self.COLORS["muted"]; bord = R
-            self._apply_shell(c, bg, bord)
-            c["name_lbl"].configure(bg=bg, fg="#f2f2f2")
-            c["info_lbl"].configure(bg=bg, fg="#f08080", text=info_text)
-            c["status_spin"].pack_forget(); c["status_txt"].pack_forget()
-            c["status_txt"].configure(bg=bg, fg=R, text="LTC VENCIDO")
-            c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_error(c, bg)
- 
-        elif state == "pending":
-            bg = "#151515"; bord = "#2a2a2a"
-            self._apply_shell(c, bg, bord)
-            c["name_lbl"].configure(bg=bg, fg="#555555")
-            c["info_lbl"].configure(bg=bg, text="")
-            if c.get("badge_lbl"): c["badge_lbl"].configure(bg=bg, fg="#444444")
-            c["status_spin"].pack_forget(); c["status_txt"].pack_forget()
-            c["status_txt"].configure(bg=bg, fg="#444444", text="A MAPEAR")
-            c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_pending(c, bg)
- 
-        elif state == "mirror_waiting":
-            bg = "#171717"; bord = "#2a2a2a"
-            self._apply_shell(c, bg, bord)
-            c["name_lbl"].configure(bg=bg, fg="#888888")
-            c["info_lbl"].configure(bg=bg, text="")
-            if c.get("badge_lbl"): c["badge_lbl"].configure(bg=bg, fg="#555555")
-            c["status_spin"].pack_forget(); c["status_txt"].pack_forget()
-            c["status_txt"].configure(bg=bg, fg="#666666", text="AGUARDANDO")
-            c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_waiting(c, bg)
- 
-        if state in ("ok", "warn", "error", "ltc_expired", "processing"):
-            bg = self.COLORS["muted"]
-            if c.get("badge_lbl"): c["badge_lbl"].configure(bg=bg, fg="#555555")
- 
-    def _update_status_text(self, idx, text):
-        if idx < 0 or idx >= len(self._cards): return
-        self._cards[idx]["status_txt"].configure(text=text)
- 
+
+        cfg = {
+            "waiting":       (C["surface"],  C["hair"],     "–",  C["ink_faint"],  "EM ESPERA",   C["ink_faint"]),
+            "mirror_waiting":(C["surface"],  C["hair"],     "–",  C["ink_faint"],  "AGUARDANDO",  C["ink_faint"]),
+            "pending":       (C["surface2"], C["hair"],     "–",  C["ink_faint"],  "A MAPEAR",    C["ink_faint"]),
+            "processing":    (C["surface"],  C["ok"],       "…",  C["ok"],         "CONSULTANDO", C["ok"]),
+            "ok":            (C["surface"],  C["ok"],       "✓",  C["ok"],         "LIMITE OK",   C["ok"]),
+            "warn":          (C["surface"],  C["warn"],     "!",  C["warn"],        "ATENÇÃO",     C["warn"]),
+            "error":         (C["surface"],  C["err"],      "✗",  C["err"],         "ERRO",        C["err"]),
+            "ltc_expired":   (C["surface"],  C["err"],      "✗",  C["err"],         "LTC VENCIDO", C["err"]),
+        }.get(state, (C["surface"], C["hair"], "–", C["ink_faint"], state.upper(), C["ink_faint"]))
+
+        bg, bord, icon_t, icon_fg, status_t, status_fg = cfg
+        c["card"].configure(bg=bg, highlightbackground=bord)
+        c["top_bar"].configure(bg=bord)
+        c["body"].configure(bg=bg)
+        c["icon_lbl"].configure(bg=bg, text=icon_t, fg=icon_fg)
+        c["info_lbl"].configure(bg=bg, text=info, fg=C["ink_muted"])
+        c["status_lbl"].configure(bg=bg, text=status_t, fg=status_fg)
+        c["status_row"].configure(bg=bg)
+        for w in c["body"].winfo_children():
+            try: w.configure(bg=bg)
+            except: pass
+
+        if state == "processing":
+            c["spin_id"][0] = True  # flag
+            c["tick"]()
+
     def _start_worker(self):
         if self._worker_running: return
         self._worker_running = True
         threading.Thread(target=self._worker, daemon=True).start()
- 
-    def _find_card_idx(self, client_name):
+
+    def _find_idx(self, name):
         for i, c in enumerate(self._cards):
-            if c["client_name"] == client_name:
-                return i
+            if c["name"] == name: return i
         return -1
- 
-    def _parse_br_date(self, text: str):
-        text = text.strip()
-        try:
-            return datetime.strptime(text, "%d/%m/%Y").date()
-        except ValueError:
-            return None
- 
-    def _parse_br_number(self, text: str):
-        text = text.strip().replace(".", "").replace(",", "")
-        try:
-            return int(text)
-        except ValueError:
-            return None
- 
+
     def _worker(self):
-        if not PLAYWRIGHT_OK or sync_playwright is None:
-            self._ui(lambda: messagebox.showerror("Erro", "Playwright não disponível neste ambiente."))
-            self._worker_running = False
-            return
- 
+        if not PLAYWRIGHT_OK:
+            self._ui(lambda: messagebox.showerror("Erro","Playwright não disponível."))
+            self._worker_running = False; return
         today = date.today()
- 
         with sync_playwright() as p:
             browser = None
             try:
-                last_err = None
-                for channel in ("chrome", "msedge"):
-                    try:
-                        browser = p.chromium.launch(channel=channel, headless=False)
-                        break
-                    except Exception as e:
-                        last_err = e
+                for ch in ("chrome","msedge"):
+                    try: browser = p.chromium.launch(channel=ch, headless=False); break
+                    except: pass
                 if browser is None:
-                    try:
-                        # Fallback para Chromium embutido no Playwright (útil no executável em PC sem Chrome/Edge).
-                        browser = p.chromium.launch(headless=False)
-                    except Exception as e:
-                        last_err = e
-                if browser is None:
-                    raise RuntimeError(f"Não foi possível iniciar Chrome/Edge. Detalhe: {last_err}")
- 
+                    try: browser = p.chromium.launch(headless=False)
+                    except Exception as e: raise RuntimeError(f"Não foi possível iniciar navegador: {e}")
                 self._browser = browser
                 page = browser.new_page()
                 page.set_default_timeout(60_000)
- 
-                for client_name in list(BPM_CLIENT_DATA.keys()):
-                    if self._cancel_requested:
-                        break
- 
-                    if client_name not in self.MAPPED_CLIENTS:
-                        continue
- 
-                    idx = self._find_card_idx(client_name)
-                    if idx == -1:
-                        continue
- 
-                    self._ui(lambda i=idx: self._set_card_state(i, "processing"))
- 
-                    url = LIMITE_CLIENT_URLS.get(client_name)
+                RE_DATE = re.compile(r"\d{2}/\d{2}/\d{4}")
+
+                for name in list(BPM_CLIENT_DATA.keys()):
+                    if self._cancel_requested: break
+                    if name not in MAPPED_CLIENTS: continue
+                    idx = self._find_idx(name)
+                    if idx == -1: continue
+                    self._ui(lambda i=idx: self._set_state(i, "processing"))
+                    url = LIMITE_CLIENT_URLS.get(name)
                     if not url:
-                        self._ui(lambda i=idx: self._set_card_state(i, "error", "URL não mapeada"))
-                        continue
- 
+                        self._ui(lambda i=idx: self._set_state(i,"error","URL não mapeada")); continue
                     try:
                         page.goto(url, wait_until="domcontentloaded", timeout=60_000)
- 
-                        self._ui(lambda i=idx: self._update_status_text(i, "AGUARDANDO PÁGINA"))
                         time.sleep(7)
- 
-                        if self._cancel_requested:
-                            break
- 
-                        self._ui(lambda i=idx: self._update_status_text(i, "LENDO LTC"))
- 
-                        ltc_date_str = None
-                        RE_DATE = re.compile(r"\d{2}/\d{2}/\d{4}")
- 
-                        def _read_ltc_date():
-                            try:
-                                card_venc = page.locator("#vencimentoSubgrupo")
-                                card_venc.wait_for(state="visible", timeout=10_000)
-                                spans = card_venc.locator("span.u-font-size--14.u-ml--8.u-mt--8.u-block")
-                                for si in range(spans.count()):
-                                    txt = (spans.nth(si).inner_text() or "").strip()
-                                    if RE_DATE.match(txt):
-                                        return txt
-                            except Exception:
-                                pass
- 
-                            try:
-                                all_spans = page.locator("span.u-font-size--14.u-ml--8.u-mt--8.u-block")
-                                for si in range(all_spans.count()):
-                                    txt = (all_spans.nth(si).inner_text() or "").strip()
-                                    if RE_DATE.match(txt):
-                                        return txt
-                            except Exception:
-                                pass
- 
+                        if self._cancel_requested: break
+
+                        # ler LTC
+                        ltc_str = None
+                        try:
+                            all_spans = page.locator("span.u-font-size--14.u-ml--8.u-mt--8.u-block")
+                            for si in range(all_spans.count()):
+                                txt = (all_spans.nth(si).inner_text() or "").strip()
+                                if RE_DATE.match(txt): ltc_str = txt; break
+                        except: pass
+                        if not ltc_str:
                             try:
                                 body_text = page.locator("body").inner_text()
                                 m = RE_DATE.search(body_text)
-                                if m:
-                                    return m.group(0)
-                            except Exception:
-                                pass
- 
-                            return None
- 
-                        ltc_date_str = _read_ltc_date()
- 
-                        ltc_date = self._parse_br_date(ltc_date_str) if ltc_date_str else None
- 
-                        if ltc_date is None:
-                            self._ui(lambda i=idx: self._set_card_state(i, "error", "Não foi possível ler\ndata do LTC"))
-                            for mirror_name in LIMITE_SHARED_RESULTS.get(client_name, []):
-                                midx = self._find_card_idx(mirror_name)
-                                if midx != -1:
-                                    self._ui(lambda mi=midx: self._set_card_state(mi, "error", "Não foi possível ler\ndata do LTC"))
-                            continue
- 
-                        if ltc_date <= today:
-                            info = f"LTC vencido em {ltc_date_str}"
-                            self._ui(lambda i=idx, inf=info: self._set_card_state(i, "ltc_expired", inf))
-                            for mirror_name in LIMITE_SHARED_RESULTS.get(client_name, []):
-                                midx = self._find_card_idx(mirror_name)
-                                if midx != -1:
-                                    self._ui(lambda mi=midx, inf=info: self._set_card_state(mi, "ltc_expired", inf))
-                            continue
- 
-                        self._ui(lambda i=idx: self._update_status_text(i, "LENDO LIMITES"))
- 
-                        limite_disp = None
-                        LIMITE_BAIXO_REAIS = 1_000_000
- 
+                                if m: ltc_str = m.group(0)
+                            except: pass
+
                         try:
-                            
-                            limite_fornecedor = page.evaluate("""
-                                (function() {
-                                    function norm(s) {
-                                        return String(s || '')
-                                          .replace(/\\u00a0/g, ' ')
-                                          .replace(/\\s+/g, ' ')
-                                          .trim()
-                                          .toLowerCase();
-                                    }
-                                    var rows = Array.prototype.slice.call(document.querySelectorAll('table.atual tbody tr'));
-                                    for (var i = 0; i < rows.length; i++) {
-                                        var r = rows[i];
-                                        var tdName = r.querySelector('td.tdNomeFinalidade');
-                                        if (!tdName) continue;
-                                        if (norm(tdName.textContent) !== 'fornecedor') continue;
-                                        var tdDisp = r.querySelector('td[id^=\"valorDisponibilidade_\"]') || r.querySelector('td.tdValorDisp[id^=\"valorDisponibilidade_\"]') || r.querySelector('td.tdValorDisp');
-                                        if (!tdDisp) return null;
-                                        return norm(tdDisp.textContent);
+                            ltc_date = datetime.strptime(ltc_str,"%d/%m/%Y").date() if ltc_str else None
+                        except: ltc_date = None
+
+                        if ltc_date is None:
+                            inf = "Não foi possível ler\ndata do LTC"
+                            self._ui(lambda i=idx,inf=inf: self._set_state(i,"error",inf))
+                            for mn in LIMITE_SHARED_RESULTS.get(name,[]):
+                                mi = self._find_idx(mn)
+                                if mi!=-1: self._ui(lambda i=mi,inf=inf: self._set_state(i,"error",inf))
+                            continue
+
+                        if ltc_date <= today:
+                            inf = f"LTC vencido em {ltc_str}"
+                            self._ui(lambda i=idx,inf=inf: self._set_state(i,"ltc_expired",inf))
+                            for mn in LIMITE_SHARED_RESULTS.get(name,[]):
+                                mi = self._find_idx(mn)
+                                if mi!=-1: self._ui(lambda i=mi,inf=inf: self._set_state(i,"ltc_expired",inf))
+                            continue
+
+                        # ler limite
+                        limite_disp = None
+                        BAIXO = 1_000_000
+                        try:
+                            val_js = page.evaluate("""
+                                (function(){
+                                    var rows=document.querySelectorAll('table.atual tbody tr');
+                                    for(var i=0;i<rows.length;i++){
+                                        var n=rows[i].querySelector('td.tdNomeFinalidade');
+                                        if(!n||String(n.textContent).trim().toLowerCase()!=='fornecedor') continue;
+                                        var d=rows[i].querySelector('td[id^="valorDisponibilidade_"]');
+                                        if(!d) continue;
+                                        return String(d.textContent).trim();
                                     }
                                     return null;
                                 })()
                             """)
+                            if val_js:
+                                s = val_js.replace(".","").replace(",","")
+                                try: limite_disp = int(s)
+                                except: pass
+                            if limite_disp is None:
+                                tds = page.locator("td.tdValorDisp")
+                                for ti in range(tds.count()):
+                                    s = re.sub(r"[^\d]","", tds.nth(ti).inner_text() or "")
+                                    try:
+                                        v = int(s)
+                                        if limite_disp is None or v > limite_disp: limite_disp = v
+                                    except: pass
+                        except: pass
 
-                            if limite_fornecedor:
-                                limite_disp = self._parse_br_number(limite_fornecedor)
-                            else:
-                                
-                                tds_disp = page.locator("td.tdValorDisp")
-                                tds_disp.first.wait_for(state="visible", timeout=10_000)
-                                for ti in range(tds_disp.count()):
-                                    val = self._parse_br_number(tds_disp.nth(ti).inner_text() or "")
-                                    if val is not None and (limite_disp is None or val > limite_disp):
-                                        limite_disp = val
-                        except Exception:
-                            pass
- 
-                        ltc_fmt = ltc_date_str
-                        if limite_disp is not None:
-                            disp_fmt = f"R$ {limite_disp:,}".replace(",", ".")
-                        else:
-                            disp_fmt = "N/D"
- 
-                        limite_baixo = (
-                            limite_disp is not None
-                            and limite_disp < LIMITE_BAIXO_REAIS
-                        )
-                        limite_warn_msg = ""
-                        if limite_baixo:
-                            limite_warn_msg = (
-                                f"Disponibilidade fornecedor abaixo de "
-                                f"R$ {LIMITE_BAIXO_REAIS:,}".replace(",", ".")
-                            )
- 
-                        info_lines = [
-                            f"LTC ativo · vence {ltc_fmt}",
-                            f"Limite Disp. (fornecedor): {disp_fmt}",
-                        ]
-                        info_text = "\n".join(info_lines)
- 
-                        if limite_baixo:
-                            final_info = info_text + f"\n⚠ {limite_warn_msg}"
-                            final_state = "warn"
-                            self._ui(lambda i=idx, inf=final_info: self._set_card_state(i, "warn", inf))
-                        else:
-                            final_state = "ok"
-                            self._ui(lambda i=idx, inf=info_text: self._set_card_state(i, "ok", inf))
- 
-                        mirrors = LIMITE_SHARED_RESULTS.get(client_name, [])
-                        for mirror_name in mirrors:
-                            midx = self._find_card_idx(mirror_name)
-                            if midx == -1:
-                                continue
-                            mirror_info = info_text + f"\n(via {client_name})"
-                            if final_state == "warn":
-                                mirror_info = info_text + f"\n⚠ {limite_warn_msg}\n(via {client_name})"
-                            self._ui(lambda mi=midx, st=final_state, inf=mirror_info: self._set_card_state(mi, st, inf))
- 
-                    except BPMUserCancelled:
-                        break
+                        disp_fmt = f"R$ {limite_disp:,}".replace(",",".") if limite_disp is not None else "N/D"
+                        inf = f"LTC ativo · vence {ltc_str}\nLimite Disp. (fornecedor): {disp_fmt}"
+                        warn = limite_disp is not None and limite_disp < BAIXO
+                        final_state = "warn" if warn else "ok"
+                        if warn: inf += f"\n⚠ Limite abaixo de R$ {BAIXO:,}".replace(",",".")
+
+                        self._ui(lambda i=idx,s=final_state,inf=inf: self._set_state(i,s,inf))
+                        for mn in LIMITE_SHARED_RESULTS.get(name,[]):
+                            mi = self._find_idx(mn)
+                            if mi!=-1:
+                                minf = inf + f"\n(via {name})"
+                                self._ui(lambda i=mi,s=final_state,inf=minf: self._set_state(i,s,inf))
+
+                    except BPMUserCancelled: break
                     except Exception as e:
-                        if self._cancel_requested:
-                            break
-                        err_str = str(e)[:80]
-                        self._ui(lambda i=idx, err=err_str: self._set_card_state(i, "error", err))
- 
+                        if self._cancel_requested: break
+                        es = str(e)[:80]
+                        self._ui(lambda i=idx,es=es: self._set_state(i,"error",es))
+
             except Exception as e:
                 if not self._cancel_requested:
-                    err_msg = str(e)
-                    self._ui(lambda: messagebox.showerror("Erro na consulta", err_msg))
+                    em = str(e)
+                    self._ui(lambda: messagebox.showerror("Erro na consulta",em))
             finally:
                 self._browser = None
-                if browser is not None:
+                if browser:
                     try: browser.close()
-                    except Exception: pass
+                    except: pass
                 self._worker_running = False
- 
- 
-class BPMFrame(ttk.Frame):
-    BPM_GREEN = "#2ecc71"
-    CARD_W = 212
-    CARD_H = 172
-    CARD_R = 18
-    CANCEL_FG = "#5b5b5b"
-    CANCEL_HOVER_FG = "#f25c5c"
- 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  BPM FRAME — execução com log scrollável
+# ═══════════════════════════════════════════════════════════════════════════════
+class BPMFrame(tk.Frame):
     def __init__(self, parent, controller):
-        super().__init__(parent, style="Root.TFrame")
+        super().__init__(parent, bg=C["bg"])
         self.controller = controller
-        self.COLORS = controller.COLORS
-        self._started = False
-        self._cards = []
-        self._selected = []
-        self._worker_running = False
+        self._cards   = []
+        self._selected= []
+        self._worker_running   = False
         self._cancel_requested = False
         self._browser = None
-        self._cancel_anim_after = None
-        self._cancel_hover_after = None
-        self._cancel_btn = None
-        self._build_ui()
- 
+        self._started = False
+        self._build()
+
     def _ui(self, fn):
         try: self.after(0, fn)
-        except Exception: pass
- 
-    def _build_ui(self):
-        page_bg = self.COLORS["bg"]
-        outer = tk.Frame(self, bg=page_bg)
-        outer.pack(fill="both", expand=True)
-        container = tk.Frame(outer, bg=page_bg, width=672)
-        container.pack(expand=True)
-        header = tk.Frame(container, bg=page_bg)
-        header.pack(fill="x", pady=(40, 28))
-        self._title_lbl = tk.Label(header, text="Operações em andamento", bg=page_bg, fg="#f2f2f2", font=("Segoe UI", 15, "bold"))
-        self._title_lbl.pack()
-        self._subtitle_lbl = tk.Label(header, text="Acompanhe o progresso de cada cliente.", bg=page_bg, fg="#8c8c8c", font=("Segoe UI", 10, "normal"))
-        self._subtitle_lbl.pack(pady=(8, 0))
-        self._grid = tk.Frame(container, bg=page_bg)
-        self._grid.pack(fill="both", expand=True)
-        self._grid.columnconfigure(0, weight=1, uniform="cards")
-        self._grid.columnconfigure(1, weight=1, uniform="cards")
-        self._grid.columnconfigure(2, weight=1, uniform="cards")
-        self._cancel_footer = tk.Frame(container, bg=page_bg)
-        self._cancel_footer.pack(fill="x", pady=(32, 0))
- 
-    @staticmethod
-    def _hex_to_rgb(h):
-        h = h.lstrip("#")
-        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
- 
-    @staticmethod
-    def _rgb_to_hex(r, g, b):
-        return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
- 
-    def _lerp_hex(self, a: str, b: str, t: float):
-        t = max(0.0, min(1.0, t))
-        ar, ag, ab = self._hex_to_rgb(a); br, bg, bb = self._hex_to_rgb(b)
-        return self._rgb_to_hex(ar+(br-ar)*t, ag+(bg-ag)*t, ab+(bb-ab)*t)
- 
-    def _clear_cancel_footer(self):
-        if self._cancel_anim_after is not None:
-            try: self.after_cancel(self._cancel_anim_after)
-            except Exception: pass
-            self._cancel_anim_after = None
-        if self._cancel_hover_after is not None:
-            try: self.after_cancel(self._cancel_hover_after)
-            except Exception: pass
-            self._cancel_hover_after = None
-        self._cancel_btn = None
-        for w in self._cancel_footer.winfo_children(): w.destroy()
- 
-    def _setup_cancel_button(self):
-        self._clear_cancel_footer()
-        page_bg = self.COLORS["bg"]
-        n = len(self._selected)
-        delay_ms = n * 80 + 200
-        row = tk.Frame(self._cancel_footer, bg=page_bg)
-        row.pack(fill="x")
-        holder = tk.Frame(row, bg=page_bg, height=28)
-        holder.pack(fill="x")
-        cancel_text = "\u200a".join("CANCELAR OPERAÇÕES")
-        btn = tk.Button(holder, text=cancel_text, command=self._on_cancel_operations, font=("Segoe UI", 12), fg=page_bg, activeforeground=self.CANCEL_HOVER_FG, bg=page_bg, activebackground=page_bg, bd=0, relief="flat", highlightthickness=0, padx=0, pady=0, cursor="hand2", borderwidth=0, takefocus=0)
-        self._cancel_btn = btn
-        btn.place(relx=0.5, y=10, anchor="n")
-        target_fg = self.CANCEL_FG
-        steps = 10; duration_ms = 300; step_ms = max(1, duration_ms // steps)
- 
-        def step(i):
-            if not btn.winfo_exists(): return
-            t = (i + 1) / steps; fg = self._lerp_hex(page_bg, target_fg, t); y = 10 * (1.0 - t)
-            btn.configure(fg=fg); btn.place_configure(y=y)
-            if i + 1 < steps: self._cancel_anim_after = self.after(step_ms, lambda: step(i + 1))
-            else: self._cancel_anim_after = None; btn.place_configure(y=0)
- 
-        def start_anim():
-            if not btn.winfo_exists(): return
-            self._cancel_anim_after = None; step(0)
- 
-        self._cancel_anim_after = self.after(delay_ms, start_anim)
-        trans_steps = 4; trans_ms = 200; step_h = max(1, trans_ms // trans_steps)
-        normal = self.CANCEL_FG; hover = self.CANCEL_HOVER_FG
- 
-        def cancel_hover_anim():
-            if self._cancel_hover_after is not None:
-                try: self.after_cancel(self._cancel_hover_after)
-                except Exception: pass
-                self._cancel_hover_after = None
- 
-        def animate_color(to_hex, from_hex, i):
-            if not btn.winfo_exists(): return
-            t = (i + 1) / trans_steps; btn.configure(fg=self._lerp_hex(from_hex, to_hex, t))
-            if i + 1 < trans_steps: self._cancel_hover_after = self.after(step_h, lambda j=i+1: animate_color(to_hex, from_hex, j))
-            else: self._cancel_hover_after = None
- 
-        def on_enter(_): cancel_hover_anim(); cur = btn.cget("fg") if btn.winfo_exists() else normal; animate_color(hover, cur, 0)
-        def on_leave(_): cancel_hover_anim(); cur = btn.cget("fg") if btn.winfo_exists() else normal; animate_color(normal, cur, 0)
-        btn.bind("<Enter>", on_enter); btn.bind("<Leave>", on_leave)
- 
-    def _reset_bpm_view(self):
-        for i in range(len(self._cards)): self._stop_card_spinner(i)
-        self._cards = []
-        for w in self._grid.winfo_children(): w.destroy()
-        self._clear_cancel_footer()
- 
-    def _on_cancel_operations(self):
-        self._cancel_requested = True
-        self.controller.bpm_run_selection = []
-        br = getattr(self, "_browser", None)
-        if br is not None:
-            try: br.close()
-            except Exception: pass
-        self._reset_bpm_view()
-        self._started = False
-        self.controller.show_frame("Home")
-        home = self.controller.frames.get("Home")
-        if home is not None and hasattr(home, "open_bpm_mode_dialog"):
-            self.after(0, home.open_bpm_mode_dialog)
- 
+        except: pass
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24,0))
+        tk.Label(hdr, text="BPM — Operações em andamento", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia",18,"bold")).pack(side="left")
+        self._cancel_btn = styled_button(hdr, "✕  Cancelar",
+                                         self._on_cancel, danger=True)
+        self._cancel_btn.pack(side="right")
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14,0))
+
+        # grid de cards
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._grid_wrap = self._sf.inner
+        self._grid_wrap.configure(bg=C["bg"])
+
+        self._grid = tk.Frame(self._grid_wrap, bg=C["bg"])
+        self._grid.pack(padx=32, pady=(16,8), fill="x")
+        for c in range(3):
+            self._grid.columnconfigure(c, weight=1, uniform="bcards")
+
+        # log
+        make_hairline(self._grid_wrap, bg=C["hair"]).pack(fill="x", padx=32, pady=(8,0))
+        log_hdr = tk.Frame(self._grid_wrap, bg=C["bg"])
+        log_hdr.pack(fill="x", padx=32, pady=(10,4))
+        tk.Label(log_hdr, text="Log de execução", bg=C["bg"], fg=C["ink_muted"],
+                 font=("Segoe UI",8,"bold")).pack(side="left")
+        styled_button(log_hdr, "Limpar log",
+                      self._clear_log, small=True).pack(side="right")
+
+        log_frame = tk.Frame(self._grid_wrap, bg=C["bg"])
+        log_frame.pack(fill="x", padx=32, pady=(0,24))
+        log_frame.columnconfigure(0, weight=1)
+        self._log = tk.Text(log_frame, height=10, wrap="word", bd=0, relief="flat",
+                            bg=C["surface"], fg=C["log_step"],
+                            font=("Consolas",8), padx=10, pady=8,
+                            state="disabled")
+        self._log.grid(row=0, column=0, sticky="ew")
+        lsb = tk.Scrollbar(log_frame, orient="vertical", command=self._log.yview)
+        lsb.grid(row=0, column=1, sticky="ns")
+        self._log.configure(yscrollcommand=lsb.set)
+        self._log.tag_configure("step",    foreground=C["log_step"])
+        self._log.tag_configure("heading", foreground=C["ink"])
+        self._log.tag_configure("ok",      foreground=C["log_ok"])
+        self._log.tag_configure("warn",    foreground=C["log_warn"])
+        self._log.tag_configure("err",     foreground=C["log_err"])
+
+    def _log_line(self, msg, tag="step"):
+        def _do():
+            self._log.configure(state="normal")
+            self._log.insert("end", f"{datetime.now().strftime('%H:%M:%S')}  {msg}\n", tag)
+            self._log.see("end")
+            self._log.configure(state="disabled")
+        self._ui(_do)
+
+    def _clear_log(self):
+        self._log.configure(state="normal")
+        self._log.delete("1.0","end")
+        self._log.configure(state="disabled")
+
     def on_show(self):
-        selection = getattr(self.controller, "bpm_run_selection", None) or []
-        if not selection: return
+        sel = getattr(self.controller,"bpm_run_selection",None) or []
+        if not sel: return
         self._cancel_requested = False
         if self._started: return
         self._started = True
-        self._selected = selection
+        self._selected = sel
         self._setup_cards()
         self._start_worker()
- 
-    def _stop_card_spinner(self, idx: int):
-        if idx < 0 or idx >= len(self._cards): return
-        c = self._cards[idx]
-        aid = c.get("anim_after_id")
-        if aid is not None:
-            try: self.after_cancel(aid)
-            except Exception: pass
-        c["anim_after_id"] = None; c["icon_arc_id"] = None; c["status_arc_id"] = None
- 
-    def _tick_card_spinner(self, idx: int):
-        if idx < 0 or idx >= len(self._cards): return
-        c = self._cards[idx]
-        if c.get("state") != "processing": return
-        c["angle"][0] = (c["angle"][0] + 20) % 360; ang = c["angle"][0]
-        if c.get("icon_arc_id") is not None: c["icon_canvas"].itemconfigure(c["icon_arc_id"], start=ang)
-        if c.get("status_arc_id") is not None: c["status_spin"].itemconfigure(c["status_arc_id"], start=ang)
-        c["anim_after_id"] = self.after(70, lambda i=idx: self._tick_card_spinner(i))
- 
-    def _apply_card_shell(self, c, inner_bg: str, border_color: str):
-        c["inner"].configure(bg=inner_bg); c["icon_canvas"].configure(bg=inner_bg)
-        c["status_spin"].configure(bg=inner_bg); c["status_row"].configure(bg=inner_bg)
-        c["card_canvas"].itemconfigure(c["round_rect_id"], fill=inner_bg, outline=border_color, width=2)
- 
-    def _render_icon_waiting(self, c, bg: str):
-        ic = c["icon_canvas"]; ic.delete("all"); ic.configure(bg=bg)
-        _bpm_round_rect(ic, 1, 1, 43, 43, 8, fill="#252525", outline="#333333", width=1)
- 
-    def _render_icon_processing(self, c, bg: str):
-        ic = c["icon_canvas"]; ic.delete("all"); ic.configure(bg=bg)
-        _bpm_round_rect(ic, 1, 1, 43, 43, 8, fill="#252525", outline="#333333", width=1)
-        c["icon_arc_id"] = ic.create_arc(10, 10, 34, 34, start=0, extent=270, style=tk.ARC, width=2, outline=self.BPM_GREEN)
- 
-    def _render_icon_done(self, c, bg: str):
-        ic = c["icon_canvas"]; ic.delete("all"); ic.configure(bg=bg)
-        _bpm_round_rect(ic, 1, 1, 43, 43, 8, fill="#252525", outline=self.BPM_GREEN, width=1)
-        ic.create_text(22, 22, text="✓", fill=self.BPM_GREEN, font=("Segoe UI", 17, "bold"))
- 
-    def _render_status_spinner(self, c, bg: str):
-        sc = c["status_spin"]; sc.delete("all"); sc.configure(bg=bg)
-        c["status_arc_id"] = sc.create_arc(2, 2, 20, 20, start=0, extent=270, style=tk.ARC, width=2, outline=self.BPM_GREEN)
- 
-    def _setup_cards(self):
-        for c in self._grid.winfo_children(): c.destroy()
+
+    def _on_cancel(self):
+        self._cancel_requested = True
+        self.controller.bpm_run_selection = []
+        br = getattr(self,"_browser",None)
+        if br:
+            try: br.close()
+            except: pass
+        self._reset()
+        self._started = False
+        self.controller.show_frame("BPM_CONFIG")
+
+    def _reset(self):
         self._cards = []
-        border_waiting = "#2e2e2e"; bg_waiting = "#171717"
+        for w in self._grid.winfo_children(): w.destroy()
+
+    def _setup_cards(self):
+        self._reset()
         for idx, item in enumerate(self._selected):
-            client = item.get("cliente") or ""
-            raw_val = (item.get("valor") or "").strip()
-            display_val = raw_val
-            if display_val.lower().startswith("r$"): display_val = display_val[2:].strip()
-            row = idx // 3; col = idx % 3
-            page_bg = self.COLORS["bg"]
-            outer = tk.Frame(self._grid, bg=page_bg)
-            outer.grid(row=row, column=col, sticky="nsew", padx=6, pady=6)
-            outer.grid_remove()
-            card_canvas = tk.Canvas(outer, width=self.CARD_W, height=self.CARD_H, highlightthickness=0, bg=page_bg)
-            card_canvas.pack()
-            round_rect_id = _bpm_round_rect(card_canvas, 0, 0, self.CARD_W, self.CARD_H, self.CARD_R, fill=bg_waiting, outline=border_waiting, width=2)
-            inner = tk.Frame(card_canvas, bg=bg_waiting)
-            card_canvas.create_window(self.CARD_W // 2, self.CARD_H // 2, window=inner, width=self.CARD_W - 28, height=self.CARD_H - 28)
-            icon_canvas = tk.Canvas(inner, width=44, height=44, highlightthickness=0, bg=bg_waiting)
-            icon_canvas.pack(pady=(2, 4))
-            name_lbl = tk.Label(inner, text=client, bg=bg_waiting, fg="#f2f2f2", font=("Segoe UI", 10, "bold"))
-            name_lbl.pack()
-            val_lbl = tk.Label(inner, text=f"R$ {display_val}", bg=bg_waiting, fg="#8c8c8c", font=("Segoe UI", 9))
-            val_lbl.pack(pady=(3, 0))
-            status_row = tk.Frame(inner, bg=bg_waiting)
-            status_row.pack(pady=(10, 2))
-            status_spin = tk.Canvas(status_row, width=22, height=22, highlightthickness=0, bg=bg_waiting)
-            status_txt = tk.Label(status_row, text="EM ESPERA", bg=bg_waiting, fg="#8c8c8c", font=("Segoe UI", 8, "bold"))
-            status_txt.pack(side=tk.LEFT)
-            self._cards.append({
-                "outer": outer, "card": outer, "card_canvas": card_canvas, "round_rect_id": round_rect_id,
-                "inner": inner, "icon_canvas": icon_canvas, "status_spin": status_spin, "status_row": status_row,
-                "status_txt": status_txt, "name_lbl": name_lbl, "val_lbl": val_lbl,
-                "angle": [0], "state": "init", "anim_after_id": None, "icon_arc_id": None, "status_arc_id": None,
-            })
-            self._render_icon_waiting(self._cards[-1], bg_waiting)
- 
-        for idx in range(1, len(self._cards)):
-            delay = 80 * idx
-            self.after(delay, lambda i=idx: self._set_card_state(i, "waiting", show=True))
+            cli = item.get("cliente","")
+            raw = (item.get("valor","")).strip()
+            display = raw[2:].strip() if raw.lower().startswith("r$") else raw
+            row, col = divmod(idx,3)
+            c = self._make_card(cli, display, row, col)
+            self._cards.append(c)
+        for i in range(1, len(self._cards)):
+            self.after(60*i, lambda i=i: self._set_card_state(i,"waiting",show=True))
         if self._cards:
-            self.after(0, lambda: self._set_card_state(0, "processing", show=True))
-        self._setup_cancel_button()
- 
+            self.after(0, lambda: self._set_card_state(0,"processing",show=True))
+
+    def _make_card(self, name, val_display, row, col):
+        bg = C["surface"]; bord = C["hair"]
+        outer = tk.Frame(self._grid, bg=C["bg"])
+        outer.grid(row=row, column=col, sticky="nsew", padx=5, pady=5)
+        outer.grid_remove()
+        card = tk.Frame(outer, bg=bg, highlightthickness=1, highlightbackground=bord)
+        card.pack(fill="both", expand=True)
+        top_bar = tk.Frame(card, bg=bord, height=2)
+        top_bar.pack(fill="x")
+        body = tk.Frame(card, bg=bg, padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+        icon_lbl = tk.Label(body, text="–", bg=bg, fg=C["ink_faint"],
+                            font=("Segoe UI",14,"bold"))
+        icon_lbl.pack()
+        tk.Label(body, text=name, bg=bg, fg=C["ink"],
+                 font=("Segoe UI",10,"bold")).pack(pady=(6,0))
+        tk.Label(body, text=f"R$ {val_display}", bg=bg, fg=C["ink_muted"],
+                 font=("Segoe UI",8)).pack(pady=(2,0))
+        status_lbl = tk.Label(body, text="EM ESPERA", bg=bg, fg=C["ink_faint"],
+                              font=("Segoe UI",7,"bold"))
+        status_lbl.pack(pady=(8,0))
+        angle = [0]; spin_id = [None]
+        def tick():
+            angle[0]=(angle[0]+90)%360
+            status_lbl.configure(text=["◐","◓","◑","◒"][angle[0]//90])
+            spin_id[0] = outer.after(180, tick) if spin_id[0] else None
+        return {"outer":outer,"card":card,"top_bar":top_bar,"body":body,
+                "icon_lbl":icon_lbl,"status_lbl":status_lbl,
+                "spin_id":spin_id,"angle":angle,"tick":tick,"state":"init"}
+
     def _set_card_state(self, idx, state, show=False):
-        if idx < 0 or idx >= len(self._cards): return
-        c = self._cards[idx]; self._stop_card_spinner(idx); c["state"] = state; g = self.BPM_GREEN
-        if state == "processing":
-            bg = self.COLORS["muted"]
-            self._apply_card_shell(c, bg, g)
-            c["name_lbl"].configure(bg=bg, fg="#f2f2f2"); c["val_lbl"].configure(bg=bg, fg="#8c8c8c")
-            c["status_txt"].configure(bg=bg, fg=g, text="ABRINDO BPM"); c["status_txt"].pack_forget()
-            c["status_spin"].pack(side=tk.LEFT, padx=(0, 8)); c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_processing(c, bg); self._render_status_spinner(c, bg); self._tick_card_spinner(idx)
-            if show: c["outer"].grid()
-        elif state == "waiting":
-            bg = "#171717"; bord = "#2e2e2e"
-            self._apply_card_shell(c, bg, bord)
-            c["name_lbl"].configure(bg=bg, fg="#8c8c8c"); c["val_lbl"].configure(bg=bg, fg="#8c8c8c")
-            c["status_spin"].pack_forget(); c["status_txt"].pack_forget()
-            c["status_txt"].configure(bg=bg, fg="#8c8c8c", text="EM ESPERA"); c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_waiting(c, bg)
-            if show: c["outer"].grid()
-        elif state == "done":
-            bg = self.COLORS["muted"]
-            self._apply_card_shell(c, bg, g)
-            c["name_lbl"].configure(bg=bg, fg="#f2f2f2"); c["val_lbl"].configure(bg=bg, fg="#8c8c8c")
-            c["status_spin"].pack_forget(); c["status_txt"].pack_forget()
-            c["status_txt"].configure(bg=bg, fg=g, text="CONCLUÍDO"); c["status_txt"].pack(side=tk.LEFT)
-            self._render_icon_done(c, bg)
-            if show: c["outer"].grid()
- 
-    def _parse_amount_for_web(self, raw: str) -> str:
-        return _format_brl_plain_for_web(raw)
- 
+        if idx >= len(self._cards): return
+        c = self._cards[idx]
+        if c["spin_id"][0]:
+            try: c["outer"].after_cancel(c["spin_id"][0])
+            except: pass
+            c["spin_id"][0] = None
+        c["state"] = state
+
+        cfg = {
+            "waiting":    (C["surface"],  C["hair"],  "–",  C["ink_faint"], "EM ESPERA",  C["ink_faint"]),
+            "processing": (C["surface"],  C["ok"],    "…",  C["ok"],        "EXECUTANDO", C["ok"]),
+            "done":       (C["surface"],  C["ok"],    "✓",  C["ok"],        "CONCLUÍDO",  C["ok"]),
+            "error":      (C["surface"],  C["err"],   "✗",  C["err"],       "ERRO",       C["err"]),
+        }.get(state, (C["surface"], C["hair"], "–", C["ink_faint"], state, C["ink_faint"]))
+
+        bg,bord,ic,ic_fg,st,st_fg = cfg
+        c["card"].configure(bg=bg, highlightbackground=bord)
+        c["top_bar"].configure(bg=bord)
+        c["body"].configure(bg=bg)
+        c["icon_lbl"].configure(bg=bg, text=ic, fg=ic_fg)
+        c["status_lbl"].configure(bg=bg, text=st, fg=st_fg)
+        for w in c["body"].winfo_children():
+            try: w.configure(bg=bg)
+            except: pass
+        if show: c["outer"].grid()
+        if state=="processing":
+            c["spin_id"][0] = True
+            c["tick"]()
+
+    def _update_card_status(self, idx, text):
+        if idx >= len(self._cards): return
+        self._cards[idx]["status_lbl"].configure(text=text)
+
     def _start_worker(self):
         if self._worker_running: return
         self._worker_running = True
         threading.Thread(target=self._worker, daemon=True).start()
- 
+
     def _worker(self):
-        if not PLAYWRIGHT_OK or sync_playwright is None:
-            self._ui(lambda: messagebox.showerror("Erro", "Playwright não disponível neste ambiente."))
-            self._worker_running = False
-            return
- 
-        funcional_login = (getattr(self.controller, "bpm_funcional", None) or "").strip()
-        senha_login = (getattr(self.controller, "bpm_password", None) or "").strip()
-        if not funcional_login or not senha_login:
-            self._ui(lambda: messagebox.showerror("BPM", "Funcional ou senha não informados. Refaça o fluxo pelo botão BPM."))
-            self._worker_running = False
-            return
- 
-        PAINEL_MIDDLE_URL = "https://painelservicos.cloud.ihf/AplicAutSolicitacoesMiddle"
-        PACE_MUL = 0.85
-        STEP_MS = 15_000
- 
+        if not PLAYWRIGHT_OK:
+            self._ui(lambda: messagebox.showerror("Erro","Playwright não disponível."))
+            self._worker_running = False; return
+
+        funcional = (getattr(self.controller,"bpm_funcional","") or "").strip()
+        senha     = (getattr(self.controller,"bpm_password","") or "").strip()
+        if not funcional or not senha:
+            self._ui(lambda: messagebox.showerror("BPM","Credenciais não informadas."))
+            self._worker_running = False; return
+
+        PAINEL = "https://painelservicos.cloud.ihf/AplicAutSolicitacoesMiddle"
+        PACE   = 0.85
+
+        def pace(a=1.15, b=1.75):
+            time.sleep(random.uniform(a*PACE, b*PACE))
+
         def pick_browser(p):
-            last_err = None
-            for channel in ("chrome", "msedge"):
-                try: return p.chromium.launch(channel=channel, headless=False)
-                except Exception as e: last_err = e
-            try:
-                return p.chromium.launch(headless=False)
-            except Exception as e:
-                last_err = e
-            raise RuntimeError(f"Não foi possível iniciar Chrome/Edge/Chromium embutido. Detalhe: {last_err}")
- 
-        def wait_until_enabled(locator, timeout_ms=120_000):
-            end = time.time() + timeout_ms / 1000.0
-            locator.wait_for(state="visible", timeout=timeout_ms)
+            for ch in ("chrome","msedge"):
+                try: return p.chromium.launch(channel=ch, headless=False)
+                except: pass
+            return p.chromium.launch(headless=False)
+
+        def wait_enabled(loc, timeout_ms=120_000):
+            end = time.time() + timeout_ms/1000
+            loc.wait_for(state="visible", timeout=timeout_ms)
             while time.time() < end:
                 if self._cancel_requested: raise BPMUserCancelled()
                 try:
-                    if not locator.is_disabled(): return
-                except Exception: pass
+                    if not loc.is_disabled(): return
+                except: pass
                 time.sleep(0.2)
             raise TimeoutError("Timeout aguardando campo habilitar.")
 
-        def pace(min_s=1.15, max_s=1.75):
-            time.sleep(random.uniform(min_s * PACE_MUL, max_s * PACE_MUL))
-
-        def _to_cent_value(raw_text: str):
-            s = (raw_text or "").strip()
-            s = s.replace("\xa0", " ")
-            s = re.sub(r"[^\d,.\-]", "", s)
-            if not s:
-                return None
-            last_dot = s.rfind(".")
-            last_comma = s.rfind(",")
-            sep_idx = max(last_dot, last_comma)
+        def _to_dec(s):
+            s = re.sub(r"[^\d,.\-]","",s or "")
+            if not s: return None
+            ld,lc = s.rfind("."),s.rfind(",")
+            si = max(ld,lc)
             try:
-                if sep_idx == -1:
-                    d = Decimal(re.sub(r"[^\d\-]", "", s))
+                if si==-1: d=Decimal(re.sub(r"[^\d\-]","",s))
                 else:
-                    int_part = re.sub(r"[^\d\-]", "", s[:sep_idx])
-                    dec_part = re.sub(r"[^\d]", "", s[sep_idx + 1 :])
-                    if not dec_part:
-                        return None
-                    d = Decimal((int_part if int_part not in {"", "-"} else "0") + "." + dec_part)
-            except Exception:
-                return None
-            return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    ip=re.sub(r"[^\d\-]","",s[:si]); dp=re.sub(r"[^\d]","",s[si+1:])
+                    if not dp: return None
+                    d=Decimal((ip if ip not in {"","-"} else "0")+"."+dp)
+            except: return None
+            return d.quantize(Decimal("0.01"),rounding=ROUND_HALF_UP)
 
-        def fill_currency_masked(ctx, locator, amount_value: str, timeout_ms=120_000):
-            """
-            Campo usa mascaramoeda (Angular). Se usar fill() direto, pode concatenar em zeros existentes.
-            Faz limpeza real + digitação humana + validação final do valor renderizado.
-            """
-            wait_until_enabled(locator, timeout_ms=timeout_ms)
-            locator.scroll_into_view_if_needed()
-            locator.click()
-            pace(0.18, 0.35)
-            locator.press("Control+A")
-            locator.press("Backspace")
-            pace(0.12, 0.25)
-            locator.press("Delete")
-            pace(0.15, 0.30)
+        def fill_currency(ctx, loc, amount, timeout_ms=120_000):
+            wait_enabled(loc, timeout_ms)
+            loc.scroll_into_view_if_needed(); loc.click()
+            pace(0.18,0.35); loc.press("Control+A"); loc.press("Backspace")
+            pace(0.12,0.25); loc.press("Delete"); pace(0.15,0.30)
+            digits = re.sub(r"\D","",amount or "")
+            if not digits: raise RuntimeError(f"Valor inválido: {amount}")
+            for ch in digits:
+                loc.type(ch, delay=random.randint(int(85*PACE),int(150*PACE)))
+            loc.press("Tab"); pace(0.45,0.85)
+            exp = _to_dec(amount); got = _to_dec(loc.input_value())
+            if exp is None or got is None or got != exp:
+                raise RuntimeError(f"Valor mascarado divergente. Esperado {amount}, obtido '{loc.input_value()}'.")
 
-            as_digits = re.sub(r"\D", "", amount_value or "")
-            if not as_digits:
-                raise RuntimeError(f"Valor inválido para digitação no campo monetário: {amount_value}")
-
-            for ch in as_digits:
-                locator.type(
-                    ch,
-                    delay=random.randint(int(85 * PACE_MUL), int(150 * PACE_MUL)),
-                )
-
-            locator.press("Tab")
-            pace(0.45, 0.85)
-
-            expected = _to_cent_value(amount_value)
-            got = _to_cent_value(locator.input_value())
-            if expected is None or got is None or got != expected:
-                raw_now = locator.input_value()
-                raise RuntimeError(
-                    f"Valor mascarado divergente. Esperado {amount_value}, obtido '{raw_now}'."
-                )
-
-        def wait_until_continuar_filtro_ready(ctx, timeout_ms=120_000):
-            """#continuar usa ng-show='exibirAplicAutFiltro'; só fica realmente exibido após validação (blur/change no funcional)."""
-            deadline = time.time() + timeout_ms / 1000.0
-            while time.time() < deadline:
-                if self._cancel_requested:
-                    raise BPMUserCancelled()
-                ok = ctx.evaluate("""
-                    (function() {
-                        var el = document.querySelector('#continuar');
-                        if (!el) return false;
-                        if (el.disabled === true) return false;
-                        if (String(el.getAttribute('aria-disabled')).toLowerCase() === 'true') return false;
-                        var st = window.getComputedStyle(el);
-                        if (st.display === 'none' || st.visibility === 'hidden') return false;
-                        if (parseFloat(st.opacity || '1') === 0) return false;
-                        var r = el.getBoundingClientRect();
-                        if (r.width < 2 || r.height < 2) return false;
-                        return true;
-                    })()
-                """)
-                if ok:
-                    return
-                time.sleep(0.25)
-            raise TimeoutError(
-                "Timeout: #continuar não ficou clicável (ng-show / validação do funcional). "
-                "Confirme blur/validação no campo #funcionalac."
-            )
-
-        def click_continuar_aplic_aut_filtro(ctx, timeout_ms=120_000):
-            """Clica em input#continuar (ng-click ContinuarAplicAutFiltro); tenta Playwright, DOM e escopo Angular."""
-            loc = ctx.locator('input#continuar[type="submit"]').first
-
-            def _center_mouse():
-                bb = loc.bounding_box()
-                if not bb:
-                    raise RuntimeError("bounding_box vazio para #continuar")
-                page.mouse.click(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
-
-            strategies = (
-                lambda: (loc.scroll_into_view_if_needed(timeout=10_000), loc.click(timeout=12_000)),
-                lambda: loc.click(force=True, timeout=12_000),
-                lambda: ctx.evaluate("""
-                    (function() {
-                        var el = document.querySelector('input#continuar[type="submit"]') || document.querySelector('#continuar');
-                        if (!el) throw new Error('continuar nao encontrado');
-                        el.click();
-                    })()
-                """),
-                lambda: ctx.evaluate("""
-                    (function() {
-                        var el = document.querySelector('#continuar');
-                        if (!el) throw new Error('continuar');
-                        var ang = window.angular;
-                        if (!ang) { el.click(); return; }
-                        var inj = ang.element(el);
-                        var scope = inj.scope() || inj.isolateScope();
-                        while (scope) {
-                            if (typeof scope.ContinuarAplicAutFiltro === 'function') {
-                                scope.$apply(function() { scope.ContinuarAplicAutFiltro(); });
-                                return;
-                            }
-                            scope = scope.$parent;
-                        }
-                        el.click();
-                    })()
-                """),
-                _center_mouse,
-            )
-
-            end = time.time() + timeout_ms / 1000.0
-            last_err = None
-            while time.time() < end:
-                if self._cancel_requested:
-                    raise BPMUserCancelled()
-                for action in strategies:
-                    try:
-                        action()
-                        return
-                    except Exception as e:
-                        last_err = e
-                time.sleep(0.35 * PACE_MUL)
-            raise RuntimeError(f"Falha ao clicar em #continuar (AplicAut filtro). Último erro: {last_err}")
-
-        def resolve_bpm_frame(timeout_ms=120_000):
-            deadline = time.time() + timeout_ms / 1000.0
-            while time.time() < deadline:
-                if self._cancel_requested:
-                    raise BPMUserCancelled()
+        def resolve_frame(timeout_ms=120_000):
+            deadline = time.time()+timeout_ms/1000
+            while time.time()<deadline:
+                if self._cancel_requested: raise BPMUserCancelled()
                 for frame in list(page.frames):
                     try:
-                        if frame.is_detached():
-                            continue
-                    except Exception:
-                        continue
-                    try:
-                        if frame.locator("#nova-solicitacao").count() > 0:
-                            return frame
-                    except Exception:
-                        pass
-                time.sleep(0.35 * PACE_MUL)
-            raise TimeoutError("Timeout: #nova-solicitacao não encontrado em nenhum frame (verifique iframes).")
- 
-        def wait_for_nova_solicitacao(ctx, timeout_ms=120_000):
-            deadline = time.time() + timeout_ms / 1000.0
-            while time.time() < deadline:
-                if self._cancel_requested:
-                    raise BPMUserCancelled()
-                ready = ctx.evaluate("""
-                    (function() {
-                        var el = document.querySelector('#nova-solicitacao');
-                        if (!el) return false;
-                        if (el.disabled === true) return false;
-                        if (String(el.getAttribute('aria-disabled')).toLowerCase() === 'true') return false;
-                        var st = window.getComputedStyle(el);
-                        if (st.display === 'none' || st.visibility === 'hidden') return false;
-                        return true;
-                    })()
-                """)
-                if ready:
-                    return
+                        if frame.is_detached(): continue
+                        if frame.locator("#nova-solicitacao").count()>0: return frame
+                    except: pass
+                time.sleep(0.35*PACE)
+            raise TimeoutError("Timeout: #nova-solicitacao não encontrado.")
+
+        def wait_continuar(ctx, timeout_ms=120_000):
+            deadline = time.time()+timeout_ms/1000
+            while time.time()<deadline:
+                if self._cancel_requested: raise BPMUserCancelled()
+                ok = ctx.evaluate("""(function(){
+                    var el=document.querySelector('#continuar');
+                    if(!el||el.disabled) return false;
+                    var s=window.getComputedStyle(el);
+                    if(s.display==='none'||s.visibility==='hidden') return false;
+                    return true;
+                })()""")
+                if ok: return
+                time.sleep(0.25)
+            raise TimeoutError("Timeout: #continuar não ficou clicável.")
+
+        def click_continuar(ctx, timeout_ms=120_000):
+            loc = ctx.locator('input#continuar[type="submit"]').first
+            for action in [
+                lambda: loc.click(timeout=12_000),
+                lambda: loc.click(force=True, timeout=12_000),
+                lambda: ctx.evaluate("document.querySelector('#continuar').click()"),
+            ]:
+                try: action(); return
+                except: pass
+            raise RuntimeError("Falha ao clicar #continuar.")
+
+        def wait_nova(ctx, timeout_ms=120_000):
+            deadline = time.time()+timeout_ms/1000
+            while time.time()<deadline:
+                if self._cancel_requested: raise BPMUserCancelled()
+                ok = ctx.evaluate("""(function(){
+                    var el=document.querySelector('#nova-solicitacao');
+                    if(!el||el.disabled) return false;
+                    var s=window.getComputedStyle(el);
+                    return !(s.display==='none'||s.visibility==='hidden');
+                })()""")
+                if ok: return
                 time.sleep(0.4)
-            raise TimeoutError("Timeout aguardando #nova-solicitacao ficar pronto.")
- 
-        def click_nova_solicitacao(ctx, timeout_ms=120_000):
-            wait_for_nova_solicitacao(ctx, timeout_ms)
+            raise TimeoutError("Timeout: #nova-solicitacao.")
 
-            def click_worked():
-                try: ctx.locator("#tipooper").wait_for(state="visible", timeout=5_000); return True
-                except Exception: return False
-
-            def _el_js():
-                return """(function(){
-                    var el = document.querySelector('#nova-solicitacao');
-                    if (!el) el = document.evaluate(
-                        '//*[@id="nova-solicitacao"]',
-                        document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
-                    ).singleNodeValue;
-                    return el;
-                })()"""
-
-            def click_center_css():
-                loc = ctx.locator("#nova-solicitacao").first
-                loc.scroll_into_view_if_needed()
-                box = loc.bounding_box()
-                if not box:
-                    raise RuntimeError("bounding_box vazio para #nova-solicitacao")
-                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-
-            def click_center_xpath():
-                loc = ctx.locator('xpath=//*[@id="nova-solicitacao"]').first
-                loc.scroll_into_view_if_needed()
-                box = loc.bounding_box()
-                if not box:
-                    raise RuntimeError("bounding_box vazio para xpath nova-solicitacao")
-                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-
-            strategies = [
-                lambda: (
-                    ctx.locator("#nova-solicitacao").first.scroll_into_view_if_needed(),
-                    time.sleep(0.15),
-                    ctx.locator("#nova-solicitacao").first.click(timeout=8_000),
-                ),
-                lambda: (
-                    ctx.locator('[id="nova-solicitacao"]').first.scroll_into_view_if_needed(),
-                    time.sleep(0.15),
-                    ctx.locator('[id="nova-solicitacao"]').first.click(timeout=8_000),
-                ),
-                lambda: (
-                    ctx.locator('xpath=//*[@id="nova-solicitacao"]').first.scroll_into_view_if_needed(),
-                    time.sleep(0.15),
-                    ctx.locator('xpath=//*[@id="nova-solicitacao"]').first.click(timeout=8_000),
-                ),
-                lambda: (ctx.evaluate("(function(){ var el = " + _el_js() + "; if(el) el.scrollIntoView({block:'center',inline:'center'}); })()"),
-                         time.sleep(0.2),
-                         ctx.evaluate("(function(){ var el = " + _el_js() + "; if(el) el.click(); })()")),
-                lambda: ctx.evaluate("(function(){ var el = " + _el_js() + "; if(!el) throw new Error('nova-solicitacao nao encontrado'); el.click(); })()"),
-                lambda: ctx.evaluate("""(function(){
-                    var el = """ + _el_js() + """;
-                    if (!el) throw new Error('nova-solicitacao nao encontrado');
-                    el.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,view:window}));
-                    el.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,view:window}));
-                    el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}));
-                })()"""),
-                lambda: ctx.evaluate("""(function(){
-                    var el = """ + _el_js() + """;
-                    if (!el) throw new Error('nova-solicitacao nao encontrado');
-                    var scope = angular.element(el).scope();
-                    if (scope && typeof scope.NovaSolicitacao === 'function')
-                        scope.$apply(function(){ scope.NovaSolicitacao(); });
-                    else throw new Error('Angular NovaSolicitacao indisponivel');
-                })()"""),
-                lambda: click_center_css(),
-                lambda: click_center_xpath(),
-                lambda: (
-                    ctx.locator("#nova-solicitacao").first.scroll_into_view_if_needed(),
-                    ctx.locator("#nova-solicitacao").first.click(force=True, timeout=8_000),
-                ),
-                lambda: ctx.locator('xpath=//*[@id="nova-solicitacao"]').first.click(force=True, timeout=8_000),
-                lambda: (
-                    ctx.locator('xpath=//*[@id="nova-solicitacao"]').first.scroll_into_view_if_needed(),
-                    ctx.locator('xpath=//*[@id="nova-solicitacao"]').first.focus(),
-                    page.keyboard.press("Enter"),
-                ),
-            ]
- 
-            for i, strategy in enumerate(strategies, start=1):
-                if self._cancel_requested:
-                    raise BPMUserCancelled()
-                try:
-                    strategy()
-                except Exception as exc:
-                    print(f"[nova-solicitacao] estratégia {i} erro: {exc}")
-                    time.sleep(0.5)
-                    continue
- 
+        def click_nova(ctx, timeout_ms=120_000):
+            wait_nova(ctx, timeout_ms)
+            def done():
+                try: ctx.locator("#tipooper").wait_for(state="visible",timeout=5_000); return True
+                except: return False
+            for action in [
+                lambda: ctx.locator("#nova-solicitacao").first.click(timeout=8_000),
+                lambda: ctx.evaluate("document.querySelector('#nova-solicitacao').click()"),
+                lambda: ctx.locator("#nova-solicitacao").first.click(force=True,timeout=8_000),
+            ]:
+                try: action()
+                except: pass
                 for _ in range(12):
-                    if click_worked():
-                        print(f"[nova-solicitacao] estratégia {i} funcionou.")
-                        return
+                    if done(): return
                     time.sleep(0.5)
- 
-            raise RuntimeError("Falha ao clicar em nova-solicitacao após todas as estratégias.")
- 
+            raise RuntimeError("Falha ao clicar #nova-solicitacao.")
+
         def ensure_painel():
             if self._cancel_requested: raise BPMUserCancelled()
-            page.goto(PAINEL_MIDDLE_URL, wait_until="domcontentloaded")
-            if "/Home" in page.url:
-                page.goto(PAINEL_MIDDLE_URL, wait_until="domcontentloaded")
-            if page.locator("#username").count() > 0 or "login.itau/oauth" in page.url:
-                page.locator("#username").fill(funcional_login)
-                page.locator("#password").fill(senha_login)
+            page.goto(PAINEL, wait_until="domcontentloaded")
+            if "/Home" in page.url: page.goto(PAINEL, wait_until="domcontentloaded")
+            if page.locator("#username").count()>0 or "login.itau/oauth" in page.url:
+                page.locator("#username").fill(funcional)
+                page.locator("#password").fill(senha)
                 page.locator("#btLogin").click()
                 page.wait_for_load_state("domcontentloaded")
-                page.goto(PAINEL_MIDDLE_URL, wait_until="domcontentloaded")
-            ctx = resolve_bpm_frame(timeout_ms=120_000)
-            wait_for_nova_solicitacao(ctx, timeout_ms=120_000)
+                page.goto(PAINEL, wait_until="domcontentloaded")
+            ctx = resolve_frame(timeout_ms=120_000)
+            wait_nova(ctx, timeout_ms=120_000)
             return ctx
- 
+
+        STEP = 15_000
         with sync_playwright() as p:
             browser = pick_browser(p)
             self._browser = browser
-           
             page = browser.new_page()
             page.set_default_timeout(120_000)
             try:
                 for idx, item in enumerate(self._selected):
                     if self._cancel_requested: raise BPMUserCancelled()
-                    self._ui(lambda i=idx: self._set_card_state(i, "processing", show=True))
-                    client_name = item.get("cliente") or ""; raw_amount = item.get("valor") or ""
+                    client_name = item.get("cliente","")
+                    raw_amount  = item.get("valor","")
                     info = BPM_CLIENT_DATA.get(client_name)
-                    if not info: raise RuntimeError(f"Cliente sem mapeamento interno: {client_name}")
-                    amount_web = self._parse_amount_for_web(raw_amount)
-                    if not amount_web: raise RuntimeError(f"Valor inválido para o cliente {client_name}: {raw_amount}")
+                    if not info:
+                        self._log_line(f"[{client_name}] Sem mapeamento interno.", "err"); continue
+                    amount_web = _fmt_brl_plain_web(raw_amount)
+                    if not amount_web:
+                        self._log_line(f"[{client_name}] Valor inválido: {raw_amount}", "err"); continue
+
+                    self._log_line(f"━━ {client_name} ━━", "heading")
                     tentativa = 0
                     while True:
                         if self._cancel_requested: raise BPMUserCancelled()
                         tentativa += 1
                         try:
                             ctx = ensure_painel()
-                            click_nova_solicitacao(ctx, timeout_ms=120_000)
+                            self._log_line(f"  Painel pronto.", "step")
+                            click_nova(ctx)
                             pace()
-                            ctx.locator("#tipooper").wait_for(state="visible", timeout=STEP_MS)
+                            self._log_line("  Nova solicitação aberta.", "step")
+
+                            ctx.locator("#tipooper").wait_for(state="visible",timeout=STEP)
                             ctx.locator("#tipooper").select_option(value="AT")
                             pace()
-                            ctx.locator("#CPNJ").fill(info["CNPJ"])
-                            pace()
-                            ctx.locator('input[name="agenciafiltro"]').fill(info["AG"])
-                            pace()
-                            ctx.locator('input[name="contadacfiltro"]').fill(info["CONTA"])
-                            pace()
-                            self._ui(lambda i=idx: self._cards[i]["status_txt"].configure(text="ALOCANDO INFORMAÇÕES", fg="#2ecc71"))
-                            loc_processar_nova = ctx.locator("#processar-nova")
-                            wait_until_enabled(loc_processar_nova, timeout_ms=STEP_MS); loc_processar_nova.click()
-                            pace()
+                            ctx.locator("#CPNJ").fill(info["CNPJ"]); pace()
+                            ctx.locator('input[name="agenciafiltro"]').fill(info["AG"]); pace()
+                            ctx.locator('input[name="contadacfiltro"]').fill(info["CONTA"]); pace()
+                            self._log_line("  Dados do cliente preenchidos.", "step")
+
+                            loc_proc = ctx.locator("#processar-nova")
+                            wait_enabled(loc_proc, STEP); loc_proc.click(); pace()
+
                             loc_plat = ctx.locator('input[name="plataforma"]')
-                            wait_until_enabled(loc_plat, timeout_ms=STEP_MS); loc_plat.fill(info["PLATAFORMA"])
-                            pace()
+                            wait_enabled(loc_plat,STEP); loc_plat.fill(info["PLATAFORMA"]); pace()
+
                             loc_fn = ctx.locator("#funcionalac")
-                            wait_until_enabled(loc_fn, timeout_ms=STEP_MS)
-                            loc_fn.fill(funcional_login)
+                            wait_enabled(loc_fn,STEP); loc_fn.fill(funcional)
                             loc_fn.press("Tab")
-                            try:
-                                loc_fn.evaluate(
-                                    "el => { el.dispatchEvent(new Event('input',{bubbles:true}));"
-                                    " el.dispatchEvent(new Event('change',{bubbles:true})); el.blur(); }"
-                                )
-                            except Exception:
-                                pass
-                            time.sleep(0.35 * PACE_MUL)
-                            wait_until_continuar_filtro_ready(ctx, timeout_ms=STEP_MS)
-                            click_continuar_aplic_aut_filtro(ctx, timeout_ms=STEP_MS)
-                            pace()
-                            ctx.locator('select[name="produto"]').wait_for(state="visible", timeout=STEP_MS)
-                            ctx.locator('select[name="produto"]').select_option(value="34")
-                            pace()
-                            ctx.locator('select[name="tpOperacao"]').wait_for(state="visible", timeout=STEP_MS)
-                            ctx.locator('select[name="tpOperacao"]').select_option(value="1")
-                            pace()
-                            self._ui(lambda i=idx: self._cards[i]["status_txt"].configure(text="ALTERANDO TIPO DE OPERAÇÃO", fg="#2ecc71"))
+                            try: loc_fn.evaluate("el=>{el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.blur();}")
+                            except: pass
+                            time.sleep(0.35*PACE)
+                            wait_continuar(ctx,STEP); click_continuar(ctx,STEP); pace()
+                            self._log_line("  Filtro AplicAut preenchido.", "step")
+
+                            ctx.locator('select[name="produto"]').wait_for(state="visible",timeout=STEP)
+                            ctx.locator('select[name="produto"]').select_option(value="34"); pace()
+                            ctx.locator('select[name="tpOperacao"]').wait_for(state="visible",timeout=STEP)
+                            ctx.locator('select[name="tpOperacao"]').select_option(value="1"); pace()
+
                             loc_buscar = ctx.locator('input[type="submit"][data-ng-click="BuscarListaPN()"]')
-                            if loc_buscar.count() == 0: loc_buscar = ctx.locator('input[type="submit"][value="Processar"]')
-                            wait_until_enabled(loc_buscar, timeout_ms=STEP_MS); loc_buscar.click()
-                            pace()
+                            if loc_buscar.count()==0: loc_buscar=ctx.locator('input[type="submit"][value="Processar"]')
+                            wait_enabled(loc_buscar,STEP); loc_buscar.click(); pace()
+
                             checkbox = ctx.locator('input[type="checkbox"]')
-                            checkbox.first.wait_for(state="visible", timeout=STEP_MS)
-                            if checkbox.first.is_disabled():
-                                raise TimeoutError("Checkbox visível porém desabilitado.")
-                            checkbox.first.click()
-                            pace()
+                            checkbox.first.wait_for(state="visible",timeout=STEP)
+                            checkbox.first.click(); pace()
+
                             loc_val = ctx.locator('input[name="ValordaOperacao0"]')
-                            wait_until_enabled(loc_val, timeout_ms=STEP_MS)
-                            self._ui(lambda i=idx: self._cards[i]["status_txt"].configure(text="INFORMANDO VALOR DA OPERAÇÃO", fg="#2ecc71"))
-                            fill_currency_masked(ctx, loc_val, amount_web, timeout_ms=STEP_MS)
-                            pace()
+                            self._log_line(f"  Preenchendo valor {raw_amount}…", "step")
+                            fill_currency(ctx, loc_val, amount_web, STEP); pace()
+                            self._log_line("  Valor preenchido.", "step")
+
                             loc_final = ctx.locator('input[type="submit"][ng-click="vm.finalizarSol()"]')
-                            if loc_final.count() == 0: loc_final = ctx.locator('input[type="submit"][value="Continuar"]')
-                            wait_until_enabled(loc_final, timeout_ms=STEP_MS); loc_final.click()
-                            pace()
-                            loc_incluir = ctx.locator('input[type="submit"][value="Incluir"]')
-                            if loc_incluir.count() == 0: loc_incluir = ctx.locator('input[type="submit"][ng-click="vm.IncluirConta()"]')
-                            wait_until_enabled(loc_incluir, timeout_ms=STEP_MS); loc_incluir.click()
-                            pace(1.4, 2.1)
+                            if loc_final.count()==0: loc_final=ctx.locator('input[type="submit"][value="Continuar"]')
+                            wait_enabled(loc_final,STEP); loc_final.click(); pace()
 
-                            def click_grey_continuar():
-                                loc_g = ctx.locator('input[type="button"].grey[ng-click="vm.continuar()"]')
-                                if loc_g.count() == 0: loc_g = ctx.locator('input.grey[ng-click="vm.continuar()"]')
-                                if loc_g.count() == 0: return False
-                                wait_until_enabled(loc_g.first, timeout_ms=STEP_MS); loc_g.first.click(); return True
+                            loc_inc = ctx.locator('input[type="submit"][value="Incluir"]')
+                            if loc_inc.count()==0: loc_inc=ctx.locator('input[type="submit"][ng-click="vm.IncluirConta()"]')
+                            wait_enabled(loc_inc,STEP); loc_inc.click(); pace(1.4,2.1)
 
-                            click_grey_continuar()
-                            pace()
-                            try: click_grey_continuar()
-                            except Exception: pass
-                            loc_voltar = ctx.locator('input[type="button"].grey[ng-click="vm.voltarAplicAut()"]')
-                            if loc_voltar.count() == 0: loc_voltar = ctx.locator('input.grey[ng-click="vm.voltarAplicAut()"]')
-                            if loc_voltar.count() > 0:
-                                wait_until_enabled(loc_voltar.first, timeout_ms=max(STEP_MS, 25_000)); loc_voltar.first.click()
-                            ctx_after = resolve_bpm_frame(timeout_ms=120_000)
-                            wait_for_nova_solicitacao(ctx_after, timeout_ms=120_000)
-                            self._ui(lambda i=idx: self._set_card_state(i, "done", show=True))
+                            def try_grey():
+                                loc_g=ctx.locator('input[type="button"].grey[ng-click="vm.continuar()"]')
+                                if loc_g.count()==0: return False
+                                wait_enabled(loc_g.first,STEP); loc_g.first.click(); return True
+
+                            try_grey(); pace()
+                            try: try_grey()
+                            except: pass
+
+                            loc_v = ctx.locator('input[type="button"].grey[ng-click="vm.voltarAplicAut()"]')
+                            if loc_v.count()==0: loc_v=ctx.locator('input.grey[ng-click="vm.voltarAplicAut()"]')
+                            if loc_v.count()>0:
+                                wait_enabled(loc_v.first,max(STEP,25_000)); loc_v.first.click()
+
+                            ctx_after = resolve_frame(120_000)
+                            wait_nova(ctx_after,120_000)
+                            self._log_line(f"  {client_name} → CONCLUÍDO ✓", "ok")
+                            self._ui(lambda i=idx: self._set_card_state(i,"done",show=True))
                             break
-                        except BPMUserCancelled:
-                            raise
+
+                        except BPMUserCancelled: raise
                         except Exception as e:
+                            self._log_line(f"  Tentativa {tentativa} falhou: {e}", "warn")
                             if tentativa >= 20:
-                                raise RuntimeError(
-                                    f"Falha recorrente no fluxo BPM para {client_name} após {tentativa} tentativas: {e}"
-                                ) from e
-                            try:
-                                page.goto(PAINEL_MIDDLE_URL, wait_until="domcontentloaded")
-                            except Exception:
-                                pass
-                            continue
- 
-            except BPMUserCancelled: pass
+                                self._log_line(f"  {client_name} → FALHA PERMANENTE ✗", "err")
+                                self._ui(lambda i=idx: self._set_card_state(i,"error",show=True))
+                                raise RuntimeError(f"Falha recorrente {client_name}: {e}") from e
+                            try: page.goto(PAINEL, wait_until="domcontentloaded")
+                            except: pass
+
+            except BPMUserCancelled: self._log_line("Operações canceladas pelo usuário.", "warn")
             except Exception as e:
-                if self._cancel_requested: pass
-                else: err_msg = str(e); self._ui(lambda: messagebox.showerror("Erro na rotina", err_msg))
+                if not self._cancel_requested:
+                    em = str(e)
+                    self._log_line(f"ERRO GERAL: {em}", "err")
+                    self._ui(lambda: messagebox.showerror("Erro na rotina", em))
             finally:
                 self._browser = None
                 try: browser.close()
-                except Exception: pass
+                except: pass
                 self._worker_running = False
- 
- 
+                self._started = False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  APP — janela principal com sidebar
+# ═══════════════════════════════════════════════════════════════════════════════
 class App(tk.Tk):
-    COLORS = {
-        "bg": "#121212",
-        "panel": "#1a1a1a",
-        "text": "#f2f2f2",
-        "muted": "#1f1f1f",
-        "border": "#2e2e2e",
-        "accent": "#2fb875",
-    }
- 
     def __init__(self):
         super().__init__()
-        self.title("Mesa - Itaú")
-        self.geometry("960x700")
-        self.configure(bg=self.COLORS["bg"])
-        self._setup_styles()
+        self.title("Mesa Itaú — Risco Sacado")
+        self.geometry("1060x720")
+        self.minsize(860, 580)
+        self.configure(bg=C["bg"])
+        self._setup_ttk_styles()
         self.bpm_run_selection = []
-        self.bpm_funcional = ""
-        self.bpm_password = ""
-        container = ttk.Frame(self, style="Root.TFrame")
-        container.pack(fill="both", expand=True)
-        container.rowconfigure(0, weight=1)
-        container.columnconfigure(0, weight=1)
+        self.bpm_funcional     = ""
+        self.bpm_password      = ""
+        self.rotina_em_execucao= None
+        self._active_frame     = "Home"
+
+        # Layout: sidebar | conteúdo
+        self._sidebar = Sidebar(self, self)
+        self._sidebar.pack(side="left", fill="y")
+
+        make_hairline(self, orient="v", bg=C["hair"]).pack(side="left", fill="y")
+
+        self._content = tk.Frame(self, bg=C["bg"])
+        self._content.pack(side="left", fill="both", expand=True)
+        self._content.rowconfigure(0, weight=1)
+        self._content.columnconfigure(0, weight=1)
+
         self.frames = {}
-        for Cls, name in (
-            (HomeFrame, "Home"),
-            (ShareFrame, "Share"),
-            (BPMFrame, "BPM"),
-            (LimitesInvertidoFrame, "LimitesInvertido"),
-        ):
-            f = Cls(container, self)
+        for Cls, name in [
+            (HomeFrame,              "Home"),
+            (RotinasFrame,           "Rotinas"),
+            (ShareFrame,             "Share"),
+            (BPMConfigFrame,         "BPM_CONFIG"),
+            (BPMFrame,               "BPM"),
+            (LimitesInvertidoFrame,  "LimitesInvertido"),
+        ]:
+            f = Cls(self._content, self)
             self.frames[name] = f
             f.grid(row=0, column=0, sticky="nsew")
+
         self.show_frame("Home")
- 
-    def _setup_styles(self):
+
+    def _setup_ttk_styles(self):
         s = ttk.Style(self)
         try: s.theme_use("clam")
-        except Exception: pass
-        c = self.COLORS
-        s.configure("Root.TFrame", background=c["bg"])
-        s.configure("Dark.TFrame", background=c["panel"])
-        s.configure("Dark.TLabel", background=c["panel"], foreground=c["text"])
-        s.configure("Sub.TLabel", background=c["bg"], foreground=c["text"])
-        s.configure("Dark.TButton", background=c["panel"], foreground=c["text"])
-        s.map("Dark.TButton", background=[("active", c["border"])])
-        s.configure("Primary.TButton", background=c["accent"], foreground="#ffffff")
-        s.map("Primary.TButton", background=[("active", "#279865")])
-        s.configure("Limit.TButton", background="#1e3a5f", foreground="#7ec8e3")
-        s.map("Limit.TButton", background=[("active", "#254d7a")])
-        s.configure("Dark.TEntry", fieldbackground=c["muted"], foreground=c["text"])
-        s.configure("Dark.TSeparator", background=c["border"])
-        s.configure("Dark.TLabelframe", background=c["panel"], foreground=c["text"])
-        s.configure("Dark.TLabelframe.Label", background=c["panel"], foreground=c["text"])
- 
+        except: pass
+        s.configure("TCombobox",
+                    fieldbackground=C["bg"], background=C["surface"],
+                    foreground=C["ink"], selectbackground=C["surface2"],
+                    selectforeground=C["ink"], borderwidth=1,
+                    lightcolor=C["hair"], darkcolor=C["hair"])
+        s.map("TCombobox", fieldbackground=[("readonly",C["bg"])],
+              selectbackground=[("!focus",C["surface2"])])
+        s.configure("TScrollbar", background=C["surface2"], troughcolor=C["bg"],
+                    borderwidth=0, arrowsize=10)
+        s.map("TScrollbar", background=[("active",C["surface3"])])
+
     def show_frame(self, name):
+        # remap: "BPM" sem seleção → config
+        if name == "BPM" and not getattr(self,"bpm_run_selection",[]):
+            name = "BPM_CONFIG"
         f = self.frames.get(name)
-        if f is not None:
-            f.tkraise()
-            if hasattr(f, "on_show"):
-                try: f.on_show()
-                except Exception: pass
- 
- 
+        if f is None: return
+        self._active_frame = name
+        sidebar_name = name if name in ("Home","Rotinas","Share","LimitesInvertido") \
+                       else ("BPM" if name in ("BPM","BPM_CONFIG") else name)
+        self._sidebar.set_active(sidebar_name)
+        f.tkraise()
+        if hasattr(f,"on_show"):
+            try: f.on_show()
+            except: pass
+
+
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
     App().mainloop()
