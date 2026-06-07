@@ -1,11 +1,4 @@
-"""
-Mesa Itaú — Risco Sacado
-Redesign editorial dark/warm (Tkinter nativo).
-Mantém toda a lógica de automação BPM, Share, Limites Invertido
-e adiciona o sistema de Rotinas com seleção de módulo.
-"""
-
-import os, sys, re, random, tkinter as tk, threading, time, tempfile, shutil, webbrowser
+import os, sys, re, random, struct, tkinter as tk, threading, time, tempfile, shutil, webbrowser, ctypes
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from tkinter import ttk, filedialog, messagebox, font as tkfont
 from datetime import datetime, date
@@ -30,37 +23,60 @@ except Exception:
     sync_playwright = None
     PLAYWRIGHT_OK = False
 
-# ─────────────────────────────────────────────
-#  PALETA  dark / warm-ink
-# ─────────────────────────────────────────────
 C = {
-    "bg":           "#1a1712",   # carvão quente
-    "surface":      "#211e1a",   # superfície primária
-    "surface2":     "#28241f",   # superfície elevada
-    "surface3":     "#312d27",   # card hover / selecionado
-    "ink":          "#ede8df",   # texto principal
-    "ink_muted":    "#8a8070",   # texto secundário
-    "ink_faint":    "#4a4540",   # hairline / divisor
-    "accent":       "#c8923a",   # âmbar
-    "accent_dim":   "#7a5520",   # âmbar apagado
-    "accent_soft":  "#2d2015",   # âmbar fundo suave
-    "ok":           "#4ea87a",   # verde sucesso
-    "ok_dim":       "#1e3d2e",
-    "warn":         "#c8923a",
-    "err":          "#b85050",
-    "err_dim":      "#3d1a1a",
-    "hair":         "#2e2a25",   # hairline
-    "log_step":     "#6a6258",
-    "log_ok":       "#4ea87a",
-    "log_warn":     "#c8923a",
-    "log_err":      "#b85050",
+    "bg":          "#191919",  
+    "surface":     "#212121",   
+    "surface2":    "#2a2a2a",   
+    "surface3":    "#333333",   
+    "ink":         "#e6e6e6",   
+    "ink_muted":   "#999999",   
+    "ink_faint":   "#4d4d4d",  
+    "accent":      "#EC7000",   
+    "accent_dim":  "#3d2a14",   
+    "accent_soft": "#2a1f12",   
+    "ok":          "#4ea87a",   
+    "ok_dim":      "#1a3a2a",
+    "warn":        "#d49b45",   
+    "err":         "#c95f5f",   
+    "err_dim":     "#3d1515",
+    "hair":        "#2a2a2a",   
+    "log_step":    "#606060",
+    "log_ok":      "#4ea87a",
+    "log_warn":    "#d49b45",
+    "log_err":     "#c95f5f",
 }
 
-LOGO_FILENAME   = "itau-logo-png_seeklogo-74122.png"
+DOT_COLORS = [
+    "#9b9b9b", 
+    "#a07450",  
+    "#c87941",  
+    "#c4a832",  
+    "#5a9e72",  
+    "#EC7000",  
+    "#8b72c9",  
+    "#c97a9e",  
+    "#c96060",  
+]
+DOT_LABELS = ["Cinza","Marrom","Laranja","Amarelo","Verde","Azul","Roxo","Rosa","Vermelho"]
 
-# ─────────────────────────────────────────────
-#  HELPERS DE FORMATAÇÃO MONETÁRIA
-# ─────────────────────────────────────────────
+ICON_FILENAME = "itaulogo.png"
+LOGO_FILENAME = ICON_FILENAME
+APP_USER_MODEL_ID = "MesaItau.RiscoSacado"
+
+MESES_PT = (
+    "", "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+)
+DIAS_PT = (
+    "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+    "sexta-feira", "sábado", "domingo",
+)
+
+
+def format_data_pt_br(dt: datetime) -> str:
+    return f"{DIAS_PT[dt.weekday()]}, {dt.day} de {MESES_PT[dt.month]} de {dt.year}"
+
+
 def _parse_brl(raw: str):
     s = (raw or "").strip().replace("R$","").replace("r$","").replace(" ","")
     s = re.sub(r"[^\d,.\-]","",s)
@@ -97,9 +113,6 @@ def _fmt_brl_plain_web(raw: str) -> str:
     sign = "-" if d < 0 else ""
     return f"{sign}{'{:,}'.format(int(i)).replace(',','.')},{f}"
 
-# ─────────────────────────────────────────────
-#  DADOS DOS CLIENTES
-# ─────────────────────────────────────────────
 BPM_CLIENT_DATA = {
     "Transdourada":             {"CNPJ":"01259730000174","PLATAFORMA":"2939","AG":"1643","CONTA":"99451-8"},
     "RPB":                      {"CNPJ":"07075892000139","PLATAFORMA":"8973","AG":"6627","CONTA":"06471-7"},
@@ -150,9 +163,6 @@ REGIAO_TRADER_ESPEC = {
     "33":("Giovanna","Lucas Capeli"),
 }
 
-# ─────────────────────────────────────────────
-#  REGEX EXTRAÇÃO PDF
-# ─────────────────────────────────────────────
 RE_SPACES        = re.compile(r"\s+")
 RE_CNPJ          = re.compile(r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})")
 RE_CNPJ_LABEL    = re.compile(r"CNPJ[^\d]*([\d./-]{14,20})", re.IGNORECASE)
@@ -176,9 +186,6 @@ RE_CONTA_LABEL   = re.compile(r"conta\s+corrente(?:\s+do\s+cliente)?\s*[:\s-]*",
 RE_LIQ_CRED      = re.compile(r"Cr[ée]dito\s+em\s+CC", re.IGNORECASE)
 RE_PREMIO        = re.compile(r"com\s+pr[êe]mio", re.IGNORECASE)
 
-# ─────────────────────────────────────────────
-#  FUNÇÕES UTILITÁRIAS
-# ─────────────────────────────────────────────
 def app_base_dir():
     return os.path.dirname(sys.executable) if getattr(sys,"frozen",False) else os.path.dirname(os.path.abspath(__file__))
 
@@ -327,10 +334,6 @@ def extract_modalidade(t, tn, tc):
 
 class BPMUserCancelled(Exception): pass
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  COMPONENTES VISUAIS REUTILIZÁVEIS
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def make_hairline(parent, orient="h", **kwargs):
     kw = {"bg": C["hair"]}
     kw.update(kwargs)
@@ -340,37 +343,423 @@ def make_hairline(parent, orient="h", **kwargs):
         return tk.Frame(parent, width=1, **kw)
 
 
+def _make_dot(parent, color, size=10, bg=None):
+    """Bolinha colorida via Canvas — estilo Notion."""
+    bg = bg or parent.cget("bg")
+    c = tk.Canvas(parent, width=size + 4, height=size + 4,
+                  bg=bg, highlightthickness=0, bd=0)
+    c.create_oval(2, 2, size + 2, size + 2, fill=color, outline="")
+    return c
+
+
+def _canvas_round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+    r = min(radius, (x2 - x1) / 2, (y2 - y1) / 2)
+    points = [
+        x1 + r, y1, x2 - r, y1,
+        x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2,
+        x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r,
+        x1, y1 + r, x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, splinesteps=36, **kwargs)
+
+
+FRAME_LABELS = {
+    "Home":             "Início",
+    "Rotinas":          "Rotinas",
+    "Share":            "Cadastro Share",
+    "BPM_CONFIG":       "Configurar BPM",
+    "BPM":              "BPM — Operações",
+    "LimitesInvertido": "Limites Invertido",
+}
+
+
+def _icon_png_path():
+    for path in (resource_path(ICON_FILENAME), os.path.join(app_base_dir(), ICON_FILENAME)):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _png_to_ico_bytes(png_path):
+    """Gera ICO compatível com Windows embutindo o PNG (Vista+)."""
+    with open(png_path, "rb") as f:
+        png_data = f.read()
+    if len(png_data) < 24 or png_data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    width = int.from_bytes(png_data[16:20], "big")
+    height = int.from_bytes(png_data[20:24], "big")
+    w_byte = 0 if width >= 256 else width
+    h_byte = 0 if height >= 256 else height
+    image_offset = 6 + 16
+    header = struct.pack("<HHH", 0, 1, 1)
+    entry = struct.pack("<BBBBHHII", w_byte, h_byte, 0, 0, 1, 32, len(png_data), image_offset)
+    return header + entry + png_data
+
+
+def _build_ico_from_png(png_path, ico_path):
+    """Gera ICO multi-tamanho (melhor compatibilidade com a taskbar do Windows)."""
+    try:
+        from PIL import Image
+        img = Image.open(png_path).convert("RGBA")
+        img.save(ico_path, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
+        return True
+    except Exception:
+        return False
+
+
+def _ensure_ico_path():
+    """Retorna caminho do itaulogo.ico pronto para a taskbar."""
+    cached = os.path.join(app_base_dir(), "itaulogo.ico")
+    png_path = _icon_png_path()
+
+    if png_path:
+       
+        needs_build = (
+            not os.path.isfile(cached)
+            or os.path.getsize(cached) > 35000
+        )
+        if needs_build and _build_ico_from_png(png_path, cached):
+            return cached
+
+    if os.path.isfile(cached):
+        return cached
+
+    if not png_path:
+        return None
+
+    ico_bytes = _png_to_ico_bytes(png_path)
+    if not ico_bytes:
+        return None
+    try:
+        with open(cached, "wb") as f:
+            f.write(ico_bytes)
+        return cached
+    except OSError:
+        try:
+            fd, tmp = tempfile.mkstemp(suffix=".ico", prefix="mesa_itau_")
+            os.close(fd)
+            with open(tmp, "wb") as f:
+                f.write(ico_bytes)
+            return tmp
+        except OSError:
+            return None
+
+
+def apply_taskbar_presence(root):
+    """Garante que janela sem borda apareça na taskbar com ícone (WS_EX_APPWINDOW)."""
+    if sys.platform != "win32":
+        return
+    try:
+        GWL_EXSTYLE = -20
+        WS_EX_APPWINDOW = 0x00040000
+        WS_EX_TOOLWINDOW = 0x00000080
+        SW_HIDE = 0
+        SW_SHOW = 5
+
+        root.update_idletasks()
+        hwnd = _window_hwnd(root)
+        if not hwnd:
+            return
+
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        new_style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+        if new_style != style:
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
+
+        ctypes.windll.user32.ShowWindow(hwnd, SW_HIDE)
+        ctypes.windll.user32.ShowWindow(hwnd, SW_SHOW)
+        root.lift()
+    except Exception:
+        pass
+
+
+def apply_window_icon(root):
+    """Define itaulogo como ícone da janela e da barra de tarefas (Windows)."""
+    ico_path = _ensure_ico_path()
+    if not ico_path:
+        return
+
+    try:
+        root.iconbitmap(default=ico_path)
+    except Exception:
+        pass
+
+    if sys.platform == "win32":
+        try:
+            root.update_idletasks()
+            hwnd = _window_hwnd(root)
+            if not hwnd:
+                return
+            IMAGE_ICON = 1
+            LR_LOADFROMFILE = 0x10
+            WM_SETICON = 0x0080
+            for size in (16, 32):
+                hicon = ctypes.windll.user32.LoadImageW(
+                    None, ico_path, IMAGE_ICON, size, size, LR_LOADFROMFILE,
+                )
+                if hicon:
+                    which = 0 if size <= 16 else 1
+                    ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, which, hicon)
+        except Exception:
+            pass
+
+
+def apply_windows_shell(root):
+    """Taskbar + ícone — necessário com overrideredirect(True)."""
+    apply_taskbar_presence(root)
+    apply_window_icon(root)
+
+
+def apply_modern_window_chrome(root):
+    """Cantos arredondados + barra de título escura no Windows 11."""
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = _window_hwnd(root)
+        dwm = ctypes.windll.dwmapi
+        dark = ctypes.c_int(1)
+        round_pref = ctypes.c_int(2)  # DWMWCP_ROUND
+        dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark))
+        dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(round_pref), ctypes.sizeof(round_pref))
+    except Exception:
+        pass
+
+
+def _window_hwnd(root):
+    root.update_idletasks()
+    return ctypes.windll.user32.GetParent(root.winfo_id())
+
+
+def apply_frameless_resize(root):
+    """Permite redimensionar janela sem barra nativa do Windows."""
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = _window_hwnd(root)
+        gwl_style = -16
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, gwl_style)
+        style |= 0x00040000  
+        style |= 0x00020000 
+        style |= 0x00010000  
+        ctypes.windll.user32.SetWindowLongW(hwnd, gwl_style, style)
+    except Exception:
+        pass
+
+
+def start_native_window_drag(root):
+    """Arrasto fluido via API do Windows (sem artefatos de geometry)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        hwnd = _window_hwnd(root)
+        WM_NCLBUTTONDOWN = 0x00A1
+        HTCAPTION = 2
+        ctypes.windll.user32.ReleaseCapture()
+        ctypes.windll.user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+        return True
+    except Exception:
+        return False
+
+
+class AppTitleBar(tk.Frame):
+    """Barra superior minimalista com controles da janela."""
+
+    BG = "#1c1c1c"
+    HEIGHT = 36
+
+    def __init__(self, parent, root):
+        super().__init__(parent, bg=self.BG, height=self.HEIGHT)
+        self.pack_propagate(False)
+        self.root = root
+        self._drag_offset = None
+        self._maximized = False
+
+        row = tk.Frame(self, bg=self.BG)
+        row.pack(fill="both", expand=True)
+
+        left = tk.Frame(row, bg=self.BG)
+        left.pack(side="left", fill="y", padx=(14, 0))
+
+        tk.Label(left, text="Mesa", bg=self.BG, fg=C["ink"],
+                 font=("Segoe UI", 10, "bold")).pack(side="left", pady=8)
+        tk.Label(left, text="Itaú", bg=self.BG, fg=C["accent"],
+                 font=("Segoe UI", 10, "bold")).pack(side="left", padx=(3, 0), pady=8)
+        tk.Label(left, text="·", bg=self.BG, fg="#404040",
+                 font=("Segoe UI", 9)).pack(side="left", padx=8, pady=8)
+        self._module_lbl = tk.Label(left, text="Início", bg=self.BG, fg="#8a8a8a",
+                                    font=("Segoe UI", 9))
+        self._module_lbl.pack(side="left", pady=8)
+
+        controls = tk.Frame(row, bg=self.BG)
+        controls.pack(side="right", fill="y")
+
+        self._btn_min = self._win_btn(controls, "─", self._minimize)
+        self._btn_max = self._win_btn(controls, "□", self._toggle_maximize)
+        self._btn_close = self._win_btn(controls, "✕", self.root.destroy, close=True)
+
+        tk.Frame(self, bg="#2e2e2e", height=1).pack(fill="x", side="bottom")
+
+        self._bind_drag(self)
+        self._bind_drag(row)
+        self._bind_drag(left)
+        for w in left.winfo_children():
+            if w is not self._module_lbl:
+                self._bind_drag(w)
+        self._bind_drag(self._module_lbl)
+        self.bind("<Double-Button-1>", lambda _e: self._toggle_maximize())
+
+    def _win_btn(self, parent, text, command, close=False):
+        hover = "#c95f5f" if close else "#333333"
+        lbl = tk.Label(parent, text=text, bg=self.BG, fg="#9a9a9a",
+                       font=("Segoe UI", 9), width=4, cursor="hand2")
+        lbl.pack(side="left", fill="y")
+        lbl.bind("<Button-1>", lambda _e: command())
+        lbl.bind("<Enter>", lambda _e, l=lbl, h=hover: l.configure(bg=h, fg="#f2f2f2"))
+        lbl.bind("<Leave>", lambda _e, l=lbl: l.configure(bg=self.BG, fg="#9a9a9a"))
+        return lbl
+
+    def _bind_drag(self, widget):
+        widget.bind("<ButtonPress-1>", self._start_drag, add="+")
+        if sys.platform != "win32":
+            widget.bind("<B1-Motion>", self._on_drag_fallback, add="+")
+
+    def _start_drag(self, event):
+        if start_native_window_drag(self.root):
+            return
+        if self._maximized:
+            return
+        self._drag_offset = (event.x_root - self.root.winfo_x(),
+                             event.y_root - self.root.winfo_y())
+
+    def _on_drag_fallback(self, event):
+        if not self._drag_offset or self._maximized:
+            return
+        ox, oy = self._drag_offset
+        self.root.geometry(f"+{event.x_root - ox}+{event.y_root - oy}")
+
+    def _minimize(self):
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.user32.ShowWindow(_window_hwnd(self.root), 6)
+                return
+            except Exception:
+                pass
+        self.root.iconify()
+
+    def _toggle_maximize(self):
+        if sys.platform == "win32":
+            try:
+                hwnd = _window_hwnd(self.root)
+                if self._maximized:
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+                    self._maximized = False
+                    self._btn_max.configure(text="□")
+                else:
+                    ctypes.windll.user32.ShowWindow(hwnd, 3)   # SW_MAXIMIZE
+                    self._maximized = True
+                    self._btn_max.configure(text="❐")
+                return
+            except Exception:
+                pass
+        if self._maximized:
+            self.root.state("normal")
+            self._maximized = False
+            self._btn_max.configure(text="□")
+        else:
+            self.root.state("zoomed")
+            self._maximized = True
+            self._btn_max.configure(text="❐")
+
+    def set_module(self, frame_name):
+        self._module_lbl.configure(text=FRAME_LABELS.get(frame_name, frame_name))
+
+
+class AppStatusBar(tk.Frame):
+    """Rodapé global minimalista — inspirado em apps modernos."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"], height=30)
+        self.pack_propagate(False)
+        self.controller = controller
+
+        tk.Frame(self, bg="#303030", height=1).pack(fill="x")
+
+        row = tk.Frame(self, bg=C["bg"])
+        row.pack(fill="both", expand=True, padx=16)
+
+        left = tk.Frame(row, bg=C["bg"])
+        left.pack(side="left", fill="y")
+
+        tk.Label(left, text="Mesa Itaú", bg=C["bg"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(side="left", pady=4)
+        tk.Label(left, text="·", bg=C["bg"], fg="#3a3a3a",
+                 font=("Segoe UI", 8)).pack(side="left", padx=6, pady=4)
+        tk.Label(left, text="Risco Sacado", bg=C["bg"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(side="left", pady=4)
+
+        right = tk.Frame(row, bg=C["bg"])
+        right.pack(side="right", fill="y")
+
+        self._clock_lbl = tk.Label(right, text="", bg=C["bg"], fg=C["ink_faint"],
+                                   font=("Segoe UI", 8))
+        self._clock_lbl.pack(side="right", padx=(12, 0), pady=4)
+
+        self._module_lbl = tk.Label(right, text="Início", bg=C["bg"], fg="#6b6b6b",
+                                    font=("Segoe UI", 8))
+        self._module_lbl.pack(side="right", pady=4)
+
+        self._tick_clock()
+
+    def set_module(self, frame_name):
+        label = FRAME_LABELS.get(frame_name, frame_name)
+        self._module_lbl.configure(text=label)
+
+    def _tick_clock(self):
+        now = datetime.now()
+        self._clock_lbl.configure(text=now.strftime("%d/%m/%Y  %H:%M"))
+        self.after(30_000, self._tick_clock)
+
+
 def styled_label(parent, text, size=10, weight="normal", color=None, **kwargs):
     return tk.Label(parent, text=text,
-                    font=("Georgia", size, weight) if weight == "bold" or size >= 14 else ("Segoe UI", size, weight),
+                    font=("Segoe UI", size, weight),
                     fg=color or C["ink"],
                     bg=kwargs.pop("bg", C["surface"]),
                     **kwargs)
 
 
 def styled_button(parent, text, command, accent=False, danger=False, small=False, **kwargs):
-    bg   = C["accent_dim"] if accent else (C["err_dim"] if danger else C["surface3"])
-    fg   = C["accent"] if accent else (C["err"] if danger else C["ink"])
-    abg  = C["accent"] if accent else (C["err"] if danger else C["surface2"])
-    afg  = C["bg"] if accent else C["ink"]
-    pad  = (8, 4) if small else (14, 7)
-    btn  = tk.Button(parent, text=text, command=command,
-                     bg=bg, fg=fg, activebackground=abg, activeforeground=afg,
-                     font=("Segoe UI", 8 if small else 9),
-                     relief="flat", bd=0, padx=pad[0], pady=pad[1],
-                     cursor="hand2", **kwargs)
+    if accent:
+        bg  = C["accent_dim"];  fg  = C["accent"]
+        abg = C["accent"];      afg = C["bg"]
+    elif danger:
+        bg  = C["err_dim"];     fg  = C["err"]
+        abg = C["err"];         afg = C["bg"]
+    else:
+        bg  = C["surface2"];    fg  = C["ink_muted"]
+        abg = C["surface3"];    afg = C["ink"]
+    pad = (7, 3) if small else (13, 6)
+    btn = tk.Button(parent, text=text, command=command,
+                    bg=bg, fg=fg, activebackground=abg, activeforeground=afg,
+                    font=("Segoe UI", 8 if small else 9),
+                    relief="flat", bd=0, padx=pad[0], pady=pad[1],
+                    cursor="hand2", **kwargs)
     btn.bind("<Enter>", lambda _: btn.configure(bg=abg, fg=afg))
-    btn.bind("<Leave>", lambda _: btn.configure(bg=bg, fg=fg))
+    btn.bind("<Leave>", lambda _: btn.configure(bg=bg,  fg=fg))
     return btn
 
 
 def styled_entry(parent, textvariable=None, width=20, show=None, **kwargs):
-    e = tk.Entry(parent, textvariable=textvariable, width=width, show=show or "",
-                 bg=C["bg"], fg=C["ink"], insertbackground=C["accent"],
-                 relief="flat", highlightthickness=1,
-                 highlightbackground=C["hair"], highlightcolor=C["accent"],
-                 font=("Segoe UI", 10), **kwargs)
-    return e
+    return tk.Entry(parent, textvariable=textvariable, width=width,
+                    show=show or "",
+                    bg=C["surface2"], fg=C["ink"],
+                    insertbackground=C["accent"],
+                    relief="flat", highlightthickness=1,
+                    highlightbackground=C["hair"],
+                    highlightcolor=C["accent"],
+                    font=("Segoe UI", 10), **kwargs)
 
 
 def card_frame(parent, **kwargs):
@@ -380,37 +769,220 @@ def card_frame(parent, **kwargs):
     return tk.Frame(parent, **kw)
 
 
-# ─────────────────────────────────────────────
-#  SCROLLABLE FRAME
-# ─────────────────────────────────────────────
+def eyebrow_label(parent, text, bg=None):
+    """Texto eyebrow estilo Notion: maiúsculas, tracking-wide, cor faint."""
+    bg = bg or C["bg"]
+    return tk.Label(parent, text=text, bg=bg, fg=C["ink_faint"],
+                    font=("Segoe UI", 7, "bold"))
+
+
+def section_divider(parent, text="", bg=None):
+    """Linha divisória com texto opcional à esquerda — estilo Notion."""
+    bg = bg or C["bg"]
+    row = tk.Frame(parent, bg=bg)
+    if text:
+        tk.Label(row, text=text, bg=bg, fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(side="left")
+        spacer = tk.Frame(row, bg=C["hair"], height=1)
+        spacer.pack(side="left", fill="x", expand=True, padx=(10, 0), pady=(5, 0))
+    else:
+        tk.Frame(row, bg=C["hair"], height=1).pack(fill="x")
+    return row
+
+class MinimalScrollbar(tk.Canvas):
+    """Trilho invisível + thumb fino arredondado (estilo overlay)."""
+
+    THUMB_MIN = 28
+
+    def __init__(self, parent, command=None, bg=None, width=6, **kwargs):
+        self._track_bg = bg or C["bg"]
+        super().__init__(
+            parent, width=width, highlightthickness=0, bd=0,
+            bg=self._track_bg, cursor="arrow", **kwargs,
+        )
+        self._command = command
+        self._first = 0.0
+        self._last = 1.0
+        self._thumb_fill = "#5c5c5c"
+        self._thumb_hover = "#787878"
+        self._drag_y = 0
+        self._thumb_rect = None
+
+        self.bind("<Configure>", self._redraw, add="+")
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Enter>", lambda _e: self._paint_thumb(self._thumb_hover))
+        self.bind("<Leave>", lambda _e: self._paint_thumb(self._thumb_fill))
+
+    def set(self, first, last):
+        f, l = float(first), float(last)
+        if f == self._first and l == self._last:
+            return
+        self._first, self._last = f, l
+        self._redraw()
+
+    def _visible(self):
+        return self._first > 0.001 or self._last < 0.999
+
+    def _thumb_geometry(self):
+        h = max(self.winfo_height(), 1)
+        w = max(self.winfo_width(), 1)
+        span = max(self._last - self._first, 0.001)
+        thumb_h = max(self.THUMB_MIN, int(h * span))
+        thumb_y = int(h * self._first)
+        if thumb_y + thumb_h > h:
+            thumb_y = max(0, h - thumb_h)
+        return w, h, thumb_y, thumb_h
+
+    def _redraw(self, _event=None):
+        self.delete("all")
+        self._thumb_rect = None
+        if not self._visible():
+            return
+        w, _h, thumb_y, thumb_h = self._thumb_geometry()
+        margin = 1
+        x0, x1 = margin, max(margin + 2, w - margin)
+        radius = (x1 - x0) / 2
+        if thumb_h <= (x1 - x0):
+            self.create_oval(x0, thumb_y, x1, thumb_y + (x1 - x0),
+                             fill=self._thumb_fill, outline="", tags="thumb")
+            self.create_oval(x0, thumb_y + thumb_h - (x1 - x0), x1, thumb_y + thumb_h,
+                             fill=self._thumb_fill, outline="", tags="thumb")
+            self._thumb_rect = (x0, thumb_y, x1, thumb_y + thumb_h)
+        else:
+            mid_top = thumb_y + radius
+            mid_bot = thumb_y + thumb_h - radius
+            self.create_oval(x0, thumb_y, x1, mid_top + radius,
+                             fill=self._thumb_fill, outline="", tags="thumb")
+            self.create_rectangle(x0, mid_top, x1, mid_bot,
+                                  fill=self._thumb_fill, outline="", tags="thumb")
+            self.create_oval(x0, mid_bot - radius, x1, thumb_y + thumb_h,
+                             fill=self._thumb_fill, outline="", tags="thumb")
+            self._thumb_rect = (x0, thumb_y, x1, thumb_y + thumb_h)
+
+    def _paint_thumb(self, color):
+        for item in self.find_withtag("thumb"):
+            self.itemconfig(item, fill=color)
+
+    def _on_press(self, event):
+        if not self._command or not self._visible():
+            return
+        w, h, thumb_y, thumb_h = self._thumb_geometry()
+        if self._thumb_rect and self._thumb_rect[1] <= event.y <= self._thumb_rect[3]:
+            self._drag_y = event.y - thumb_y
+            return
+        if event.y > thumb_y + thumb_h:
+            self._command("scroll", 1, "pages")
+        elif event.y < thumb_y:
+            self._command("scroll", -1, "pages")
+
+    def _on_drag(self, event):
+        if not self._command or not self._visible():
+            return
+        w, h, _thumb_y, thumb_h = self._thumb_geometry()
+        span = max(h - thumb_h, 1)
+        frac = (event.y - self._drag_y) / span
+        self._command("moveto", max(0.0, min(1.0, frac)))
+
+    def _on_release(self, _event):
+        self._drag_y = 0
+
+
+def bind_text_mousewheel(text_widget):
+    def _mw(event):
+        try:
+            if not text_widget.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if getattr(event, "delta", 0):
+            text_widget.yview_scroll(int(-event.delta / 120), "units")
+        elif event.num == 4:
+            text_widget.yview_scroll(-3, "units")
+        elif event.num == 5:
+            text_widget.yview_scroll(3, "units")
+    text_widget.bind("<MouseWheel>", _mw)
+    text_widget.bind("<Button-4>", _mw)
+    text_widget.bind("<Button-5>", _mw)
+
+
 class ScrollableFrame(tk.Frame):
     def __init__(self, parent, bg=None, **kwargs):
         bg = bg or C["bg"]
         super().__init__(parent, bg=bg, **kwargs)
+        self._bg = bg
+        self._wheel_roots = []
         self._canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
-        self._vbar   = tk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._vbar = MinimalScrollbar(self, command=self._canvas.yview, bg=bg, width=6)
         self._canvas.configure(yscrollcommand=self._vbar.set)
-        self._vbar.pack(side="right", fill="y")
+        self._vbar.pack(side="right", fill="y", padx=(0, 2), pady=4)
         self._canvas.pack(side="left", fill="both", expand=True)
-        self.inner   = tk.Frame(self._canvas, bg=bg)
-        self._win    = self._canvas.create_window((0,0), window=self.inner, anchor="nw")
+        self.inner = tk.Frame(self._canvas, bg=bg)
+        self._win = self._canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.inner.bind("<Configure>", self._on_inner)
         self._canvas.bind("<Configure>", self._on_canvas)
-        self._canvas.bind_all("<MouseWheel>",  self._mw)
-        self._canvas.bind_all("<Button-4>",    self._mw)
-        self._canvas.bind_all("<Button-5>",    self._mw)
+        self.bind("<Destroy>", self._on_destroy)
+        self._wheel_roots = [self]
+        self.refresh_bindings()
 
-    def _on_inner(self, _): self._canvas.configure(scrollregion=self._canvas.bbox("all"))
-    def _on_canvas(self, e): self._canvas.itemconfigure(self._win, width=e.width)
-    def _mw(self, e):
-        if getattr(e,"delta",0): self._canvas.yview_scroll(int(-e.delta/120),"units")
-        elif e.num==4: self._canvas.yview_scroll(-3,"units")
-        elif e.num==5: self._canvas.yview_scroll(3,"units")
+    def _canvas_alive(self):
+        try:
+            return bool(self._canvas.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _scroll_mousewheel(self, event):
+        if not self._canvas_alive():
+            return
+        try:
+            if getattr(event, "delta", 0):
+                self._canvas.yview_scroll(int(-event.delta / 120), "units")
+            elif event.num == 4:
+                self._canvas.yview_scroll(-3, "units")
+            elif event.num == 5:
+                self._canvas.yview_scroll(3, "units")
+        except tk.TclError:
+            pass
+
+    def _bind_mousewheel_tree(self, widget):
+        if isinstance(widget, (tk.Text, tk.Listbox)):
+            return
+        widget.bind("<MouseWheel>", self._scroll_mousewheel)
+        widget.bind("<Button-4>", self._scroll_mousewheel)
+        widget.bind("<Button-5>", self._scroll_mousewheel)
+        for child in widget.winfo_children():
+            self._bind_mousewheel_tree(child)
+
+    def refresh_bindings(self):
+        if not self._canvas_alive():
+            return
+        for root in self._wheel_roots:
+            try:
+                if root.winfo_exists():
+                    self._bind_mousewheel_tree(root)
+            except tk.TclError:
+                pass
+
+    def link_wheel(self, container):
+        if container not in self._wheel_roots:
+            self._wheel_roots.append(container)
+        self.refresh_bindings()
+
+    def _on_inner(self, _event):
+        if not self._canvas_alive():
+            return
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        self.refresh_bindings()
+
+    def _on_canvas(self, event):
+        if self._canvas_alive():
+            self._canvas.itemconfigure(self._win, width=event.width)
+
+    def _on_destroy(self, event):
+        pass
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SIDEBAR  (navegação permanente à esquerda)
-# ═══════════════════════════════════════════════════════════════════════════════
 class Sidebar(tk.Frame):
     NAV = [
         ("Home",             "⌂",  "Início"),
@@ -421,120 +993,102 @@ class Sidebar(tk.Frame):
     ]
 
     def __init__(self, parent, controller, **kwargs):
-        super().__init__(parent, bg=C["surface"], width=200, **kwargs)
+        super().__init__(parent, bg=C["surface"], width=210, **kwargs)
         self.pack_propagate(False)
         self.controller = controller
         self._btns = {}
         self._build()
 
     def _build(self):
-        # Logo / título
         top = tk.Frame(self, bg=C["surface"])
-        top.pack(fill="x", padx=16, pady=(22, 0))
+        top.pack(fill="x", padx=18, pady=(14, 0))
 
         logo_row = tk.Frame(top, bg=C["surface"])
         logo_row.pack(fill="x")
         tk.Label(logo_row, text="Mesa", bg=C["surface"], fg=C["ink"],
-                 font=("Georgia", 14, "bold")).pack(side="left")
+                 font=("Segoe UI", 14, "bold")).pack(side="left")
         tk.Label(logo_row, text=" Itaú", bg=C["surface"], fg=C["accent"],
-                 font=("Georgia", 14, "bold")).pack(side="left")
-        tk.Label(top, text="Risco Sacado", bg=C["surface"], fg=C["ink_muted"],
-                 font=("Segoe UI", 8)).pack(anchor="w", pady=(2,0))
+                 font=("Segoe UI", 14, "bold")).pack(side="left")
+        tk.Label(top, text="Risco Sacado", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(3, 0))
 
-        make_hairline(self).pack(fill="x", padx=0, pady=(16, 12))
 
-        # Nav links
-        nav_frame = tk.Frame(self, bg=C["surface"])
-        nav_frame.pack(fill="x", padx=10)
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(18, 12))
+
+
+        nav_outer = tk.Frame(self, bg=C["surface"])
+        nav_outer.pack(fill="both", expand=True, anchor="n")
 
         for name, icon, label in self.NAV:
-            btn_frame = tk.Frame(nav_frame, bg=C["surface"], cursor="hand2")
-            btn_frame.pack(fill="x", pady=1)
-            icon_lbl = tk.Label(btn_frame, text=icon, bg=C["surface"], fg=C["ink_muted"],
-                                font=("Segoe UI", 11), width=3, anchor="e")
+            row = tk.Frame(nav_outer, bg=C["surface"], cursor="hand2")
+            row.pack(fill="x", pady=1, padx=6)
+
+            bar = tk.Frame(row, bg=C["surface"], width=3)
+            bar.pack(side="left", fill="y")
+
+            inner = tk.Frame(row, bg=C["surface"], padx=8, pady=7)
+            inner.pack(side="left", fill="x", expand=True)
+
+            icon_lbl = tk.Label(inner, text=icon, bg=C["surface"],
+                                fg=C["ink_faint"], font=("Segoe UI", 12), width=2, anchor="w")
             icon_lbl.pack(side="left")
-            text_lbl = tk.Label(btn_frame, text=label, bg=C["surface"], fg=C["ink_muted"],
-                                font=("Segoe UI", 9), anchor="w")
-            text_lbl.pack(side="left", padx=(6,0))
-            accent_bar = tk.Frame(btn_frame, bg=C["surface"], width=3)
-            accent_bar.pack(side="right", fill="y")
 
-            def on_click(n=name): self.controller.show_frame(n)
-            def on_enter(e, f=btn_frame, il=icon_lbl, tl=text_lbl):
-                f.configure(bg=C["surface2"]); il.configure(bg=C["surface2"]); tl.configure(bg=C["surface2"])
-            def on_leave(e, f=btn_frame, il=icon_lbl, tl=text_lbl, n=name):
+            text_lbl = tk.Label(inner, text=label, bg=C["surface"],
+                                fg=C["ink_muted"], font=("Segoe UI", 9), anchor="w")
+            text_lbl.pack(side="left", padx=(6, 0))
+
+            def _click(n=name): self.controller.show_frame(n)
+
+            def _enter(e, r=row, inn=inner, il=icon_lbl, tl=text_lbl):
                 active = getattr(self.controller, "_active_frame", None)
-                if active != n:
-                    f.configure(bg=C["surface"]); il.configure(bg=C["surface"]); tl.configure(bg=C["surface"])
+                n_     = ""
+                for _n, _b in self._btns.items():
+                    if _b["row"] is r: n_ = _n; break
+                if n_ != active:
+                    for w in (r, inn, il, tl):
+                        try: w.configure(bg=C["surface2"])
+                        except: pass
 
-            for w in (btn_frame, icon_lbl, text_lbl):
-                w.bind("<Button-1>", lambda _,n=name: on_click(n))
-                w.bind("<Enter>", on_enter)
-                w.bind("<Leave>", on_leave)
+            def _leave(e, r=row, inn=inner, il=icon_lbl, tl=text_lbl):
+                active = getattr(self.controller, "_active_frame", None)
+                n_     = ""
+                for _n, _b in self._btns.items():
+                    if _b["row"] is r: n_ = _n; break
+                if n_ != active:
+                    for w in (r, inn, il, tl):
+                        try: w.configure(bg=C["surface"])
+                        except: pass
+
+            for w in (row, inner, icon_lbl, text_lbl):
+                w.bind("<Button-1>", lambda _, n=name: _click(n))
+                w.bind("<Enter>",    _enter)
+                w.bind("<Leave>",    _leave)
 
             self._btns[name] = {
-                "frame": btn_frame, "icon": icon_lbl,
-                "text": text_lbl, "bar": accent_bar
+                "row": row, "inner": inner,
+                "icon": icon_lbl, "text": text_lbl, "bar": bar
             }
-
-        # Data/hora rodapé
-        self._clock_lbl = tk.Label(self, text="", bg=C["surface"], fg=C["ink_faint"],
-                                   font=("Segoe UI", 8))
-        self._clock_lbl.pack(side="bottom", pady=10)
-        self._tick_clock()
-
-    def _tick_clock(self):
-        now = datetime.now()
-        self._clock_lbl.configure(text=now.strftime("%d/%m  %H:%M"))
-        self.after(30_000, self._tick_clock)
 
     def set_active(self, name):
         for n, w in self._btns.items():
-            if n == name:
-                w["frame"].configure(bg=C["surface2"])
-                w["icon"].configure(bg=C["surface2"], fg=C["accent"])
-                w["text"].configure(bg=C["surface2"], fg=C["ink"])
-                w["bar"].configure(bg=C["accent"])
-            else:
-                w["frame"].configure(bg=C["surface"])
-                w["icon"].configure(bg=C["surface"], fg=C["ink_muted"])
-                w["text"].configure(bg=C["surface"], fg=C["ink_muted"])
-                w["bar"].configure(bg=C["surface"])
+            is_active = (n == name)
+            row_bg  = C["surface2"] if is_active else C["surface"]
+            icon_fg = C["accent"]   if is_active else C["ink_faint"]
+            text_fg = C["ink"]      if is_active else C["ink_muted"]
+            bar_bg  = C["accent"]   if is_active else C["surface"]
 
+            w["row"].configure(bg=row_bg)
+            w["inner"].configure(bg=row_bg)
+            w["icon"].configure(bg=row_bg, fg=icon_fg)
+            w["text"].configure(bg=row_bg, fg=text_fg)
+            w["bar"].configure(bg=bar_bg)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  HOME FRAME — dashboard
-# ═══════════════════════════════════════════════════════════════════════════════
 class HomeFrame(tk.Frame):
     MODULES = [
-        {
-            "name":  "Cadastro Share",
-            "sub":   "Extração e análise de PDF",
-            "icon":  "⊕",
-            "frame": "Share",
-            "accent": False,
-        },
-        {
-            "name":  "BPM",
-            "sub":   "Abertura de solicitações",
-            "icon":  "⚡",
-            "frame": "BPM_CONFIG",
-            "accent": False,
-        },
-        {
-            "name":  "Limites Invertido",
-            "sub":   "Consulta LTC e limites disponíveis",
-            "icon":  "⬡",
-            "frame": "LimitesInvertido",
-            "accent": True,
-        },
-        {
-            "name":  "Rotinas",
-            "sub":   "Sequências configuráveis",
-            "icon":  "◈",
-            "frame": "Rotinas",
-            "accent": False,
-        },
+        {"name": "Cadastro Share",   "sub": "Extração e análise de PDF",          "icon": "⊕", "frame": "Share",           "color": "#5a9e72"},
+        {"name": "BPM",              "sub": "Abertura de solicitações",            "icon": "⚡", "frame": "BPM_CONFIG",      "color": "#EC7000"},
+        {"name": "Limites Invertido","sub": "Consulta LTC e limites disponíveis",  "icon": "⬡", "frame": "LimitesInvertido","color": "#c87941"},
+        {"name": "Rotinas",          "sub": "Sequências configuráveis",            "icon": "◈", "frame": "Rotinas",         "color": "#8b72c9"},
     ]
 
     def __init__(self, parent, controller):
@@ -543,183 +1097,218 @@ class HomeFrame(tk.Frame):
         self._build()
 
     def _build(self):
-        sf = ScrollableFrame(self)
-        sf.pack(fill="both", expand=True)
-        inner = sf.inner
+        self._sf = ScrollableFrame(self)
+        self._sf.pack(fill="both", expand=True)
+        inner = self._sf.inner
         inner.configure(bg=C["bg"])
         inner.columnconfigure(0, weight=1)
 
-        # ── Saudação ──────────────────────────────
-        greet_frame = tk.Frame(inner, bg=C["bg"])
-        greet_frame.pack(fill="x", padx=40, pady=(36, 0))
-        now = datetime.now()
+        # ── Greeting ──────────────────────────────────────────────
+        greet = tk.Frame(inner, bg=C["bg"])
+        greet.pack(fill="x", padx=44, pady=(40, 0))
+
+        now  = datetime.now()
         hour = now.hour
         saudacao = "Bom dia" if hour < 12 else ("Boa tarde" if hour < 18 else "Boa noite")
-        tk.Label(greet_frame, text=f"{saudacao}.", bg=C["bg"], fg=C["ink"],
-                 font=("Georgia", 22, "bold"), anchor="w").pack(anchor="w")
-        tk.Label(greet_frame, text=now.strftime("%A, %d de %B de %Y").capitalize(),
-                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 10)).pack(anchor="w", pady=(4,0))
 
-        make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=40, pady=(24, 28))
+        eyebrow_label(greet, "MESA DE OPERAÇÕES").pack(anchor="w")
+        tk.Label(greet, text=f"{saudacao}.", bg=C["bg"], fg=C["ink"],
+                 font=("Segoe UI", 26, "bold"), anchor="w").pack(anchor="w", pady=(6, 0))
+        tk.Label(greet,
+                 text=format_data_pt_br(now),
+                 bg=C["bg"], fg=C["ink_muted"],
+                 font=("Segoe UI", 10)).pack(anchor="w", pady=(4, 0))
 
-        # ── Módulos grid ─────────────────────────
-        tk.Label(inner, text="MÓDULOS", bg=C["bg"], fg=C["ink_faint"],
-                 font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=40, pady=(0,12))
+        make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=44, pady=(28, 26))
 
-        grid_frame = tk.Frame(inner, bg=C["bg"])
-        grid_frame.pack(fill="x", padx=40)
-        grid_frame.columnconfigure(0, weight=1, uniform="mod")
-        grid_frame.columnconfigure(1, weight=1, uniform="mod")
+        eyebrow_label(inner, "MÓDULOS").pack(anchor="w", padx=44, pady=(0, 14))
+
+        grid = tk.Frame(inner, bg=C["bg"])
+        grid.pack(fill="x", padx=44)
+        grid.columnconfigure(0, weight=1, uniform="m")
+        grid.columnconfigure(1, weight=1, uniform="m")
 
         for i, mod in enumerate(self.MODULES):
-            row, col = divmod(i, 2)
-            self._make_module_card(grid_frame, mod, row, col)
+            r, c = divmod(i, 2)
+            self._make_module_card(grid, mod, r, c)
 
-        make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=40, pady=(32, 24))
+        make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=44, pady=(30, 24))
 
-        # ── Atalhos rápidos ───────────────────────
-        tk.Label(inner, text="ATALHOS RÁPIDOS", bg=C["bg"], fg=C["ink_faint"],
-                 font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=40, pady=(0,10))
+        eyebrow_label(inner, "ATALHOS RÁPIDOS").pack(anchor="w", padx=44, pady=(0, 10))
 
         quick = tk.Frame(inner, bg=C["bg"])
-        quick.pack(fill="x", padx=40, pady=(0, 40))
-        for label, frame in [
-            ("→  Nova solicitação BPM",   "BPM_CONFIG"),
-            ("→  Consultar limites",       "LimitesInvertido"),
-            ("→  Extrair dados de PDF",    "Share"),
-            ("→  Gerenciar rotinas",       "Rotinas"),
-        ]:
-            btn = tk.Button(quick, text=label, command=lambda f=frame: self.controller.show_frame(f),
-                            bg=C["bg"], fg=C["ink_muted"], activebackground=C["surface"],
-                            activeforeground=C["ink"], font=("Segoe UI", 9),
-                            relief="flat", bd=0, anchor="w", padx=0, pady=5, cursor="hand2")
-            btn.pack(anchor="w")
-            btn.bind("<Enter>", lambda e, b=btn: b.configure(fg=C["accent"]))
-            btn.bind("<Leave>", lambda e, b=btn: b.configure(fg=C["ink_muted"]))
+        quick.pack(fill="x", padx=44, pady=(0, 40))
 
-        # rodapé
-        tk.Label(inner, text="Mesa de Operação  ·  Risco Sacado  ·  Middle",
-                 bg=C["bg"], fg=C["ink_faint"], font=("Segoe UI", 7)).pack(pady=(0, 20))
+        links = [
+            ("Nova solicitação BPM",    "BPM_CONFIG"),
+            ("Consultar limites",        "LimitesInvertido"),
+            ("Extrair dados de PDF",     "Share"),
+            ("Gerenciar rotinas",        "Rotinas"),
+        ]
+        for label, frame in links:
+            row_f = tk.Frame(quick, bg=C["bg"])
+            row_f.pack(fill="x", pady=1)
+
+            arrow = tk.Label(row_f, text="→", bg=C["bg"], fg=C["ink_faint"],
+                             font=("Segoe UI", 9))
+            arrow.pack(side="left", padx=(0, 6))
+
+            btn = tk.Button(row_f, text=label,
+                            command=lambda f=frame: self.controller.show_frame(f),
+                            bg=C["bg"], fg=C["ink_muted"],
+                            activebackground=C["bg"], activeforeground=C["ink"],
+                            font=("Segoe UI", 9),
+                            relief="flat", bd=0, anchor="w", padx=0, pady=4,
+                            cursor="hand2")
+            btn.pack(side="left")
+            btn.bind("<Enter>", lambda e, b=btn, a=arrow: (
+                b.configure(fg=C["accent"]), a.configure(fg=C["accent"])))
+            btn.bind("<Leave>", lambda e, b=btn, a=arrow: (
+                b.configure(fg=C["ink_muted"]), a.configure(fg=C["ink_faint"])))
 
     def _make_module_card(self, parent, mod, row, col):
-        is_accent = mod["accent"]
-        bg   = C["surface"]
-        bord = C["accent_dim"] if is_accent else C["hair"]
-        fg_name = C["accent"] if is_accent else C["ink"]
-        pad  = (0, 6) if col == 0 else (6, 0)
+        dot_color = mod.get("color", C["accent"])
+        pad = (0, 6) if col == 0 else (6, 0)
 
-        outer = tk.Frame(parent, bg=bg, highlightthickness=1, highlightbackground=bord,
+        outer = tk.Frame(parent, bg=C["surface"],
+                         highlightthickness=1, highlightbackground=C["hair"],
                          cursor="hand2")
         outer.grid(row=row, column=col, sticky="nsew", padx=pad, pady=6)
 
-        top_bar = tk.Frame(outer, bg=C["accent"] if is_accent else C["hair"], height=2)
-        top_bar.pack(fill="x")
+        top_line = tk.Frame(outer, bg=C["hair"], height=2)
+        top_line.pack(fill="x")
 
-        body = tk.Frame(outer, bg=bg, padx=18, pady=16)
+        body = tk.Frame(outer, bg=C["surface"], padx=18, pady=16)
         body.pack(fill="both", expand=True)
 
-        head = tk.Frame(body, bg=bg)
-        head.pack(fill="x")
-        tk.Label(head, text=mod["icon"], bg=bg, fg=C["accent"], font=("Segoe UI",16)).pack(side="left")
-        tk.Label(body, text=mod["name"], bg=bg, fg=fg_name,
-                 font=("Segoe UI", 11, "bold"), anchor="w").pack(anchor="w", pady=(8,2))
-        tk.Label(body, text=mod["sub"], bg=bg, fg=C["ink_muted"],
-                 font=("Segoe UI", 8), anchor="w", wraplength=160, justify="left").pack(anchor="w")
+        icon_row = tk.Frame(body, bg=C["surface"])
+        icon_row.pack(fill="x")
+        dot = _make_dot(icon_row, dot_color, size=8, bg=C["surface"])
+        dot.pack(side="left", pady=(3, 0))
+        tk.Label(icon_row, text=mod["icon"], bg=C["surface"], fg=dot_color,
+                 font=("Segoe UI", 16)).pack(side="left", padx=(6, 0))
+
+        name_lbl = tk.Label(body, text=mod["name"], bg=C["surface"], fg=C["ink"],
+                             font=("Segoe UI", 11, "bold"), anchor="w")
+        name_lbl.pack(anchor="w", pady=(8, 2))
+
+        sub_lbl = tk.Label(body, text=mod["sub"], bg=C["surface"], fg=C["ink_muted"],
+                           font=("Segoe UI", 8), anchor="w",
+                           wraplength=160, justify="left")
+        sub_lbl.pack(anchor="w")
 
         def cmd(f=mod["frame"]): self.controller.show_frame(f)
-        def enter(e, o=outer, b=body, bg_h=C["surface2"]):
-            o.configure(bg=bg_h, highlightbackground=C["accent"])
-            b.configure(bg=bg_h)
-            for w in b.winfo_children():
-                try: w.configure(bg=bg_h)
-                except: pass
-            for w in head.winfo_children():
-                try: w.configure(bg=bg_h)
-                except: pass
-        def leave(e, o=outer, b=body):
-            o.configure(bg=bg, highlightbackground=bord)
-            b.configure(bg=bg)
-            for w in b.winfo_children():
-                try: w.configure(bg=bg)
-                except: pass
-            for w in head.winfo_children():
-                try: w.configure(bg=bg)
+
+        def _enter(e):
+            outer.configure(bg=C["surface2"], highlightbackground=dot_color)
+            top_line.configure(bg=dot_color)
+            body.configure(bg=C["surface2"])
+            icon_row.configure(bg=C["surface2"])
+            name_lbl.configure(bg=C["surface2"])
+            sub_lbl.configure(bg=C["surface2"])
+            dot.configure(bg=C["surface2"])
+            for w in icon_row.winfo_children():
+                try: w.configure(bg=C["surface2"])
                 except: pass
 
-        for w in [outer, body, head] + list(body.winfo_children()) + list(head.winfo_children()):
+        def _leave(e):
+            outer.configure(bg=C["surface"], highlightbackground=C["hair"])
+            top_line.configure(bg=C["hair"])
+            body.configure(bg=C["surface"])
+            icon_row.configure(bg=C["surface"])
+            name_lbl.configure(bg=C["surface"])
+            sub_lbl.configure(bg=C["surface"])
+            dot.configure(bg=C["surface"])
+            for w in icon_row.winfo_children():
+                try: w.configure(bg=C["surface"])
+                except: pass
+
+        for w in [outer, body, icon_row, name_lbl, sub_lbl, dot, top_line]:
             try:
                 w.bind("<Button-1>", lambda _: cmd())
-                w.bind("<Enter>", enter)
-                w.bind("<Leave>", leave)
+                w.bind("<Enter>",    _enter)
+                w.bind("<Leave>",    _leave)
             except: pass
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  ROTINAS FRAME — gestão de rotinas configuráveis
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Rotinas pré-definidas com seus módulos
 ROTINAS_PREDEFINIDAS = [
     {
         "nome": "Abertura de Solicitações (Invertido)",
         "icon": "⚡",
+        "color": "#EC7000",
         "descricao": "Sequência completa: verificar limites → abrir BPM para clientes selecionados.",
         "passos": [
             {"nome": "Consultar limites (Limites Invertido)", "modulo": "LimitesInvertido", "obrigatorio": True},
-            {"nome": "Configurar e executar BPM",              "modulo": "BPM_CONFIG",       "obrigatorio": True},
+            {"nome": "Configurar e executar BPM",             "modulo": "BPM_CONFIG",       "obrigatorio": True},
         ],
     },
     {
         "nome": "Cadastro e Revisão Share",
         "icon": "⊕",
+        "color": "#5a9e72",
         "descricao": "Extrai dados do PDF e gera resumo para cadastro.",
         "passos": [
-            {"nome": "Extrair PDF (Cadastro Share)", "modulo": "Share",  "obrigatorio": True},
+            {"nome": "Extrair PDF (Cadastro Share)", "modulo": "Share", "obrigatorio": True},
         ],
     },
     {
         "nome": "Rotina Completa do Dia",
         "icon": "◈",
+        "color": "#8b72c9",
         "descricao": "Limites → Share → BPM: fluxo completo de operações.",
         "passos": [
-            {"nome": "Verificar limites",    "modulo": "LimitesInvertido", "obrigatorio": True},
-            {"nome": "Revisar cadastros Share", "modulo": "Share",         "obrigatorio": False},
-            {"nome": "Executar BPM",         "modulo": "BPM_CONFIG",       "obrigatorio": True},
+            {"nome": "Verificar limites",       "modulo": "LimitesInvertido", "obrigatorio": True},
+            {"nome": "Revisar cadastros Share", "modulo": "Share",             "obrigatorio": False},
+            {"nome": "Executar BPM",            "modulo": "BPM_CONFIG",        "obrigatorio": True},
         ],
     },
 ]
+
+_MOD_DISPLAY = {
+    "LimitesInvertido": "Limites",
+    "Share":            "Share",
+    "BPM_CONFIG":       "BPM",
+    "BPM":              "BPM",
+}
 
 
 class RotinasFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
         self.controller = controller
-        self._rotinas   = list(ROTINAS_PREDEFINIDAS)  # cópia mutável
-        self._custom    = []   # rotinas criadas pelo usuário
+        self._rotinas   = list(ROTINAS_PREDEFINIDAS)
+        self._custom    = []
         self._exec_idx  = None
         self._exec_step = 0
         self._build()
 
-    # ─── build ──────────────────────────────────────────────────
+    # ─── build ───────────────────────────────────────────────────────
     def _build(self):
-        # header
-        hdr = tk.Frame(self, bg=C["bg"])
-        hdr.pack(fill="x", padx=32, pady=(24, 0))
-        tk.Label(hdr, text="Rotinas", bg=C["bg"], fg=C["ink"],
-                 font=("Georgia", 18, "bold")).pack(side="left")
-        styled_button(hdr, "+ Nova rotina", self._open_new_rotina_dialog,
-                      accent=True).pack(side="right")
+        # ── Page header ──────────────────────────────────────────
+        hdr_wrap = tk.Frame(self, bg=C["bg"])
+        hdr_wrap.pack(fill="x", padx=44, pady=(36, 0))
 
-        tk.Label(hdr, text="Sequências configuráveis de módulos", bg=C["bg"],
-                 fg=C["ink_muted"], font=("Segoe UI", 9)).pack(side="left", padx=(12,0))
+        eyebrow_label(hdr_wrap, "ROTINAS").pack(anchor="w")
 
-        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(18,0))
+        title_row = tk.Frame(hdr_wrap, bg=C["bg"])
+        title_row.pack(fill="x", pady=(6, 0))
+        tk.Label(title_row, text="Sequências configuráveis", bg=C["bg"], fg=C["ink"],
+                 font=("Segoe UI", 22, "bold")).pack(side="left")
+        styled_button(title_row, "+ Nova", self._open_new_rotina_dialog,
+                      accent=True, small=True).pack(side="right", pady=(6, 0))
 
-        # lista de rotinas
+        # ── Divider ───────────────────────────────────────────────
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(20, 0))
+
+        # ── List ──────────────────────────────────────────────────
         self._list_frame = ScrollableFrame(self, bg=C["bg"])
         self._list_frame.pack(fill="both", expand=True)
+        self._list_frame.link_wheel(self)
         self._refresh_list()
 
+    def on_show(self):
+        self._list_frame.refresh_bindings()
+
+    # ─── list ────────────────────────────────────────────────────────
     def _refresh_list(self):
         for w in self._list_frame.inner.winfo_children():
             w.destroy()
@@ -728,73 +1317,199 @@ class RotinasFrame(tk.Frame):
 
         all_rotinas = self._rotinas + self._custom
         if not all_rotinas:
-            tk.Label(inner, text="Nenhuma rotina cadastrada.", bg=C["bg"],
-                     fg=C["ink_muted"], font=("Segoe UI",10)).pack(pady=40)
+            self._make_empty_state(inner)
+            self._list_frame.refresh_bindings()
             return
 
-        for i, rot in enumerate(all_rotinas):
-            self._make_rotina_card(inner, rot, i)
+        # Pre-defined section
+        if self._rotinas:
+            self._section_header(inner, "PRÉ-DEFINIDAS")
+            for i, rot in enumerate(self._rotinas):
+                self._make_rotina_row(inner, rot, i)
 
-    def _make_rotina_card(self, parent, rot, idx):
-        is_custom = idx >= len(self._rotinas)
-        card = card_frame(parent)
-        card.pack(fill="x", padx=32, pady=(12 if idx==0 else 6, 0))
+        # Custom section
+        if self._custom:
+            self._section_header(inner, "PERSONALIZADAS", pady_top=28)
+            for i, rot in enumerate(self._custom):
+                self._make_rotina_row(inner, rot, len(self._rotinas) + i)
+        elif self._rotinas:
+            # hint to create a custom one
+            hint = tk.Frame(inner, bg=C["bg"])
+            hint.pack(fill="x", padx=44, pady=(24, 0))
+            btn = tk.Button(hint, text="+ Criar rotina personalizada",
+                            command=self._open_new_rotina_dialog,
+                            bg=C["bg"], fg=C["ink_faint"],
+                            activebackground=C["bg"], activeforeground=C["accent"],
+                            font=("Segoe UI", 9), relief="flat", bd=0,
+                            padx=0, pady=4, cursor="hand2")
+            btn.pack(anchor="w")
+            btn.bind("<Enter>", lambda e: btn.configure(fg=C["accent"]))
+            btn.bind("<Leave>", lambda e: btn.configure(fg=C["ink_faint"]))
 
-        # cabeçalho
-        head = tk.Frame(card, bg=C["surface"], padx=18, pady=14)
-        head.pack(fill="x")
+        tk.Frame(inner, bg=C["bg"], height=40).pack()
+        self._list_frame.refresh_bindings()
 
-        tk.Label(head, text=rot["icon"], bg=C["surface"], fg=C["accent"],
-                 font=("Segoe UI",15)).pack(side="left")
-        title_col = tk.Frame(head, bg=C["surface"])
-        title_col.pack(side="left", padx=(10,0), fill="x", expand=True)
-        tk.Label(title_col, text=rot["nome"], bg=C["surface"], fg=C["ink"],
-                 font=("Segoe UI", 11, "bold"), anchor="w").pack(anchor="w")
-        tk.Label(title_col, text=rot.get("descricao",""), bg=C["surface"],
-                 fg=C["ink_muted"], font=("Segoe UI",8), anchor="w",
-                 wraplength=380, justify="left").pack(anchor="w", pady=(2,0))
+    def _make_empty_state(self, parent):
+        wrap = tk.Frame(parent, bg=C["bg"])
+        wrap.pack(fill="x", padx=44, pady=60)
+        tk.Label(wrap, text="✦", bg=C["bg"], fg=C["ink_faint"],
+                 font=("Segoe UI", 26)).pack()
+        tk.Label(wrap, text="Nenhuma rotina cadastrada", bg=C["bg"],
+                 fg=C["ink_faint"], font=("Segoe UI", 11)).pack(pady=(8, 0))
+        tk.Label(wrap, text="Crie uma sequência de módulos para executar com um clique.",
+                 bg=C["bg"], fg=C["ink_faint"],
+                 font=("Segoe UI", 9)).pack(pady=(4, 0))
+        styled_button(wrap, "+ Nova rotina", self._open_new_rotina_dialog,
+                      accent=True).pack(pady=(18, 0))
 
-        # passos
-        steps_frame = tk.Frame(card, bg=C["surface"], padx=18, pady=(0,10))
-        steps_frame.pack(fill="x")
-        for j, passo in enumerate(rot.get("passos",[])):
-            row = tk.Frame(steps_frame, bg=C["surface"])
-            row.pack(fill="x", pady=2)
-            dot_color = C["accent"] if passo.get("obrigatorio") else C["ink_faint"]
-            tk.Label(row, text="●", bg=C["surface"], fg=dot_color,
-                     font=("Segoe UI",7)).pack(side="left")
-            tk.Label(row, text=passo["nome"], bg=C["surface"], fg=C["ink_muted"],
-                     font=("Segoe UI",8)).pack(side="left", padx=(6,0))
-            mod_tag = passo.get("modulo","")
-            if mod_tag:
-                tk.Label(row, text=f"[{mod_tag}]", bg=C["surface"], fg=C["ink_faint"],
-                         font=("Segoe UI",7)).pack(side="left", padx=(4,0))
+    def _section_header(self, parent, text, pady_top=20):
+        row = tk.Frame(parent, bg=C["bg"])
+        row.pack(fill="x", padx=44, pady=(pady_top, 8))
+        tk.Label(row, text=text, bg=C["bg"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(side="left")
+        line = tk.Frame(row, bg=C["hair"], height=1)
+        line.pack(side="left", fill="x", expand=True, padx=(10, 0), pady=(5, 0))
 
-        make_hairline(card, bg=C["hair"]).pack(fill="x", padx=0)
+    def _make_rotina_row(self, parent, rot, idx):
+        is_custom  = idx >= len(self._rotinas)
+        dot_color  = rot.get("color", C["accent"])
+        passos     = rot.get("passos", [])
 
-        # footer ações
-        foot = tk.Frame(card, bg=C["surface"], padx=18, pady=10)
-        foot.pack(fill="x")
-        styled_button(foot, "▶  Executar rotina",
-                      lambda r=rot: self._execute_rotina(r),
-                      accent=True, small=True).pack(side="left")
-        styled_button(foot, "Editar",
-                      lambda r=rot, i=idx: self._open_edit_dialog(r, i),
-                      small=True).pack(side="left", padx=(6,0))
+        # ── Row wrapper ───────────────────────────────────────────
+        row_outer = tk.Frame(parent, bg=C["bg"], cursor="hand2")
+        row_outer.pack(fill="x", padx=0)
+
+        row_inner = tk.Frame(row_outer, bg=C["bg"], padx=44, pady=10)
+        row_inner.pack(fill="x")
+
+        # ── Left: colored dot ─────────────────────────────────────
+        dot_col = tk.Frame(row_inner, bg=C["bg"], width=20)
+        dot_col.pack(side="left", fill="y")
+        dot_col.pack_propagate(False)
+        dot = _make_dot(dot_col, dot_color, 10, bg=C["bg"])
+        dot.pack(anchor="n", pady=(5, 0))
+
+        # ── Center: name + desc + pills ───────────────────────────
+        center = tk.Frame(row_inner, bg=C["bg"])
+        center.pack(side="left", fill="both", expand=True, padx=(10, 16))
+
+        name_lbl = tk.Label(center, text=rot["nome"], bg=C["bg"], fg=C["ink"],
+                             font=("Segoe UI", 10, "bold"), anchor="w")
+        name_lbl.pack(anchor="w")
+
+        desc = (rot.get("descricao") or "").strip()
+        desc_lbl = None
+        if desc:
+            desc_lbl = tk.Label(center, text=desc, bg=C["bg"], fg=C["ink_muted"],
+                                font=("Segoe UI", 8), anchor="w",
+                                wraplength=420, justify="left")
+            desc_lbl.pack(anchor="w", pady=(2, 0))
+
+        # Step pills row
+        pills_widgets = []
+        if passos:
+            pills_row = tk.Frame(center, bg=C["bg"])
+            pills_row.pack(anchor="w", pady=(7, 0))
+            pills_widgets.append(pills_row)
+
+            for pi, passo in enumerate(passos):
+                if pi > 0:
+                    sep = tk.Label(pills_row, text="→", bg=C["bg"],
+                                   fg=C["ink_faint"], font=("Segoe UI", 8))
+                    sep.pack(side="left", padx=(3, 3))
+                    pills_widgets.append(sep)
+
+                pill_bg = C["surface2"]
+                pill_f  = tk.Frame(pills_row, bg=pill_bg, padx=7, pady=3)
+                pill_f.pack(side="left")
+                pills_widgets.append(pill_f)
+
+                dot_c = dot_color if passo.get("obrigatorio") else C["ink_faint"]
+                d2    = _make_dot(pill_f, dot_c, 6, bg=pill_bg)
+                d2.pack(side="left")
+                pills_widgets.append(d2)
+
+                mod_label = _MOD_DISPLAY.get(passo.get("modulo", ""), passo.get("modulo", ""))
+                txt_lbl   = tk.Label(pill_f, text=f"  {mod_label}",
+                                     bg=pill_bg, fg=C["ink_muted"],
+                                     font=("Segoe UI", 7))
+                txt_lbl.pack(side="left")
+                pills_widgets.append(txt_lbl)
+        else:
+            pills_row = None
+
+        # ── Right: action buttons ─────────────────────────────────
+        right_col = tk.Frame(row_inner, bg=C["bg"])
+        right_col.pack(side="right", fill="y", pady=(2, 0))
+
+        exec_btn = styled_button(right_col, "▶  Executar",
+                                 lambda r=rot: self._execute_rotina(r),
+                                 accent=True, small=True)
+        exec_btn.pack(side="left")
+        edit_btn = styled_button(right_col, "Editar",
+                                 lambda r=rot, i=idx: self._open_edit_dialog(r, i),
+                                 small=True)
+        edit_btn.pack(side="left", padx=(4, 0))
         if is_custom:
-            styled_button(foot, "Remover",
-                          lambda i=idx: self._remove_rotina(i),
-                          danger=True, small=True).pack(side="left", padx=(6,0))
+            del_btn = styled_button(right_col, "✕",
+                                    lambda i=idx: self._remove_rotina(i),
+                                    danger=True, small=True)
+            del_btn.pack(side="left", padx=(4, 0))
 
+        # Separator
+        make_hairline(parent, bg=C["hair"]).pack(fill="x", padx=44)
+
+        # ── Hover effect ──────────────────────────────────────────
+        hover_bg   = C["surface"]     # #212121 — between bg and pill (surface2)
+        normal_bg  = C["bg"]
+
+        def _all_bg_widgets():
+            return [row_outer, row_inner, dot_col, center, right_col, name_lbl] + \
+                   ([desc_lbl] if desc_lbl else []) + \
+                   [exec_btn, edit_btn]
+
+        def _on_enter(e):
+            for w in _all_bg_widgets():
+                try: w.configure(bg=hover_bg)
+                except: pass
+            dot.configure(bg=hover_bg)
+            for w in pills_widgets:
+                # pills_row and seps change; pill_f stays surface2; dots in pills stay pill_bg
+                if isinstance(w, tk.Frame) and w.cget("bg") == normal_bg:
+                    try: w.configure(bg=hover_bg)
+                    except: pass
+                elif isinstance(w, tk.Label) and w.cget("bg") == normal_bg:
+                    try: w.configure(bg=hover_bg)
+                    except: pass
+
+        def _on_leave(e):
+            for w in _all_bg_widgets():
+                try: w.configure(bg=normal_bg)
+                except: pass
+            dot.configure(bg=normal_bg)
+            for w in pills_widgets:
+                if isinstance(w, tk.Frame) and w.cget("bg") == hover_bg:
+                    try: w.configure(bg=normal_bg)
+                    except: pass
+                elif isinstance(w, tk.Label) and w.cget("bg") == hover_bg:
+                    try: w.configure(bg=normal_bg)
+                    except: pass
+
+        for w in [row_outer, row_inner, dot_col, center, name_lbl] + \
+                 ([desc_lbl] if desc_lbl else []):
+            try:
+                w.bind("<Enter>", _on_enter)
+                w.bind("<Leave>", _on_leave)
+            except: pass
+
+    # ─── execute / remove ────────────────────────────────────────────
     def _execute_rotina(self, rot):
-        """Inicia a rotina: navega pelos módulos na sequência."""
         passos = rot.get("passos", [])
         if not passos:
             messagebox.showinfo("Rotina vazia", "Esta rotina não tem passos configurados.")
             return
-        primeiro = passos[0].get("modulo","")
+        primeiro = passos[0].get("modulo", "")
         if primeiro:
-            # Guarda contexto de execução no controller
             self.controller.rotina_em_execucao = {
                 "nome": rot["nome"],
                 "passos": passos,
@@ -809,13 +1524,13 @@ class RotinasFrame(tk.Frame):
 
     def _remove_rotina(self, idx):
         ci = idx - len(self._rotinas)
-        if ci >= 0 and ci < len(self._custom):
+        if 0 <= ci < len(self._custom):
             nome = self._custom[ci]["nome"]
             if messagebox.askyesno("Remover rotina", f"Remover '{nome}'?"):
                 self._custom.pop(ci)
                 self._refresh_list()
 
-    # ─── diálogo: nova / editar ──────────────────────────────────
+    # ─── dialog ──────────────────────────────────────────────────────
     def _open_new_rotina_dialog(self):
         self._open_rotina_dialog(None, None)
 
@@ -826,79 +1541,123 @@ class RotinasFrame(tk.Frame):
         dlg = tk.Toplevel(self)
         dlg.title("Nova Rotina" if rot is None else "Editar Rotina")
         dlg.configure(bg=C["surface"])
-        dlg.geometry("520x560")
+        dlg.geometry("540x600")
         dlg.resizable(False, True)
         dlg.grab_set()
 
-        tk.Label(dlg, text="Nova Rotina" if rot is None else "Editar Rotina",
-                 bg=C["surface"], fg=C["ink"],
-                 font=("Georgia", 14, "bold")).pack(anchor="w", padx=24, pady=(20,4))
-        make_hairline(dlg, bg=C["hair"]).pack(fill="x", padx=0, pady=(0,16))
+        # Header
+        hdr = tk.Frame(dlg, bg=C["surface"], padx=24)
+        hdr.pack(fill="x", pady=(22, 0))
+        title_dot_var = tk.StringVar(value=(rot or {}).get("color", C["accent"]))
 
-        form = tk.Frame(dlg, bg=C["surface"])
-        form.pack(fill="both", expand=True, padx=24)
+        title_row = tk.Frame(hdr, bg=C["surface"])
+        title_row.pack(fill="x")
+        title_dot_canvas = _make_dot(title_row, title_dot_var.get(), 12, bg=C["surface"])
+        title_dot_canvas.pack(side="left", pady=(3, 0))
+        tk.Label(title_row,
+                 text="Nova Rotina" if rot is None else "Editar Rotina",
+                 bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 14, "bold")).pack(side="left", padx=(8, 0))
+
+        make_hairline(dlg, bg=C["hair"]).pack(fill="x", padx=0, pady=(18, 0))
+
+        # Scrollable form
+        sf   = ScrollableFrame(dlg, bg=C["surface"])
+        sf.pack(fill="both", expand=True)
+        sf.link_wheel(dlg)
+        form = sf.inner
+        form.configure(bg=C["surface"])
+        form_pad = tk.Frame(form, bg=C["surface"])
+        form_pad.pack(fill="both", expand=True, padx=24)
 
         # Nome
-        tk.Label(form, text="Nome", bg=C["surface"], fg=C["ink_muted"],
-                 font=("Segoe UI",8)).pack(anchor="w")
-        nome_var = tk.StringVar(value=(rot or {}).get("nome",""))
-        styled_entry(form, textvariable=nome_var).pack(fill="x", pady=(4,12))
+        tk.Label(form_pad, text="NOME", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
+        nome_var = tk.StringVar(value=(rot or {}).get("nome", ""))
+        styled_entry(form_pad, textvariable=nome_var).pack(fill="x", pady=(4, 0))
+
+        # Cor
+        tk.Label(form_pad, text="COR", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
+        color_var  = tk.StringVar(value=(rot or {}).get("color", C["accent"]))
+        color_row  = tk.Frame(form_pad, bg=C["surface"])
+        color_row.pack(anchor="w", pady=(6, 0))
+        color_btns = {}
+
+        def _pick_color(c_val):
+            color_var.set(c_val)
+            title_dot_canvas.itemconfig(1, fill=c_val)
+            for cv, cb in color_btns.items():
+                ring = "2" if cv == c_val else "0"
+                cb.configure(highlightthickness=int(ring),
+                              highlightbackground=C["ink"] if cv == c_val else C["hair"])
+
+        for dc in DOT_COLORS:
+            cv = tk.Canvas(color_row, width=20, height=20, bg=C["surface"],
+                           highlightthickness=2 if dc == color_var.get() else 0,
+                           highlightbackground=C["ink"] if dc == color_var.get() else C["hair"],
+                           cursor="hand2")
+            cv.pack(side="left", padx=3)
+            cv.create_oval(3, 3, 17, 17, fill=dc, outline="")
+            cv.bind("<Button-1>", lambda _, d=dc: _pick_color(d))
+            color_btns[dc] = cv
 
         # Ícone
-        tk.Label(form, text="Ícone (emoji)", bg=C["surface"], fg=C["ink_muted"],
-                 font=("Segoe UI",8)).pack(anchor="w")
-        icon_var = tk.StringVar(value=(rot or {}).get("icon","◈"))
-        styled_entry(form, textvariable=icon_var, width=5).pack(anchor="w", pady=(4,12))
+        tk.Label(form_pad, text="ÍCONE (EMOJI)", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
+        icon_var = tk.StringVar(value=(rot or {}).get("icon", "◈"))
+        styled_entry(form_pad, textvariable=icon_var, width=5).pack(anchor="w", pady=(4, 0))
 
         # Descrição
-        tk.Label(form, text="Descrição", bg=C["surface"], fg=C["ink_muted"],
-                 font=("Segoe UI",8)).pack(anchor="w")
-        desc_var = tk.StringVar(value=(rot or {}).get("descricao",""))
-        styled_entry(form, textvariable=desc_var).pack(fill="x", pady=(4,12))
+        tk.Label(form_pad, text="DESCRIÇÃO", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
+        desc_var = tk.StringVar(value=(rot or {}).get("descricao", ""))
+        styled_entry(form_pad, textvariable=desc_var).pack(fill="x", pady=(4, 0))
 
         # Passos
-        tk.Label(form, text="Passos (módulos em sequência)", bg=C["surface"],
-                 fg=C["ink_muted"], font=("Segoe UI",8)).pack(anchor="w")
+        tk.Label(form_pad, text="PASSOS", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
 
         MODULOS_DISP = [
             ("LimitesInvertido", "Limites Invertido"),
             ("Share",            "Cadastro Share"),
             ("BPM_CONFIG",       "BPM"),
         ]
+        passos_vars = []
 
-        passos_vars = []  # lista de (nome_var, modulo_var, obr_var)
-
-        passos_frame = tk.Frame(form, bg=C["surface"])
-        passos_frame.pack(fill="x", pady=(4,0))
+        passos_frame = tk.Frame(form_pad, bg=C["surface"])
+        passos_frame.pack(fill="x", pady=(6, 0))
 
         def refresh_passos():
-            for w in passos_frame.winfo_children(): w.destroy()
+            for w in passos_frame.winfo_children():
+                w.destroy()
             for pi, (nv, mv, ov) in enumerate(passos_vars):
-                pr = tk.Frame(passos_frame, bg=C["surface2"], pady=6, padx=8)
+                pr = tk.Frame(passos_frame, bg=C["surface2"], pady=7, padx=10)
                 pr.pack(fill="x", pady=2)
                 tk.Label(pr, text=f"{pi+1}.", bg=C["surface2"], fg=C["ink_muted"],
-                         font=("Segoe UI",9), width=2).pack(side="left")
-                styled_entry(pr, textvariable=nv, width=16).pack(side="left", padx=(4,4))
-                # dropdown módulo
+                         font=("Segoe UI", 9), width=2).pack(side="left")
+                styled_entry(pr, textvariable=nv, width=14).pack(side="left", padx=(4, 4))
                 opts = [m[1] for m in MODULOS_DISP]
-                combo = ttk.Combobox(pr, textvariable=mv, values=opts, width=14, state="readonly")
-                # mapeia label → key
+                combo = ttk.Combobox(pr, textvariable=mv, values=opts,
+                                     width=14, state="readonly")
                 cur_key = mv.get()
                 for k, lbl in MODULOS_DISP:
                     if k == cur_key: combo.set(lbl); break
-                else: combo.set(opts[0])
+                else:
+                    combo.set(opts[0])
+
                 def on_combo_change(e, mv2=mv, c=combo):
-                    lbl = c.get()
+                    lbl2 = c.get()
                     for k, l in MODULOS_DISP:
-                        if l == lbl: mv2.set(k); break
+                        if l == lbl2: mv2.set(k); break
                 combo.bind("<<ComboboxSelected>>", on_combo_change)
-                combo.pack(side="left", padx=(0,4))
-                ck = tk.Checkbutton(pr, text="Obrig.", variable=ov,
-                                    bg=C["surface2"], fg=C["ink_muted"],
-                                    selectcolor=C["bg"], activebackground=C["surface2"],
-                                    font=("Segoe UI",7))
-                ck.pack(side="left")
-                styled_button(pr, "✕", lambda p=pi: remove_passo(p), danger=True, small=True).pack(side="right")
+                combo.pack(side="left", padx=(0, 4))
+                tk.Checkbutton(pr, text="Obrig.", variable=ov,
+                               bg=C["surface2"], fg=C["ink_muted"],
+                               selectcolor=C["bg"], activebackground=C["surface2"],
+                               font=("Segoe UI", 7)).pack(side="left")
+                styled_button(pr, "✕", lambda p=pi: remove_passo(p),
+                              danger=True, small=True).pack(side="right")
 
         def add_passo():
             passos_vars.append((tk.StringVar(value="Novo passo"),
@@ -910,28 +1669,29 @@ class RotinasFrame(tk.Frame):
             if pi < len(passos_vars): passos_vars.pop(pi)
             refresh_passos()
 
-        # preenche passos existentes
-        for p in (rot or {}).get("passos",[]):
-            passos_vars.append((tk.StringVar(value=p.get("nome","Passo")),
-                                tk.StringVar(value=p.get("modulo","LimitesInvertido")),
-                                tk.BooleanVar(value=p.get("obrigatorio",True))))
+        for p in (rot or {}).get("passos", []):
+            passos_vars.append((tk.StringVar(value=p.get("nome", "Passo")),
+                                tk.StringVar(value=p.get("modulo", "LimitesInvertido")),
+                                tk.BooleanVar(value=p.get("obrigatorio", True))))
         refresh_passos()
 
-        styled_button(form, "+ Adicionar passo", add_passo, small=True).pack(anchor="w", pady=(6,0))
+        styled_button(form_pad, "+ Adicionar passo", add_passo, small=True).pack(
+            anchor="w", pady=(8, 0))
 
-        # footer
-        make_hairline(dlg, bg=C["hair"]).pack(fill="x", padx=0, pady=(12,0))
-        foot = tk.Frame(dlg, bg=C["surface"])
-        foot.pack(fill="x", padx=24, pady=12)
+        # ── Footer ────────────────────────────────────────────────
+        make_hairline(dlg, bg=C["hair"]).pack(fill="x", padx=0, pady=(4, 0))
+        foot = tk.Frame(dlg, bg=C["surface"], padx=24, pady=12)
+        foot.pack(fill="x")
 
         def salvar():
             nome = nome_var.get().strip()
             if not nome:
-                messagebox.showwarning("Campo obrigatório", "Informe um nome para a rotina.", parent=dlg)
+                messagebox.showwarning("Campo obrigatório", "Informe um nome.", parent=dlg)
                 return
             nova = {
-                "nome": nome,
-                "icon": icon_var.get().strip() or "◈",
+                "nome":     nome,
+                "icon":     icon_var.get().strip() or "◈",
+                "color":    color_var.get(),
                 "descricao": desc_var.get().strip(),
                 "passos": [
                     {"nome": nv.get(), "modulo": mv.get(), "obrigatorio": bool(ov.get())}
@@ -941,18 +1701,22 @@ class RotinasFrame(tk.Frame):
             if rot is None or idx is None or idx >= len(self._rotinas):
                 self._custom.append(nova)
             else:
-                # edita predefinida → vira custom substituindo na lista
                 self._rotinas[idx] = nova
             dlg.destroy()
             self._refresh_list()
 
-        styled_button(foot, "Cancelar", dlg.destroy, small=True).pack(side="right", padx=(6,0))
+        if rot is not None:
+            styled_button(foot, "Excluir", lambda: (
+                messagebox.askyesno("Excluir", f"Remover '{rot['nome']}'?") and
+                (dlg.destroy() or True) and
+                (self._remove_rotina(idx) if idx is not None else None)
+            ), danger=True, small=True).pack(side="left")
+
+        styled_button(foot, "Cancelar", dlg.destroy, small=True).pack(side="right", padx=(6, 0))
         styled_button(foot, "Salvar", salvar, accent=True, small=True).pack(side="right")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  BPM CONFIG FRAME — seleção de clientes + credenciais
-# ═══════════════════════════════════════════════════════════════════════════════
+
 class BPMConfigFrame(tk.Frame):
     CLIENTS = list(BPM_CLIENT_DATA.keys())
 
@@ -971,6 +1735,8 @@ class BPMConfigFrame(tk.Frame):
         # Preenche credenciais já salvas
         self._func_var.set(getattr(self.controller, "bpm_funcional", "") or "")
         self._senha_var.set(getattr(self.controller, "bpm_password", "") or "")
+        if hasattr(self, "_sf"):
+            self._sf.refresh_bindings()
 
     def _build(self):
         # header
@@ -980,9 +1746,10 @@ class BPMConfigFrame(tk.Frame):
                  font=("Georgia",18,"bold")).pack(side="left")
         make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14,0))
 
-        sf = ScrollableFrame(self, bg=C["bg"])
-        sf.pack(fill="both", expand=True)
-        body = sf.inner
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        body = self._sf.inner
         body.configure(bg=C["bg"])
 
         # ── Credenciais ─────────────────────────────────────────
@@ -1140,10 +1907,6 @@ class BPMConfigFrame(tk.Frame):
         self.controller.bpm_run_selection = selection
         self.controller.show_frame("BPM")
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SHARE FRAME — extração PDF + resumo
-# ═══════════════════════════════════════════════════════════════════════════════
 class ShareFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
@@ -1168,9 +1931,10 @@ class ShareFrame(tk.Frame):
                       lambda: self.controller.show_frame("Home")).pack(side="right", padx=(0,6))
         make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14,0))
 
-        sf = ScrollableFrame(self, bg=C["bg"])
-        sf.pack(fill="both", expand=True)
-        body = sf.inner
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        body = self._sf.inner
         body.configure(bg=C["bg"])
 
         # grid campos
@@ -1243,14 +2007,19 @@ class ShareFrame(tk.Frame):
                                   highlightthickness=1, highlightbackground=C["hair"],
                                   font=("Segoe UI",9), padx=10, pady=8)
         self.txt_resumo.grid(row=0, column=0, sticky="ew", padx=(0,6))
-        sc = tk.Scrollbar(txt_wrap, orient="vertical", command=self.txt_resumo.yview)
+        sc = MinimalScrollbar(txt_wrap, command=self.txt_resumo.yview, bg=C["surface"])
         sc.grid(row=0, column=1, sticky="ns")
         self.txt_resumo.configure(yscrollcommand=sc.set)
+        bind_text_mousewheel(self.txt_resumo)
 
         foot = tk.Frame(body, bg=C["bg"])
         foot.pack(fill="x", padx=32, pady=(12,30))
         styled_button(foot,"📋  Copiar Resumo", self._copy_resumo, accent=True).pack(side="left")
         styled_button(foot,"💾  Salvar .txt",   self._save_resumo).pack(side="left", padx=(6,0))
+
+    def on_show(self):
+        if hasattr(self, "_sf"):
+            self._sf.refresh_bindings()
 
     def _copy(self, k):
         v = self.vars[k].get()
@@ -1351,10 +2120,6 @@ class ShareFrame(tk.Frame):
         self.hidden["liquidacao"] = "Débito em CC"
         self.txt_resumo.delete("1.0","end")
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  LIMITES INVERTIDO FRAME
-# ═══════════════════════════════════════════════════════════════════════════════
 class LimitesInvertidoFrame(tk.Frame):
     COL_OK   = C["ok"]
     COL_WARN = C["warn"]
@@ -1396,6 +2161,7 @@ class LimitesInvertidoFrame(tk.Frame):
 
         self._sf = ScrollableFrame(self, bg=C["bg"])
         self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
         self._grid_outer = self._sf.inner
         self._grid_outer.configure(bg=C["bg"])
 
@@ -1405,6 +2171,7 @@ class LimitesInvertidoFrame(tk.Frame):
             self._grid.columnconfigure(c, weight=1, uniform="lcards")
 
     def on_show(self):
+        self._sf.refresh_bindings()
         if self._started: return
         self._started = True
         self._cancel_requested = False
@@ -1491,6 +2258,7 @@ class LimitesInvertidoFrame(tk.Frame):
         return {
             "outer":outer,"card":card,"top_bar":top_bar,"body":body,
             "icon_lbl":icon_lbl,"info_lbl":info_lbl,"status_lbl":status_lbl,
+            "status_row":status_row,
             "spin_id":spin_id,"angle":angle,"tick":tick,
             "is_mapped":is_mapped,"is_mirror":is_mirror,"name":name,"state":"init"
         }
@@ -1679,9 +2447,6 @@ class LimitesInvertidoFrame(tk.Frame):
                 self._worker_running = False
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  BPM FRAME — execução com log scrollável
-# ═══════════════════════════════════════════════════════════════════════════════
 class BPMFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
@@ -1711,6 +2476,7 @@ class BPMFrame(tk.Frame):
         # grid de cards
         self._sf = ScrollableFrame(self, bg=C["bg"])
         self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
         self._grid_wrap = self._sf.inner
         self._grid_wrap.configure(bg=C["bg"])
 
@@ -1736,9 +2502,10 @@ class BPMFrame(tk.Frame):
                             font=("Consolas",8), padx=10, pady=8,
                             state="disabled")
         self._log.grid(row=0, column=0, sticky="ew")
-        lsb = tk.Scrollbar(log_frame, orient="vertical", command=self._log.yview)
+        lsb = MinimalScrollbar(log_frame, command=self._log.yview, bg=C["bg"])
         lsb.grid(row=0, column=1, sticky="ns")
         self._log.configure(yscrollcommand=lsb.set)
+        bind_text_mousewheel(self._log)
         self._log.tag_configure("step",    foreground=C["log_step"])
         self._log.tag_configure("heading", foreground=C["ink"])
         self._log.tag_configure("ok",      foreground=C["log_ok"])
@@ -1759,6 +2526,7 @@ class BPMFrame(tk.Frame):
         self._log.configure(state="disabled")
 
     def on_show(self):
+        self._sf.refresh_bindings()
         sel = getattr(self.controller,"bpm_run_selection",None) or []
         if not sel: return
         self._cancel_requested = False
@@ -2133,10 +2901,6 @@ class BPMFrame(tk.Frame):
                 self._worker_running = False
                 self._started = False
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  APP — janela principal com sidebar
-# ═══════════════════════════════════════════════════════════════════════════════
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -2145,19 +2909,35 @@ class App(tk.Tk):
         self.minsize(860, 580)
         self.configure(bg=C["bg"])
         self._setup_ttk_styles()
+        ico_path = _ensure_ico_path()
+        if ico_path:
+            try:
+                self.iconbitmap(default=ico_path)
+            except Exception:
+                pass
+        self.overrideredirect(True)
         self.bpm_run_selection = []
         self.bpm_funcional     = ""
         self.bpm_password      = ""
         self.rotina_em_execucao= None
         self._active_frame     = "Home"
 
+        self._shell = tk.Frame(self, bg=C["bg"])
+        self._shell.pack(fill="both", expand=True)
+
+        self._titlebar = AppTitleBar(self._shell, self)
+        self._titlebar.pack(side="top", fill="x")
+
+        self._main = tk.Frame(self._shell, bg=C["bg"])
+        self._main.pack(fill="both", expand=True)
+
         # Layout: sidebar | conteúdo
-        self._sidebar = Sidebar(self, self)
+        self._sidebar = Sidebar(self._main, self)
         self._sidebar.pack(side="left", fill="y")
 
-        make_hairline(self, orient="v", bg=C["hair"]).pack(side="left", fill="y")
+        make_hairline(self._main, orient="v", bg=C["hair"]).pack(side="left", fill="y")
 
-        self._content = tk.Frame(self, bg=C["bg"])
+        self._content = tk.Frame(self._main, bg=C["bg"])
         self._content.pack(side="left", fill="both", expand=True)
         self._content.rowconfigure(0, weight=1)
         self._content.columnconfigure(0, weight=1)
@@ -2175,7 +2955,16 @@ class App(tk.Tk):
             self.frames[name] = f
             f.grid(row=0, column=0, sticky="nsew")
 
+        self._statusbar = AppStatusBar(self._shell, self)
+        self._statusbar.pack(side="bottom", fill="x")
+
         self.show_frame("Home")
+        self.after(120, self._apply_window_chrome)
+
+    def _apply_window_chrome(self):
+        apply_modern_window_chrome(self)
+        apply_frameless_resize(self)
+        apply_windows_shell(self)
 
     def _setup_ttk_styles(self):
         s = ttk.Style(self)
@@ -2188,9 +2977,11 @@ class App(tk.Tk):
                     lightcolor=C["hair"], darkcolor=C["hair"])
         s.map("TCombobox", fieldbackground=[("readonly",C["bg"])],
               selectbackground=[("!focus",C["surface2"])])
-        s.configure("TScrollbar", background=C["surface2"], troughcolor=C["bg"],
-                    borderwidth=0, arrowsize=10)
-        s.map("TScrollbar", background=[("active",C["surface3"])])
+    def _refresh_frame_scroll(self, frame):
+        if isinstance(frame, ScrollableFrame):
+            frame.refresh_bindings()
+        for child in frame.winfo_children():
+            self._refresh_frame_scroll(child)
 
     def show_frame(self, name):
         # remap: "BPM" sem seleção → config
@@ -2202,12 +2993,18 @@ class App(tk.Tk):
         sidebar_name = name if name in ("Home","Rotinas","Share","LimitesInvertido") \
                        else ("BPM" if name in ("BPM","BPM_CONFIG") else name)
         self._sidebar.set_active(sidebar_name)
+        self._titlebar.set_module(name)
+        self._statusbar.set_module(name)
         f.tkraise()
+        self._refresh_frame_scroll(f)
         if hasattr(f,"on_show"):
             try: f.on_show()
             except: pass
 
-
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+        except Exception:
+            pass
     App().mainloop()
