@@ -1,4 +1,4 @@
-import os, sys, re, random, struct, tkinter as tk, threading, time, tempfile, shutil, webbrowser, ctypes
+import os, sys, re, random, struct, tkinter as tk, threading, time, tempfile, shutil, webbrowser, ctypes, json as _json_mod, uuid as _uuid_mod
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from tkinter import ttk, filedialog, messagebox, font as tkfont
 from datetime import datetime, date
@@ -416,10 +416,7 @@ def _ensure_ico_path():
 
     if png_path:
        
-        needs_build = (
-            not os.path.isfile(cached)
-            or os.path.getsize(cached) > 35000
-        )
+        needs_build = not os.path.isfile(cached)
         if needs_build and _build_ico_from_png(png_path, cached):
             return cached
 
@@ -1166,6 +1163,114 @@ class HomeFrame(tk.Frame):
             btn.bind("<Leave>", lambda e, b=btn, a=arrow: (
                 b.configure(fg=C["ink_muted"]), a.configure(fg=C["ink_faint"])))
 
+        # ── Rotinas de hoje ───────────────────────────────────────
+        make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=44, pady=(28, 22))
+        eyebrow_label(inner, "ROTINAS DE HOJE").pack(anchor="w", padx=44, pady=(0, 8))
+
+        self._rot_container = tk.Frame(inner, bg=C["bg"])
+        self._rot_container.pack(fill="x", padx=44, pady=(0, 40))
+        self._build_rotinas_hoje()
+
+    def on_show(self):
+        self.refresh_rotinas()
+
+    def refresh_rotinas(self):
+        if not hasattr(self, "_rot_container"):
+            return
+        for w in self._rot_container.winfo_children():
+            w.destroy()
+        self._build_rotinas_hoje()
+
+    def _build_rotinas_hoje(self):
+        parent = self._rot_container
+        data   = RotinasData.get()
+        rots   = data.today_rotinas()
+        done_n, total = data.today_stats()
+
+        if not rots:
+            tk.Label(parent, text="Nenhuma rotina para hoje — configure em Rotinas.",
+                     bg=C["bg"], fg=C["ink_faint"],
+                     font=("Segoe UI", 9)).pack(anchor="w")
+            return
+
+        # Progress capsule
+        prog_row = tk.Frame(parent, bg=C["bg"])
+        prog_row.pack(fill="x", pady=(0, 10))
+        prog_color = C["ok"] if done_n == total else C["accent"]
+        tk.Label(prog_row, text=f"{done_n}/{total} concluída{'s' if total > 1 else ''}",
+                 bg=C["bg"], fg=prog_color,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        lnk = tk.Button(prog_row, text="ver todas →",
+                        command=lambda: self.controller.show_frame("Rotinas"),
+                        bg=C["bg"], fg=C["ink_faint"],
+                        activebackground=C["bg"], activeforeground=C["accent"],
+                        font=("Segoe UI", 8), relief="flat", bd=0, padx=0,
+                        cursor="hand2")
+        lnk.pack(side="right")
+        lnk.bind("<Enter>", lambda e: lnk.configure(fg=C["accent"]))
+        lnk.bind("<Leave>", lambda e: lnk.configure(fg=C["ink_faint"]))
+
+        sorted_rots = sorted(rots, key=RotinasData._rot_sort_key)
+        for rot in sorted_rots[:6]:   # máximo 6 itens na home
+            self._make_home_rot_row(parent, rot, data)
+
+        if len(rots) > 6:
+            tk.Label(parent,
+                     text=f"+ {len(rots)-6} rotinas — veja todas em Rotinas",
+                     bg=C["bg"], fg=C["ink_faint"],
+                     font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
+
+    def _make_home_rot_row(self, parent, rot, data):
+        from tkinter import font as tkfont
+        rid   = rot["id"]
+        color = rot.get("cor", C["accent"])
+        nome  = rot.get("nome", "Rotina")
+        _als  = rot.get("alertas") or []
+        hora  = _als[0] if _als else (rot.get("hora_alerta") or "")
+
+        row = tk.Frame(parent, bg=C["bg"], pady=4)
+        row.pack(fill="x")
+
+        chk = tk.Canvas(row, width=16, height=16,
+                        bg=C["bg"], highlightthickness=0, bd=0, cursor="hand2")
+        chk.pack(side="left", padx=(0, 8))
+
+        if hora:
+            tk.Label(row, text=hora, bg=C["bg"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7), width=5, anchor="w").pack(side="left")
+
+        _make_dot(row, color, 6, bg=C["bg"]).pack(side="left", padx=(0, 6))
+
+        name_lbl = tk.Label(row, text=nome, bg=C["bg"],
+                            fg=C["ink"], font=("Segoe UI", 9), anchor="w")
+        name_lbl.pack(side="left")
+
+        def _refresh_chk(done):
+            chk.delete("all")
+            if done:
+                chk.create_oval(0, 0, 15, 15, fill=color, outline="")
+                chk.create_text(8, 8, text="✓", fill=C["bg"],
+                                font=("Segoe UI", 7, "bold"))
+                name_lbl.configure(fg=C["ink_faint"],
+                                   font=("Segoe UI", 9, "overstrike"))
+            else:
+                chk.create_oval(0, 0, 15, 15, fill="",
+                                outline=C["ink_faint"], width=1.5)
+                name_lbl.configure(fg=C["ink"], font=("Segoe UI", 9))
+
+        _refresh_chk(data.is_done(rid))
+
+        def toggle(e=None):
+            new = not data.is_done(rid)
+            data.set_done(rid, new)
+            _refresh_chk(new)
+            # Atualiza header de progresso
+            self.refresh_rotinas()
+
+        for w in [row, chk, name_lbl]:
+            try: w.bind("<Button-1>", toggle)
+            except Exception: pass
+
     def _make_module_card(self, parent, mod, row, col):
         dot_color = mod.get("color", C["accent"])
         pad = (0, 6) if col == 0 else (6, 0)
@@ -1230,367 +1335,728 @@ class HomeFrame(tk.Frame):
                 w.bind("<Leave>",    _leave)
             except: pass
 
-ROTINAS_PREDEFINIDAS = [
-    {
-        "nome": "Abertura de Solicitações (Invertido)",
-        "icon": "⚡",
-        "color": "#EC7000",
-        "descricao": "Sequência completa: verificar limites → abrir BPM para clientes selecionados.",
-        "passos": [
-            {"nome": "Consultar limites (Limites Invertido)", "modulo": "LimitesInvertido", "obrigatorio": True},
-            {"nome": "Configurar e executar BPM",             "modulo": "BPM_CONFIG",       "obrigatorio": True},
-        ],
-    },
-    {
-        "nome": "Cadastro e Revisão Share",
-        "icon": "⊕",
-        "color": "#5a9e72",
-        "descricao": "Extrai dados do PDF e gera resumo para cadastro.",
-        "passos": [
-            {"nome": "Extrair PDF (Cadastro Share)", "modulo": "Share", "obrigatorio": True},
-        ],
-    },
-    {
-        "nome": "Rotina Completa do Dia",
-        "icon": "◈",
-        "color": "#8b72c9",
-        "descricao": "Limites → Share → BPM: fluxo completo de operações.",
-        "passos": [
-            {"nome": "Verificar limites",       "modulo": "LimitesInvertido", "obrigatorio": True},
-            {"nome": "Revisar cadastros Share", "modulo": "Share",             "obrigatorio": False},
-            {"nome": "Executar BPM",            "modulo": "BPM_CONFIG",        "obrigatorio": True},
-        ],
-    },
-]
 
-_MOD_DISPLAY = {
-    "LimitesInvertido": "Limites",
-    "Share":            "Share",
-    "BPM_CONFIG":       "BPM",
-    "BPM":              "BPM",
-}
+# ─── Rotinas Data Layer ─────────────────────────────────────────────────────
 
+def _rotinas_data_path():
+    return os.path.join(app_base_dir(), "rotinas_data.json")
+
+
+class RotinasData:
+    """Persistência de rotinas e conclusões diárias — JSON no mesmo diretório."""
+
+    _instance = None
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._rotinas    = []
+        self._conclusoes = {}  # {"YYYY-MM-DD": {"id": bool}}
+        self._load()
+
+    def _load(self):
+        path = _rotinas_data_path()
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = _json_mod.load(f)
+            self._rotinas    = data.get("rotinas",    [])
+            self._conclusoes = data.get("conclusoes", {})
+            # Migração formato antigo → novo
+            for r in self._rotinas:
+                if "dias" not in r:
+                    freq = r.get("frequencia", "diaria")
+                    if freq == "diaria":
+                        r["dias"] = [0, 1, 2, 3, 4, 5, 6]
+                    elif freq == "dias_uteis":
+                        r["dias"] = [0, 1, 2, 3, 4]
+                    elif freq.startswith("semanal_"):
+                        try:
+                            r["dias"] = [int(freq.split("_")[1])]
+                        except Exception:
+                            r["dias"] = [0, 1, 2, 3, 4, 5, 6]
+                    else:
+                        r["dias"] = [0, 1, 2, 3, 4, 5, 6]
+                if "alertas" not in r:
+                    h = (r.get("hora_alerta") or "").strip()
+                    r["alertas"] = [h] if h else []
+        except Exception:
+            pass
+
+    def save(self):
+        path = _rotinas_data_path()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                _json_mod.dump(
+                    {"rotinas": self._rotinas, "conclusoes": self._conclusoes},
+                    f, ensure_ascii=False, indent=2
+                )
+        except Exception:
+            pass
+
+    # ── CRUD rotinas ────────────────────────────────────────────────────────
+    def rotinas(self):
+        return list(self._rotinas)
+
+    def add_rotina(self, nome, dias, alertas, cor, notas=""):
+        r = {
+            "id":      str(_uuid_mod.uuid4())[:8],
+            "nome":    nome,
+            "dias":    dias,    # lista de ints 0-6
+            "alertas": alertas, # lista de "HH:MM"
+            "cor":     cor,
+            "notas":   notas,
+            "ativa":   True,
+        }
+        self._rotinas.append(r)
+        self.save()
+        return r
+
+    def update_rotina(self, rid, **kwargs):
+        for r in self._rotinas:
+            if r["id"] == rid:
+                r.update(kwargs)
+                self.save()
+                return True
+        return False
+
+    def delete_rotina(self, rid):
+        self._rotinas = [r for r in self._rotinas if r["id"] != rid]
+        self.save()
+
+    # ── Conclusões ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _today_key():
+        return date.today().isoformat()
+
+    def is_done(self, rid, day=None):
+        key = day or self._today_key()
+        return self._conclusoes.get(key, {}).get(rid, False)
+
+    def set_done(self, rid, done: bool, day=None):
+        key = day or self._today_key()
+        if key not in self._conclusoes:
+            self._conclusoes[key] = {}
+        self._conclusoes[key][rid] = done
+        # Manter apenas últimos 90 dias
+        today = date.today()
+        old_keys = [k for k in list(self._conclusoes)
+                    if (today - date.fromisoformat(k)).days > 90]
+        for k in old_keys:
+            del self._conclusoes[k]
+        self.save()
+
+    def today_rotinas(self):
+        """Rotinas que devem aparecer hoje conforme dias selecionados."""
+        today = date.today()
+        wd    = today.weekday()  # 0=seg … 6=dom
+        result = []
+        for r in self._rotinas:
+            if not r.get("ativa", True):
+                continue
+            dias = r.get("dias")
+            if dias is not None:
+                if wd in dias:
+                    result.append(r)
+            else:
+                # fallback formato antigo
+                freq = r.get("frequencia", "diaria")
+                if freq == "diaria":
+                    result.append(r)
+                elif freq == "dias_uteis" and wd < 5:
+                    result.append(r)
+                elif freq.startswith("semanal_"):
+                    try:
+                        if wd == int(freq.split("_")[1]):
+                            result.append(r)
+                    except Exception:
+                        pass
+        return result
+
+    @staticmethod
+    def _rot_sort_key(rot):
+        alertas = rot.get("alertas") or []
+        if alertas:
+            return alertas[0]
+        return (rot.get("hora_alerta") or "99:99")
+
+    def today_stats(self):
+        """(concluidas, total) para hoje."""
+        rots  = self.today_rotinas()
+        total = len(rots)
+        done  = sum(1 for r in rots if self.is_done(r["id"]))
+        return done, total
+
+
+# ─── RotinasFrame ────────────────────────────────────────────────────────────
 
 class RotinasFrame(tk.Frame):
+    FREQ_LABELS = {
+        "diaria":     "Diária",
+        "dias_uteis": "Dias úteis (Seg–Sex)",
+        "semanal_0":  "Semanal — Segunda",
+        "semanal_1":  "Semanal — Terça",
+        "semanal_2":  "Semanal — Quarta",
+        "semanal_3":  "Semanal — Quinta",
+        "semanal_4":  "Semanal — Sexta",
+        "semanal_5":  "Semanal — Sábado",
+        "semanal_6":  "Semanal — Domingo",
+    }
+    FREQ_OPTIONS = list(FREQ_LABELS.values())
+    FREQ_KEYS    = list(FREQ_LABELS.keys())
+
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
         self.controller = controller
-        self._rotinas   = list(ROTINAS_PREDEFINIDAS)
-        self._custom    = []
-        self._exec_idx  = None
-        self._exec_step = 0
+        self._data      = RotinasData.get()
+        self._tab       = "hoje"
         self._build()
+        self.after(500, self._start_alert_checker)
 
-    # ─── build ───────────────────────────────────────────────────────
+    # ── Estrutura principal ──────────────────────────────────────────────────
     def _build(self):
-        # ── Page header ──────────────────────────────────────────
         hdr_wrap = tk.Frame(self, bg=C["bg"])
         hdr_wrap.pack(fill="x", padx=44, pady=(36, 0))
+        eyebrow_label(hdr_wrap, "PLANEJAMENTO DO DIA").pack(anchor="w")
+        tk.Label(hdr_wrap, text="Rotinas", bg=C["bg"], fg=C["ink"],
+                 font=("Segoe UI", 22, "bold")).pack(anchor="w", pady=(6, 0))
 
-        eyebrow_label(hdr_wrap, "ROTINAS").pack(anchor="w")
+        make_hairline(self, bg=C["hair"]).pack(fill="x", pady=(20, 0))
 
-        title_row = tk.Frame(hdr_wrap, bg=C["bg"])
-        title_row.pack(fill="x", pady=(6, 0))
-        tk.Label(title_row, text="Sequências configuráveis", bg=C["bg"], fg=C["ink"],
-                 font=("Segoe UI", 22, "bold")).pack(side="left")
-        styled_button(title_row, "+ Nova", self._open_new_rotina_dialog,
-                      accent=True, small=True).pack(side="right", pady=(6, 0))
+        # Tab bar
+        tab_row = tk.Frame(self, bg=C["bg"])
+        tab_row.pack(fill="x", padx=44)
+        self._tab_btns = {}
+        for key, label in [("hoje", "Hoje"), ("gerenciar", "Gerenciar")]:
+            btn = tk.Button(tab_row, text=label,
+                            command=lambda k=key: self._switch_tab(k),
+                            bg=C["bg"], fg=C["ink_muted"],
+                            activebackground=C["bg"], activeforeground=C["ink"],
+                            font=("Segoe UI", 9), relief="flat", bd=0,
+                            padx=0, pady=10, cursor="hand2")
+            btn.pack(side="left", padx=(0, 22))
+            self._tab_btns[key] = btn
 
-        # ── Divider ───────────────────────────────────────────────
-        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(20, 0))
+        make_hairline(self, bg=C["hair"]).pack(fill="x")
 
-        # ── List ──────────────────────────────────────────────────
-        self._list_frame = ScrollableFrame(self, bg=C["bg"])
-        self._list_frame.pack(fill="both", expand=True)
-        self._list_frame.link_wheel(self)
-        self._refresh_list()
+        self._content_area = tk.Frame(self, bg=C["bg"])
+        self._content_area.pack(fill="both", expand=True)
+        self._switch_tab("hoje")
+
+    def _switch_tab(self, tab):
+        self._tab = tab
+        for k, btn in self._tab_btns.items():
+            if k == tab:
+                btn.configure(fg=C["accent"], font=("Segoe UI", 9, "bold"))
+            else:
+                btn.configure(fg=C["ink_muted"], font=("Segoe UI", 9))
+        for w in self._content_area.winfo_children():
+            w.destroy()
+        if tab == "hoje":
+            self._build_hoje(self._content_area)
+        else:
+            self._build_gerenciar(self._content_area)
 
     def on_show(self):
-        self._list_frame.refresh_bindings()
+        self._switch_tab(self._tab)
 
-    # ─── list ────────────────────────────────────────────────────────
-    def _refresh_list(self):
-        for w in self._list_frame.inner.winfo_children():
-            w.destroy()
-        inner = self._list_frame.inner
+    # ── HOJE ─────────────────────────────────────────────────────────────────
+    def _build_hoje(self, parent):
+        sf    = ScrollableFrame(parent, bg=C["bg"])
+        sf.pack(fill="both", expand=True)
+        inner = sf.inner
         inner.configure(bg=C["bg"])
 
-        all_rotinas = self._rotinas + self._custom
-        if not all_rotinas:
-            self._make_empty_state(inner)
-            self._list_frame.refresh_bindings()
+        now        = datetime.now()
+        today_rots = self._data.today_rotinas()
+        done_n, total = self._data.today_stats()
+
+        # Cabeçalho data + progresso
+        hdr = tk.Frame(inner, bg=C["bg"])
+        hdr.pack(fill="x", padx=44, pady=(28, 0))
+        tk.Label(hdr, text=format_data_pt_br(now), bg=C["bg"],
+                 fg=C["ink_muted"], font=("Segoe UI", 10)).pack(anchor="w")
+
+        if total > 0:
+            prog_text = f"{done_n} de {total} concluída{'s' if total > 1 else ''}"
+            prog_color = C["ok"] if done_n == total else C["accent"]
+        else:
+            prog_text  = "Nenhuma rotina para hoje"
+            prog_color = C["ink_faint"]
+
+        tk.Label(hdr, text=prog_text, bg=C["bg"], fg=prog_color,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(6, 0))
+
+        if total > 0:
+            bar_bg = tk.Frame(hdr, bg=C["surface2"], height=4)
+            bar_bg.pack(fill="x", pady=(8, 0))
+            bar_bg.pack_propagate(False)
+            bar_fg = tk.Frame(bar_bg, bg=prog_color, height=4)
+            bar_fg.place(x=0, y=0, relheight=1.0, relwidth=min(done_n / total, 1.0))
+
+        make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=44, pady=(20, 4))
+
+        if not today_rots:
+            empty = tk.Frame(inner, bg=C["bg"])
+            empty.pack(fill="x", padx=44, pady=40)
+            tk.Label(empty, text="◈", bg=C["bg"], fg=C["ink_faint"],
+                     font=("Segoe UI", 24)).pack()
+            tk.Label(empty, text="Nenhuma rotina configurada para hoje",
+                     bg=C["bg"], fg=C["ink_faint"],
+                     font=("Segoe UI", 11)).pack(pady=(8, 0))
+            tk.Label(empty, text="Vá em Gerenciar para criar suas rotinas.",
+                     bg=C["bg"], fg=C["ink_faint"],
+                     font=("Segoe UI", 9)).pack(pady=(4, 0))
+            styled_button(empty, "→ Gerenciar rotinas",
+                          lambda: self._switch_tab("gerenciar"),
+                          accent=True).pack(pady=(16, 0))
             return
 
-        # Pre-defined section
-        if self._rotinas:
-            self._section_header(inner, "PRÉ-DEFINIDAS")
-            for i, rot in enumerate(self._rotinas):
-                self._make_rotina_row(inner, rot, i)
-
-        # Custom section
-        if self._custom:
-            self._section_header(inner, "PERSONALIZADAS", pady_top=28)
-            for i, rot in enumerate(self._custom):
-                self._make_rotina_row(inner, rot, len(self._rotinas) + i)
-        elif self._rotinas:
-            # hint to create a custom one
-            hint = tk.Frame(inner, bg=C["bg"])
-            hint.pack(fill="x", padx=44, pady=(24, 0))
-            btn = tk.Button(hint, text="+ Criar rotina personalizada",
-                            command=self._open_new_rotina_dialog,
-                            bg=C["bg"], fg=C["ink_faint"],
-                            activebackground=C["bg"], activeforeground=C["accent"],
-                            font=("Segoe UI", 9), relief="flat", bd=0,
-                            padx=0, pady=4, cursor="hand2")
-            btn.pack(anchor="w")
-            btn.bind("<Enter>", lambda e: btn.configure(fg=C["accent"]))
-            btn.bind("<Leave>", lambda e: btn.configure(fg=C["ink_faint"]))
-
+        sorted_rots = sorted(today_rots, key=RotinasData._rot_sort_key)
+        for rot in sorted_rots:
+            self._make_hoje_row(inner, rot)
         tk.Frame(inner, bg=C["bg"], height=40).pack()
-        self._list_frame.refresh_bindings()
+        sf.refresh_bindings()
 
-    def _make_empty_state(self, parent):
-        wrap = tk.Frame(parent, bg=C["bg"])
-        wrap.pack(fill="x", padx=44, pady=60)
-        tk.Label(wrap, text="✦", bg=C["bg"], fg=C["ink_faint"],
-                 font=("Segoe UI", 26)).pack()
-        tk.Label(wrap, text="Nenhuma rotina cadastrada", bg=C["bg"],
-                 fg=C["ink_faint"], font=("Segoe UI", 11)).pack(pady=(8, 0))
-        tk.Label(wrap, text="Crie uma sequência de módulos para executar com um clique.",
-                 bg=C["bg"], fg=C["ink_faint"],
-                 font=("Segoe UI", 9)).pack(pady=(4, 0))
-        styled_button(wrap, "+ Nova rotina", self._open_new_rotina_dialog,
-                      accent=True).pack(pady=(18, 0))
+    def _make_hoje_row(self, parent, rot):
+        rid   = rot["id"]
+        color = rot.get("cor", C["accent"])
+        _als  = rot.get("alertas") or []
+        hora  = _als[0] if _als else (rot.get("hora_alerta") or "")
+        nome  = rot.get("nome", "Rotina")
+        notas = (rot.get("notas") or "").strip()
 
-    def _section_header(self, parent, text, pady_top=20):
         row = tk.Frame(parent, bg=C["bg"])
-        row.pack(fill="x", padx=44, pady=(pady_top, 8))
-        tk.Label(row, text=text, bg=C["bg"], fg=C["ink_faint"],
-                 font=("Segoe UI", 7, "bold")).pack(side="left")
-        line = tk.Frame(row, bg=C["hair"], height=1)
-        line.pack(side="left", fill="x", expand=True, padx=(10, 0), pady=(5, 0))
+        row.pack(fill="x", padx=44, pady=2)
+        inner_row = tk.Frame(row, bg=C["bg"], pady=9)
+        inner_row.pack(fill="x")
 
-    def _make_rotina_row(self, parent, rot, idx):
-        is_custom  = idx >= len(self._rotinas)
-        dot_color  = rot.get("color", C["accent"])
-        passos     = rot.get("passos", [])
+        # Checkbox canvas
+        chk = tk.Canvas(inner_row, width=20, height=20,
+                        bg=C["bg"], highlightthickness=0, bd=0, cursor="hand2")
+        chk.pack(side="left", padx=(0, 12))
 
-        # ── Row wrapper ───────────────────────────────────────────
-        row_outer = tk.Frame(parent, bg=C["bg"], cursor="hand2")
-        row_outer.pack(fill="x", padx=0)
+        # Hora
+        if hora:
+            tk.Label(inner_row, text=hora, bg=C["bg"], fg=C["ink_faint"],
+                     font=("Segoe UI", 8), width=5, anchor="w").pack(side="left")
 
-        row_inner = tk.Frame(row_outer, bg=C["bg"], padx=44, pady=10)
-        row_inner.pack(fill="x")
+        # Dot
+        dot = _make_dot(inner_row, color, 8, bg=C["bg"])
+        dot.pack(side="left", padx=(0, 8))
 
-        # ── Left: colored dot ─────────────────────────────────────
-        dot_col = tk.Frame(row_inner, bg=C["bg"], width=20)
+        # Nome
+        name_lbl = tk.Label(inner_row, text=nome, bg=C["bg"],
+                            fg=C["ink"], font=("Segoe UI", 10), anchor="w")
+        name_lbl.pack(side="left", fill="x", expand=True)
+
+        # Notas
+        note_lbl = None
+        if notas:
+            note_lbl = tk.Label(parent, text=f"      {notas}", bg=C["bg"],
+                                fg=C["ink_faint"], font=("Segoe UI", 8),
+                                anchor="w", wraplength=520, justify="left")
+            note_lbl.pack(fill="x", padx=44, pady=(0, 2))
+
+        make_hairline(parent, bg=C["surface2"]).pack(fill="x", padx=44)
+
+        def _refresh_visual(done):
+            self._draw_checkbox(chk, done, color)
+            if done:
+                name_lbl.configure(fg=C["ink_faint"],
+                                   font=("Segoe UI", 10, "overstrike"))
+            else:
+                name_lbl.configure(fg=C["ink"],
+                                   font=("Segoe UI", 10))
+
+        _refresh_visual(self._data.is_done(rid))
+
+        def toggle(e=None):
+            new = not self._data.is_done(rid)
+            self._data.set_done(rid, new)
+            _refresh_visual(new)
+            # Atualiza barra de progresso no Home
+            home = self.controller.frames.get("Home")
+            if home and hasattr(home, "refresh_rotinas"):
+                home.refresh_rotinas()
+
+        for w in [row, inner_row, chk, name_lbl, dot]:
+            try: w.bind("<Button-1>", toggle)
+            except Exception: pass
+
+    @staticmethod
+    def _draw_checkbox(canvas, checked, color):
+        canvas.delete("all")
+        if checked:
+            canvas.create_oval(1, 1, 19, 19, fill=color, outline="")
+            canvas.create_text(10, 10, text="✓", fill=C["bg"],
+                               font=("Segoe UI", 9, "bold"))
+        else:
+            canvas.create_oval(1, 1, 19, 19, fill="", outline=C["ink_faint"],
+                               width=1.5)
+
+    # ── GERENCIAR ────────────────────────────────────────────────────────────
+    def _build_gerenciar(self, parent):
+        act = tk.Frame(parent, bg=C["bg"])
+        act.pack(fill="x", padx=44, pady=(18, 2))
+        styled_button(act, "+ Nova rotina", self._open_nova_dialog,
+                      accent=True, small=True).pack(side="right")
+
+        sf = ScrollableFrame(parent, bg=C["bg"])
+        sf.pack(fill="both", expand=True)
+        self._ger_inner = sf.inner
+        self._ger_sf    = sf
+        self._ger_inner.configure(bg=C["bg"])
+        self._refresh_gerenciar()
+
+    def _refresh_gerenciar(self):
+        inner = getattr(self, "_ger_inner", None)
+        if inner is None:
+            return
+        for w in inner.winfo_children():
+            w.destroy()
+        rots = self._data.rotinas()
+        if not rots:
+            e = tk.Frame(inner, bg=C["bg"])
+            e.pack(fill="x", padx=44, pady=60)
+            tk.Label(e, text="◈", bg=C["bg"], fg=C["ink_faint"],
+                     font=("Segoe UI", 24)).pack()
+            tk.Label(e, text="Nenhuma rotina cadastrada", bg=C["bg"],
+                     fg=C["ink_faint"], font=("Segoe UI", 11)).pack(pady=(8, 0))
+            styled_button(e, "+ Nova rotina", self._open_nova_dialog,
+                          accent=True).pack(pady=(16, 0))
+        else:
+            for rot in rots:
+                self._make_ger_row(inner, rot)
+            tk.Frame(inner, bg=C["bg"], height=40).pack()
+        sf = getattr(self, "_ger_sf", None)
+        if sf:
+            sf.refresh_bindings()
+
+    @staticmethod
+    def _dias_label(dias):
+        if dias is None:
+            return "Diária"
+        s = sorted(dias)
+        if s == list(range(7)):
+            return "Diária"
+        if s == list(range(5)):
+            return "Dias úteis"
+        abbr = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+        return "  ".join(abbr[d] for d in s)
+
+    def _make_ger_row(self, parent, rot):
+        color    = rot.get("cor", C["accent"])
+        nome     = rot.get("nome", "Rotina")
+        dias     = rot.get("dias")
+        alertas  = rot.get("alertas") or []
+        if not alertas:
+            h = (rot.get("hora_alerta") or "").strip()
+            if h: alertas = [h]
+        notas    = (rot.get("notas") or "").strip()
+        dias_lbl = self._dias_label(dias)
+        horas_lbl = "  ·  " + ", ".join(alertas) if alertas else ""
+
+        row_o = tk.Frame(parent, bg=C["bg"])
+        row_o.pack(fill="x")
+        row_i = tk.Frame(row_o, bg=C["bg"], padx=44, pady=10)
+        row_i.pack(fill="x")
+
+        dot_col = tk.Frame(row_i, bg=C["bg"], width=20)
         dot_col.pack(side="left", fill="y")
         dot_col.pack_propagate(False)
-        dot = _make_dot(dot_col, dot_color, 10, bg=C["bg"])
-        dot.pack(anchor="n", pady=(5, 0))
+        _make_dot(dot_col, color, 10, bg=C["bg"]).pack(anchor="n", pady=(5, 0))
 
-        # ── Center: name + desc + pills ───────────────────────────
-        center = tk.Frame(row_inner, bg=C["bg"])
+        center = tk.Frame(row_i, bg=C["bg"])
         center.pack(side="left", fill="both", expand=True, padx=(10, 16))
+        tk.Label(center, text=nome, bg=C["bg"], fg=C["ink"],
+                 font=("Segoe UI", 10, "bold"), anchor="w").pack(anchor="w")
+        meta = dias_lbl + horas_lbl
+        tk.Label(center, text=meta, bg=C["bg"], fg=C["ink_muted"],
+                 font=("Segoe UI", 8), anchor="w").pack(anchor="w", pady=(2, 0))
+        if notas:
+            tk.Label(center, text=notas, bg=C["bg"], fg=C["ink_faint"],
+                     font=("Segoe UI", 8), anchor="w",
+                     wraplength=380, justify="left").pack(anchor="w", pady=(1, 0))
 
-        name_lbl = tk.Label(center, text=rot["nome"], bg=C["bg"], fg=C["ink"],
-                             font=("Segoe UI", 10, "bold"), anchor="w")
-        name_lbl.pack(anchor="w")
+        right = tk.Frame(row_i, bg=C["bg"])
+        right.pack(side="right", fill="y", pady=(2, 0))
+        styled_button(right, "Editar",
+                      lambda r=rot: self._open_edit_dialog(r),
+                      small=True).pack(side="left")
+        styled_button(right, "✕",
+                      lambda r=rot: self._del_rotina(r),
+                      danger=True, small=True).pack(side="left", padx=(4, 0))
 
-        desc = (rot.get("descricao") or "").strip()
-        desc_lbl = None
-        if desc:
-            desc_lbl = tk.Label(center, text=desc, bg=C["bg"], fg=C["ink_muted"],
-                                font=("Segoe UI", 8), anchor="w",
-                                wraplength=420, justify="left")
-            desc_lbl.pack(anchor="w", pady=(2, 0))
-
-        # Step pills row
-        pills_widgets = []
-        if passos:
-            pills_row = tk.Frame(center, bg=C["bg"])
-            pills_row.pack(anchor="w", pady=(7, 0))
-            pills_widgets.append(pills_row)
-
-            for pi, passo in enumerate(passos):
-                if pi > 0:
-                    sep = tk.Label(pills_row, text="→", bg=C["bg"],
-                                   fg=C["ink_faint"], font=("Segoe UI", 8))
-                    sep.pack(side="left", padx=(3, 3))
-                    pills_widgets.append(sep)
-
-                pill_bg = C["surface2"]
-                pill_f  = tk.Frame(pills_row, bg=pill_bg, padx=7, pady=3)
-                pill_f.pack(side="left")
-                pills_widgets.append(pill_f)
-
-                dot_c = dot_color if passo.get("obrigatorio") else C["ink_faint"]
-                d2    = _make_dot(pill_f, dot_c, 6, bg=pill_bg)
-                d2.pack(side="left")
-                pills_widgets.append(d2)
-
-                mod_label = _MOD_DISPLAY.get(passo.get("modulo", ""), passo.get("modulo", ""))
-                txt_lbl   = tk.Label(pill_f, text=f"  {mod_label}",
-                                     bg=pill_bg, fg=C["ink_muted"],
-                                     font=("Segoe UI", 7))
-                txt_lbl.pack(side="left")
-                pills_widgets.append(txt_lbl)
-        else:
-            pills_row = None
-
-        # ── Right: action buttons ─────────────────────────────────
-        right_col = tk.Frame(row_inner, bg=C["bg"])
-        right_col.pack(side="right", fill="y", pady=(2, 0))
-
-        exec_btn = styled_button(right_col, "▶  Executar",
-                                 lambda r=rot: self._execute_rotina(r),
-                                 accent=True, small=True)
-        exec_btn.pack(side="left")
-        edit_btn = styled_button(right_col, "Editar",
-                                 lambda r=rot, i=idx: self._open_edit_dialog(r, i),
-                                 small=True)
-        edit_btn.pack(side="left", padx=(4, 0))
-        if is_custom:
-            del_btn = styled_button(right_col, "✕",
-                                    lambda i=idx: self._remove_rotina(i),
-                                    danger=True, small=True)
-            del_btn.pack(side="left", padx=(4, 0))
-
-        # Separator
         make_hairline(parent, bg=C["hair"]).pack(fill="x", padx=44)
 
-        # ── Hover effect ──────────────────────────────────────────
-        hover_bg   = C["surface"]     # #212121 — between bg and pill (surface2)
-        normal_bg  = C["bg"]
+        # Hover effect
+        def _bg_all(bg):
+            for w in [row_o, row_i, dot_col, center, right]:
+                try: w.configure(bg=bg)
+                except Exception: pass
+            for w in center.winfo_children() + right.winfo_children() +                      dot_col.winfo_children():
+                try: w.configure(bg=bg)
+                except Exception: pass
+        row_o.bind("<Enter>", lambda _: _bg_all(C["surface"]))
+        row_o.bind("<Leave>", lambda _: _bg_all(C["bg"]))
+        row_i.bind("<Enter>", lambda _: _bg_all(C["surface"]))
+        row_i.bind("<Leave>", lambda _: _bg_all(C["bg"]))
 
-        def _all_bg_widgets():
-            return [row_outer, row_inner, dot_col, center, right_col, name_lbl] + \
-                   ([desc_lbl] if desc_lbl else []) + \
-                   [exec_btn, edit_btn]
+    def _del_rotina(self, rot):
+        if messagebox.askyesno("Remover", f"Remover '{rot['nome']}'?", parent=self):
+            self._data.delete_rotina(rot["id"])
+            self._refresh_gerenciar()
+            home = self.controller.frames.get("Home")
+            if home and hasattr(home, "refresh_rotinas"):
+                home.refresh_rotinas()
 
-        def _on_enter(e):
-            for w in _all_bg_widgets():
-                try: w.configure(bg=hover_bg)
-                except: pass
-            dot.configure(bg=hover_bg)
-            for w in pills_widgets:
-                # pills_row and seps change; pill_f stays surface2; dots in pills stay pill_bg
-                if isinstance(w, tk.Frame) and w.cget("bg") == normal_bg:
-                    try: w.configure(bg=hover_bg)
-                    except: pass
-                elif isinstance(w, tk.Label) and w.cget("bg") == normal_bg:
-                    try: w.configure(bg=hover_bg)
-                    except: pass
+    # ── Diálogo nova / editar ────────────────────────────────────────────────
+    def _open_nova_dialog(self):
+        self._open_rotina_dialog(None)
 
-        def _on_leave(e):
-            for w in _all_bg_widgets():
-                try: w.configure(bg=normal_bg)
-                except: pass
-            dot.configure(bg=normal_bg)
-            for w in pills_widgets:
-                if isinstance(w, tk.Frame) and w.cget("bg") == hover_bg:
-                    try: w.configure(bg=normal_bg)
-                    except: pass
-                elif isinstance(w, tk.Label) and w.cget("bg") == hover_bg:
-                    try: w.configure(bg=normal_bg)
-                    except: pass
+    def _open_edit_dialog(self, rot):
+        self._open_rotina_dialog(rot)
 
-        for w in [row_outer, row_inner, dot_col, center, name_lbl] + \
-                 ([desc_lbl] if desc_lbl else []):
-            try:
-                w.bind("<Enter>", _on_enter)
-                w.bind("<Leave>", _on_leave)
-            except: pass
-
-    # ─── execute / remove ────────────────────────────────────────────
-    def _execute_rotina(self, rot):
-        passos = rot.get("passos", [])
-        if not passos:
-            messagebox.showinfo("Rotina vazia", "Esta rotina não tem passos configurados.")
-            return
-        primeiro = passos[0].get("modulo", "")
-        if primeiro:
-            self.controller.rotina_em_execucao = {
-                "nome": rot["nome"],
-                "passos": passos,
-                "step_atual": 0,
-            }
-            messagebox.showinfo(
-                "Iniciar Rotina",
-                f"Rotina: {rot['nome']}\n\nPasso 1 de {len(passos)}: {passos[0]['nome']}\n\nClique OK para iniciar.",
-                parent=self
-            )
-            self.controller.show_frame(primeiro)
-
-    def _remove_rotina(self, idx):
-        ci = idx - len(self._rotinas)
-        if 0 <= ci < len(self._custom):
-            nome = self._custom[ci]["nome"]
-            if messagebox.askyesno("Remover rotina", f"Remover '{nome}'?"):
-                self._custom.pop(ci)
-                self._refresh_list()
-
-    # ─── dialog ──────────────────────────────────────────────────────
-    def _open_new_rotina_dialog(self):
-        self._open_rotina_dialog(None, None)
-
-    def _open_edit_dialog(self, rot, idx):
-        self._open_rotina_dialog(rot, idx)
-
-    def _open_rotina_dialog(self, rot, idx):
+    def _open_rotina_dialog(self, rot):
+        editing = rot is not None
         dlg = tk.Toplevel(self)
-        dlg.title("Nova Rotina" if rot is None else "Editar Rotina")
+        dlg.title("Editar Rotina" if editing else "Nova Rotina")
         dlg.configure(bg=C["surface"])
-        dlg.geometry("540x600")
+        dlg.geometry("480x580")
         dlg.resizable(False, True)
         dlg.grab_set()
 
-        # Header
         hdr = tk.Frame(dlg, bg=C["surface"], padx=24)
         hdr.pack(fill="x", pady=(22, 0))
-        title_dot_var = tk.StringVar(value=(rot or {}).get("color", C["accent"]))
+        color_var = tk.StringVar(value=(rot or {}).get("cor", C["accent"]))
 
         title_row = tk.Frame(hdr, bg=C["surface"])
         title_row.pack(fill="x")
-        title_dot_canvas = _make_dot(title_row, title_dot_var.get(), 12, bg=C["surface"])
-        title_dot_canvas.pack(side="left", pady=(3, 0))
+        title_dot = _make_dot(title_row, color_var.get(), 12, bg=C["surface"])
+        title_dot.pack(side="left", pady=(3, 0))
         tk.Label(title_row,
-                 text="Nova Rotina" if rot is None else "Editar Rotina",
+                 text="Editar Rotina" if editing else "Nova Rotina",
                  bg=C["surface"], fg=C["ink"],
                  font=("Segoe UI", 14, "bold")).pack(side="left", padx=(8, 0))
+        make_hairline(dlg, bg=C["hair"]).pack(fill="x", pady=(18, 0))
 
-        make_hairline(dlg, bg=C["hair"]).pack(fill="x", padx=0, pady=(18, 0))
-
-        # Scrollable form
         sf   = ScrollableFrame(dlg, bg=C["surface"])
         sf.pack(fill="both", expand=True)
         sf.link_wheel(dlg)
         form = sf.inner
         form.configure(bg=C["surface"])
-        form_pad = tk.Frame(form, bg=C["surface"])
-        form_pad.pack(fill="both", expand=True, padx=24)
+        pad  = tk.Frame(form, bg=C["surface"])
+        pad.pack(fill="both", expand=True, padx=24)
 
-        # Nome
-        tk.Label(form_pad, text="NOME", bg=C["surface"], fg=C["ink_faint"],
+        # ── Nome ────────────────────────────────────────────────────
+        tk.Label(pad, text="NOME", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
         nome_var = tk.StringVar(value=(rot or {}).get("nome", ""))
-        styled_entry(form_pad, textvariable=nome_var).pack(fill="x", pady=(4, 0))
+        styled_entry(pad, textvariable=nome_var).pack(fill="x", pady=(4, 0))
 
-        # Cor
-        tk.Label(form_pad, text="COR", bg=C["surface"], fg=C["ink_faint"],
+        # ── Dias da semana ──────────────────────────────────────────
+        tk.Label(pad, text="DIAS DA SEMANA", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
-        color_var  = tk.StringVar(value=(rot or {}).get("color", C["accent"]))
-        color_row  = tk.Frame(form_pad, bg=C["surface"])
+
+        # Resolve dias iniciais (migra formato antigo)
+        rot_dias = (rot or {}).get("dias")
+        if rot_dias is None:
+            freq0 = (rot or {}).get("frequencia", "diaria")
+            if freq0 == "dias_uteis":
+                rot_dias = [0, 1, 2, 3, 4]
+            elif freq0.startswith("semanal_"):
+                try:
+                    rot_dias = [int(freq0.split("_")[1])]
+                except Exception:
+                    rot_dias = [0, 1, 2, 3, 4, 5, 6]
+            else:
+                rot_dias = [0, 1, 2, 3, 4, 5, 6]
+
+        dias_sel  = set(rot_dias)
+        DIA_ABBR  = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+        dias_btns = {}
+
+        dias_row = tk.Frame(pad, bg=C["surface"])
+        dias_row.pack(anchor="w", pady=(6, 0))
+
+        def _render_dias_btns():
+            for d, btn in dias_btns.items():
+                sel = d in dias_sel
+                btn.configure(
+                    bg=C["accent"]   if sel else C["surface3"],
+                    fg=C["bg"]       if sel else C["ink_muted"],
+                    font=("Segoe UI", 8, "bold") if sel else ("Segoe UI", 8),
+                )
+
+        def _toggle_dia(d):
+            if d in dias_sel:
+                if len(dias_sel) > 1:
+                    dias_sel.discard(d)
+            else:
+                dias_sel.add(d)
+            _render_dias_btns()
+
+        for d, lbl in enumerate(DIA_ABBR):
+            sel = d in dias_sel
+            btn = tk.Button(dias_row, text=lbl,
+                            command=lambda dd=d: _toggle_dia(dd),
+                            bg=C["accent"] if sel else C["surface3"],
+                            fg=C["bg"] if sel else C["ink_muted"],
+                            font=("Segoe UI", 8, "bold") if sel else ("Segoe UI", 8),
+                            relief="flat", bd=0, padx=9, pady=5,
+                            cursor="hand2")
+            btn.pack(side="left", padx=(0, 3))
+            dias_btns[d] = btn
+
+        # Presets
+        preset_row = tk.Frame(pad, bg=C["surface"])
+        preset_row.pack(anchor="w", pady=(5, 0))
+
+        def _preset(days):
+            dias_sel.clear()
+            dias_sel.update(days)
+            _render_dias_btns()
+
+        for ptxt, pdays in [("Todos os dias", range(7)), ("Dias úteis", range(5))]:
+            tk.Button(preset_row, text=ptxt,
+                      command=lambda d=pdays: _preset(d),
+                      bg=C["surface3"], fg=C["ink_faint"],
+                      font=("Segoe UI", 7), relief="flat", bd=0,
+                      padx=6, pady=3, cursor="hand2").pack(side="left", padx=(0, 5))
+
+        # ── Alertas ─────────────────────────────────────────────────
+        tk.Label(pad, text="ALERTAS", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
+
+        # Resolve alertas iniciais
+        rot_als = list((rot or {}).get("alertas") or [])
+        if not rot_als:
+            h0 = (rot or {}).get("hora_alerta") or ""
+            if h0:
+                rot_als = [h0]
+        alertas_list = list(rot_als)
+
+        alertas_frame = tk.Frame(pad, bg=C["surface"])
+        alertas_frame.pack(fill="x", pady=(4, 0))
+
+        def _render_alertas():
+            for w in alertas_frame.winfo_children():
+                w.destroy()
+            if not alertas_list:
+                tk.Label(alertas_frame, text="Nenhum alerta configurado",
+                         bg=C["surface"], fg=C["ink_faint"],
+                         font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+                return
+            for i, hora in enumerate(alertas_list):
+                r = tk.Frame(alertas_frame, bg=C["surface"])
+                r.pack(anchor="w", pady=2)
+                tk.Label(r, text=hora,
+                         bg=C["surface2"], fg=C["ink"],
+                         font=("Segoe UI", 9, "bold"),
+                         padx=10, pady=3).pack(side="left")
+                tk.Button(r, text="✕",
+                          command=lambda idx=i: (_del_alerta(idx)),
+                          bg=C["surface"], fg=C["ink_faint"],
+                          activebackground=C["surface"], activeforeground=C["err"],
+                          font=("Segoe UI", 8), relief="flat", bd=0,
+                          padx=4, cursor="hand2").pack(side="left", padx=(3, 0))
+
+        def _del_alerta(idx):
+            if 0 <= idx < len(alertas_list):
+                alertas_list.pop(idx)
+                _render_alertas()
+
+        _render_alertas()
+
+        # Linha: adicionar hora específica
+        make_hairline(pad, bg=C["surface3"]).pack(fill="x", pady=(10, 0))
+        add_lbl = tk.Frame(pad, bg=C["surface"])
+        add_lbl.pack(fill="x", pady=(8, 0))
+        tk.Label(add_lbl, text="Nova hora", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 8)).pack(side="left")
+
+        add_row = tk.Frame(pad, bg=C["surface"])
+        add_row.pack(fill="x", pady=(4, 0))
+        add_hora_var = tk.StringVar()
+        styled_entry(add_row, textvariable=add_hora_var, width=8).pack(side="left")
+        tk.Label(add_row, text="HH:MM", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7)).pack(side="left", padx=(5, 12))
+
+        def _add_hora():
+            h = add_hora_var.get().strip()
+            if not re.match(r"^\d{2}:\d{2}$", h):
+                return
+            if h not in alertas_list:
+                alertas_list.append(h)
+                alertas_list.sort()
+            add_hora_var.set("")
+            _render_alertas()
+
+        tk.Button(add_row, text="+ Adicionar", command=_add_hora,
+                  bg=C["surface3"], fg=C["ink_muted"],
+                  activebackground=C["accent_dim"], activeforeground=C["ink"],
+                  font=("Segoe UI", 8), relief="flat", bd=0,
+                  padx=8, pady=3, cursor="hand2").pack(side="left")
+
+        # Linha: X min antes
+        antes_row = tk.Frame(pad, bg=C["surface"])
+        antes_row.pack(fill="x", pady=(8, 0))
+        antes_var = tk.StringVar(value="15")
+        tk.Label(antes_row, text="ou", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(side="left", padx=(0, 6))
+        styled_entry(antes_row, textvariable=antes_var, width=4).pack(side="left")
+        tk.Label(antes_row, text="min antes de", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(side="left", padx=(5, 5))
+        ref_var = tk.StringVar()
+        styled_entry(antes_row, textvariable=ref_var, width=8).pack(side="left")
+        tk.Label(antes_row, text="HH:MM", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7)).pack(side="left", padx=(4, 8))
+
+        def _add_antes():
+            try:
+                mins = int(antes_var.get().strip())
+                ref  = ref_var.get().strip()
+                if not re.match(r"^\d{2}:\d{2}$", ref):
+                    return
+                h, m  = int(ref[:2]), int(ref[3:])
+                total = (h * 60 + m - mins) % (24 * 60)
+                nova  = f"{total // 60:02d}:{total % 60:02d}"
+                if nova not in alertas_list:
+                    alertas_list.append(nova)
+                    alertas_list.sort()
+                ref_var.set("")
+                _render_alertas()
+            except Exception:
+                pass
+
+        tk.Button(antes_row, text="OK", command=_add_antes,
+                  bg=C["surface3"], fg=C["ink_muted"],
+                  activebackground=C["accent_dim"], activeforeground=C["ink"],
+                  font=("Segoe UI", 8), relief="flat", bd=0,
+                  padx=8, pady=3, cursor="hand2").pack(side="left")
+
+        make_hairline(pad, bg=C["surface3"]).pack(fill="x", pady=(10, 0))
+
+        # ── Cor ─────────────────────────────────────────────────────
+        tk.Label(pad, text="COR", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(14, 0))
+        color_row  = tk.Frame(pad, bg=C["surface"])
         color_row.pack(anchor="w", pady=(6, 0))
         color_btns = {}
 
-        def _pick_color(c_val):
+        def _pick(c_val):
             color_var.set(c_val)
-            title_dot_canvas.itemconfig(1, fill=c_val)
-            for cv, cb in color_btns.items():
-                ring = "2" if cv == c_val else "0"
-                cb.configure(highlightthickness=int(ring),
-                              highlightbackground=C["ink"] if cv == c_val else C["hair"])
+            title_dot.itemconfig(1, fill=c_val)
+            for cv2, cb2 in color_btns.items():
+                r2 = 2 if cv2 == c_val else 0
+                cb2.configure(highlightthickness=r2,
+                              highlightbackground=C["ink"] if cv2 == c_val else C["hair"])
 
         for dc in DOT_COLORS:
             cv = tk.Canvas(color_row, width=20, height=20, bg=C["surface"],
@@ -1599,121 +2065,118 @@ class RotinasFrame(tk.Frame):
                            cursor="hand2")
             cv.pack(side="left", padx=3)
             cv.create_oval(3, 3, 17, 17, fill=dc, outline="")
-            cv.bind("<Button-1>", lambda _, d=dc: _pick_color(d))
+            cv.bind("<Button-1>", lambda _, d=dc: _pick(d))
             color_btns[dc] = cv
 
-        # Ícone
-        tk.Label(form_pad, text="ÍCONE (EMOJI)", bg=C["surface"], fg=C["ink_faint"],
-                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
-        icon_var = tk.StringVar(value=(rot or {}).get("icon", "◈"))
-        styled_entry(form_pad, textvariable=icon_var, width=5).pack(anchor="w", pady=(4, 0))
+        # ── Notas ────────────────────────────────────────────────────
+        tk.Label(pad, text="NOTAS  (opcional)", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(14, 0))
+        notas_var = tk.StringVar(value=(rot or {}).get("notas", "") or "")
+        styled_entry(pad, textvariable=notas_var).pack(fill="x", pady=(4, 12))
 
-        # Descrição
-        tk.Label(form_pad, text="DESCRIÇÃO", bg=C["surface"], fg=C["ink_faint"],
-                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
-        desc_var = tk.StringVar(value=(rot or {}).get("descricao", ""))
-        styled_entry(form_pad, textvariable=desc_var).pack(fill="x", pady=(4, 0))
-
-        # Passos
-        tk.Label(form_pad, text="PASSOS", bg=C["surface"], fg=C["ink_faint"],
-                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
-
-        MODULOS_DISP = [
-            ("LimitesInvertido", "Limites Invertido"),
-            ("Share",            "Cadastro Share"),
-            ("BPM_CONFIG",       "BPM"),
-        ]
-        passos_vars = []
-
-        passos_frame = tk.Frame(form_pad, bg=C["surface"])
-        passos_frame.pack(fill="x", pady=(6, 0))
-
-        def refresh_passos():
-            for w in passos_frame.winfo_children():
-                w.destroy()
-            for pi, (nv, mv, ov) in enumerate(passos_vars):
-                pr = tk.Frame(passos_frame, bg=C["surface2"], pady=7, padx=10)
-                pr.pack(fill="x", pady=2)
-                tk.Label(pr, text=f"{pi+1}.", bg=C["surface2"], fg=C["ink_muted"],
-                         font=("Segoe UI", 9), width=2).pack(side="left")
-                styled_entry(pr, textvariable=nv, width=14).pack(side="left", padx=(4, 4))
-                opts = [m[1] for m in MODULOS_DISP]
-                combo = ttk.Combobox(pr, textvariable=mv, values=opts,
-                                     width=14, state="readonly")
-                cur_key = mv.get()
-                for k, lbl in MODULOS_DISP:
-                    if k == cur_key: combo.set(lbl); break
-                else:
-                    combo.set(opts[0])
-
-                def on_combo_change(e, mv2=mv, c=combo):
-                    lbl2 = c.get()
-                    for k, l in MODULOS_DISP:
-                        if l == lbl2: mv2.set(k); break
-                combo.bind("<<ComboboxSelected>>", on_combo_change)
-                combo.pack(side="left", padx=(0, 4))
-                tk.Checkbutton(pr, text="Obrig.", variable=ov,
-                               bg=C["surface2"], fg=C["ink_muted"],
-                               selectcolor=C["bg"], activebackground=C["surface2"],
-                               font=("Segoe UI", 7)).pack(side="left")
-                styled_button(pr, "✕", lambda p=pi: remove_passo(p),
-                              danger=True, small=True).pack(side="right")
-
-        def add_passo():
-            passos_vars.append((tk.StringVar(value="Novo passo"),
-                                tk.StringVar(value="LimitesInvertido"),
-                                tk.BooleanVar(value=True)))
-            refresh_passos()
-
-        def remove_passo(pi):
-            if pi < len(passos_vars): passos_vars.pop(pi)
-            refresh_passos()
-
-        for p in (rot or {}).get("passos", []):
-            passos_vars.append((tk.StringVar(value=p.get("nome", "Passo")),
-                                tk.StringVar(value=p.get("modulo", "LimitesInvertido")),
-                                tk.BooleanVar(value=p.get("obrigatorio", True))))
-        refresh_passos()
-
-        styled_button(form_pad, "+ Adicionar passo", add_passo, small=True).pack(
-            anchor="w", pady=(8, 0))
-
-        # ── Footer ────────────────────────────────────────────────
-        make_hairline(dlg, bg=C["hair"]).pack(fill="x", padx=0, pady=(4, 0))
+        # ── Footer ───────────────────────────────────────────────────
+        make_hairline(dlg, bg=C["hair"]).pack(fill="x")
         foot = tk.Frame(dlg, bg=C["surface"], padx=24, pady=12)
         foot.pack(fill="x")
 
         def salvar():
             nome = nome_var.get().strip()
             if not nome:
-                messagebox.showwarning("Campo obrigatório", "Informe um nome.", parent=dlg)
+                messagebox.showwarning("Campo obrigatório", "Informe um nome.",
+                                       parent=dlg)
                 return
-            nova = {
-                "nome":     nome,
-                "icon":     icon_var.get().strip() or "◈",
-                "color":    color_var.get(),
-                "descricao": desc_var.get().strip(),
-                "passos": [
-                    {"nome": nv.get(), "modulo": mv.get(), "obrigatorio": bool(ov.get())}
-                    for nv, mv, ov in passos_vars
-                ],
-            }
-            if rot is None or idx is None or idx >= len(self._rotinas):
-                self._custom.append(nova)
+            dias_final = sorted(dias_sel)
+            als_final  = alertas_list[:]
+
+            if editing:
+                self._data.update_rotina(
+                    rot["id"], nome=nome, dias=dias_final,
+                    alertas=als_final, cor=color_var.get(),
+                    notas=notas_var.get().strip()
+                )
             else:
-                self._rotinas[idx] = nova
+                self._data.add_rotina(nome, dias_final, als_final,
+                                      color_var.get(), notas_var.get().strip())
             dlg.destroy()
-            self._refresh_list()
+            self._refresh_gerenciar()
+            home = self.controller.frames.get("Home")
+            if home and hasattr(home, "refresh_rotinas"):
+                home.refresh_rotinas()
 
-        if rot is not None:
-            styled_button(foot, "Excluir", lambda: (
-                messagebox.askyesno("Excluir", f"Remover '{rot['nome']}'?") and
-                (dlg.destroy() or True) and
-                (self._remove_rotina(idx) if idx is not None else None)
-            ), danger=True, small=True).pack(side="left")
+        if editing:
+            def _excluir():
+                if messagebox.askyesno("Excluir", f"Remover '{rot['nome']}'?",
+                                       parent=dlg):
+                    self._data.delete_rotina(rot["id"])
+                    dlg.destroy()
+                    self._refresh_gerenciar()
+                    home = self.controller.frames.get("Home")
+                    if home and hasattr(home, "refresh_rotinas"):
+                        home.refresh_rotinas()
+            styled_button(foot, "Excluir", _excluir,
+                          danger=True, small=True).pack(side="left")
 
-        styled_button(foot, "Cancelar", dlg.destroy, small=True).pack(side="right", padx=(6, 0))
+        styled_button(foot, "Cancelar", dlg.destroy, small=True).pack(
+            side="right", padx=(6, 0))
         styled_button(foot, "Salvar", salvar, accent=True, small=True).pack(side="right")
+
+    # ── Alertas ──────────────────────────────────────────────────────────────
+    def _start_alert_checker(self):
+        self._alerted_flags: set = set()
+        self._alerted_date:  str = ""
+        self._check_alerts()
+
+    def _check_alerts(self):
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+
+        now       = datetime.now()
+        now_str   = now.strftime("%H:%M")
+        today_str = now.strftime("%Y-%m-%d")
+
+        # Reset flags a cada novo dia
+        if self._alerted_date != today_str:
+            self._alerted_flags = set()
+            self._alerted_date  = today_str
+
+        for rot in self._data.today_rotinas():
+            if self._data.is_done(rot["id"]):
+                continue
+            alertas = rot.get("alertas") or []
+            if not alertas:
+                h = (rot.get("hora_alerta") or "").strip()
+                if h:
+                    alertas = [h]
+            for hora in alertas:
+                if hora.strip() != now_str:
+                    continue
+                flag = (rot["id"], hora)
+                if flag in self._alerted_flags:
+                    continue
+                self._alerted_flags.add(flag)
+                nome = rot["nome"]
+                self.after(0, lambda n=nome, h=hora: self._show_alert(n, h))
+
+        self.after(30_000, self._check_alerts)
+
+    def _show_alert(self, nome, hora):
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except Exception:
+            pass
+        try:
+            if self.controller.winfo_exists():
+                messagebox.showinfo(
+                    "🔔 Lembrete",
+                    f"⏰  {hora}\n\n{nome}",
+                    parent=self.controller,
+                )
+        except Exception:
+            pass
 
 
 
