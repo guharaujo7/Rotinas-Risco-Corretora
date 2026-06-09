@@ -24,22 +24,22 @@ except Exception:
     PLAYWRIGHT_OK = False
 
 C = {
-    "bg":          "#191919",  
-    "surface":     "#212121",   
-    "surface2":    "#2a2a2a",   
-    "surface3":    "#333333",   
-    "ink":         "#e6e6e6",   
-    "ink_muted":   "#999999",   
-    "ink_faint":   "#4d4d4d",  
-    "accent":      "#EC7000",   
-    "accent_dim":  "#3d2a14",   
-    "accent_soft": "#2a1f12",   
-    "ok":          "#4ea87a",   
+    "bg":          "#191919",
+    "surface":     "#212121",
+    "surface2":    "#2a2a2a",
+    "surface3":    "#333333",
+    "ink":         "#e6e6e6",
+    "ink_muted":   "#999999",
+    "ink_faint":   "#4d4d4d",
+    "accent":      "#EC7000",
+    "accent_dim":  "#3d2a14",
+    "accent_soft": "#2a1f12",
+    "ok":          "#4ea87a",
     "ok_dim":      "#1a3a2a",
-    "warn":        "#d49b45",   
-    "err":         "#c95f5f",   
+    "warn":        "#d49b45",
+    "err":         "#c95f5f",
     "err_dim":     "#3d1515",
-    "hair":        "#2a2a2a",   
+    "hair":        "#2a2a2a",
     "log_step":    "#606060",
     "log_ok":      "#4ea87a",
     "log_warn":    "#d49b45",
@@ -47,15 +47,15 @@ C = {
 }
 
 DOT_COLORS = [
-    "#9b9b9b", 
-    "#a07450",  
-    "#c87941",  
-    "#c4a832",  
-    "#5a9e72",  
-    "#EC7000",  
-    "#8b72c9",  
-    "#c97a9e",  
-    "#c96060",  
+    "#9b9b9b",
+    "#a07450",
+    "#c87941",
+    "#c4a832",
+    "#5a9e72",
+    "#EC7000",
+    "#8b72c9",
+    "#c97a9e",
+    "#c96060",
 ]
 DOT_LABELS = ["Cinza","Marrom","Laranja","Amarelo","Verde","Azul","Roxo","Rosa","Vermelho"]
 
@@ -383,7 +383,6 @@ def _icon_png_path():
 
 
 def _png_to_ico_bytes(png_path):
-    """Gera ICO compatível com Windows embutindo o PNG (Vista+)."""
     with open(png_path, "rb") as f:
         png_data = f.read()
     if len(png_data) < 24 or png_data[:8] != b"\x89PNG\r\n\x1a\n":
@@ -399,7 +398,6 @@ def _png_to_ico_bytes(png_path):
 
 
 def _build_ico_from_png(png_path, ico_path):
-    """Gera ICO multi-tamanho (melhor compatibilidade com a taskbar do Windows)."""
     try:
         from PIL import Image
         img = Image.open(png_path).convert("RGBA")
@@ -410,22 +408,16 @@ def _build_ico_from_png(png_path, ico_path):
 
 
 def _ensure_ico_path():
-    """Retorna caminho do itaulogo.ico pronto para a taskbar."""
     cached = os.path.join(app_base_dir(), "itaulogo.ico")
     png_path = _icon_png_path()
-
     if png_path:
-       
         needs_build = not os.path.isfile(cached)
         if needs_build and _build_ico_from_png(png_path, cached):
             return cached
-
     if os.path.isfile(cached):
         return cached
-
     if not png_path:
         return None
-
     ico_bytes = _png_to_ico_bytes(png_path)
     if not ico_bytes:
         return None
@@ -445,7 +437,6 @@ def _ensure_ico_path():
 
 
 def apply_taskbar_presence(root):
-    """Garante que janela sem borda apareça na taskbar com ícone (WS_EX_APPWINDOW)."""
     if sys.platform != "win32":
         return
     try:
@@ -454,17 +445,14 @@ def apply_taskbar_presence(root):
         WS_EX_TOOLWINDOW = 0x00000080
         SW_HIDE = 0
         SW_SHOW = 5
-
         root.update_idletasks()
         hwnd = _window_hwnd(root)
         if not hwnd:
             return
-
         style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         new_style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
         if new_style != style:
             ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
-
         ctypes.windll.user32.ShowWindow(hwnd, SW_HIDE)
         ctypes.windll.user32.ShowWindow(hwnd, SW_SHOW)
         root.lift()
@@ -473,16 +461,13 @@ def apply_taskbar_presence(root):
 
 
 def apply_window_icon(root):
-    """Define itaulogo como ícone da janela e da barra de tarefas (Windows)."""
     ico_path = _ensure_ico_path()
     if not ico_path:
         return
-
     try:
         root.iconbitmap(default=ico_path)
     except Exception:
         pass
-
     if sys.platform == "win32":
         try:
             root.update_idletasks()
@@ -504,20 +489,18 @@ def apply_window_icon(root):
 
 
 def apply_windows_shell(root):
-    """Taskbar + ícone — necessário com overrideredirect(True)."""
     apply_taskbar_presence(root)
     apply_window_icon(root)
 
 
 def apply_modern_window_chrome(root):
-    """Cantos arredondados + barra de título escura no Windows 11."""
     if sys.platform != "win32":
         return
     try:
         hwnd = _window_hwnd(root)
         dwm = ctypes.windll.dwmapi
         dark = ctypes.c_int(1)
-        round_pref = ctypes.c_int(2)  # DWMWCP_ROUND
+        round_pref = ctypes.c_int(2)
         dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark))
         dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(round_pref), ctypes.sizeof(round_pref))
     except Exception:
@@ -530,23 +513,21 @@ def _window_hwnd(root):
 
 
 def apply_frameless_resize(root):
-    """Permite redimensionar janela sem barra nativa do Windows."""
     if sys.platform != "win32":
         return
     try:
         hwnd = _window_hwnd(root)
         gwl_style = -16
         style = ctypes.windll.user32.GetWindowLongW(hwnd, gwl_style)
-        style |= 0x00040000  
-        style |= 0x00020000 
-        style |= 0x00010000  
+        style |= 0x00040000
+        style |= 0x00020000
+        style |= 0x00010000
         ctypes.windll.user32.SetWindowLongW(hwnd, gwl_style, style)
     except Exception:
         pass
 
 
 def start_native_window_drag(root):
-    """Arrasto fluido via API do Windows (sem artefatos de geometry)."""
     if sys.platform != "win32":
         return False
     try:
@@ -561,8 +542,6 @@ def start_native_window_drag(root):
 
 
 class AppTitleBar(tk.Frame):
-    """Barra superior minimalista com controles da janela."""
-
     BG = "#1c1c1c"
     HEIGHT = 36
 
@@ -650,11 +629,11 @@ class AppTitleBar(tk.Frame):
             try:
                 hwnd = _window_hwnd(self.root)
                 if self._maximized:
-                    ctypes.windll.user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)
                     self._maximized = False
                     self._btn_max.configure(text="□")
                 else:
-                    ctypes.windll.user32.ShowWindow(hwnd, 3)   # SW_MAXIMIZE
+                    ctypes.windll.user32.ShowWindow(hwnd, 3)
                     self._maximized = True
                     self._btn_max.configure(text="❐")
                 return
@@ -674,8 +653,6 @@ class AppTitleBar(tk.Frame):
 
 
 class AppStatusBar(tk.Frame):
-    """Rodapé global minimalista — inspirado em apps modernos."""
-
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"], height=30)
         self.pack_propagate(False)
@@ -767,14 +744,12 @@ def card_frame(parent, **kwargs):
 
 
 def eyebrow_label(parent, text, bg=None):
-    """Texto eyebrow estilo Notion: maiúsculas, tracking-wide, cor faint."""
     bg = bg or C["bg"]
     return tk.Label(parent, text=text, bg=bg, fg=C["ink_faint"],
                     font=("Segoe UI", 7, "bold"))
 
 
 def section_divider(parent, text="", bg=None):
-    """Linha divisória com texto opcional à esquerda — estilo Notion."""
     bg = bg or C["bg"]
     row = tk.Frame(parent, bg=bg)
     if text:
@@ -787,8 +762,6 @@ def section_divider(parent, text="", bg=None):
     return row
 
 class MinimalScrollbar(tk.Canvas):
-    """Trilho invisível + thumb fino arredondado (estilo overlay)."""
-
     THUMB_MIN = 28
 
     def __init__(self, parent, command=None, bg=None, width=6, **kwargs):
@@ -1009,9 +982,7 @@ class Sidebar(tk.Frame):
         tk.Label(top, text="Risco Sacado", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 8)).pack(anchor="w", pady=(3, 0))
 
-
         make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(18, 12))
-
 
         nav_outer = tk.Frame(self, bg=C["surface"])
         nav_outer.pack(fill="both", expand=True, anchor="n")
@@ -1100,7 +1071,6 @@ class HomeFrame(tk.Frame):
         inner.configure(bg=C["bg"])
         inner.columnconfigure(0, weight=1)
 
-        # ── Greeting ──────────────────────────────────────────────
         greet = tk.Frame(inner, bg=C["bg"])
         greet.pack(fill="x", padx=44, pady=(40, 0))
 
@@ -1163,7 +1133,6 @@ class HomeFrame(tk.Frame):
             btn.bind("<Leave>", lambda e, b=btn, a=arrow: (
                 b.configure(fg=C["ink_muted"]), a.configure(fg=C["ink_faint"])))
 
-        # ── Rotinas de hoje ───────────────────────────────────────
         make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=44, pady=(28, 22))
         eyebrow_label(inner, "ROTINAS DE HOJE").pack(anchor="w", padx=44, pady=(0, 8))
 
@@ -1193,7 +1162,6 @@ class HomeFrame(tk.Frame):
                      font=("Segoe UI", 9)).pack(anchor="w")
             return
 
-        # Progress capsule
         prog_row = tk.Frame(parent, bg=C["bg"])
         prog_row.pack(fill="x", pady=(0, 10))
         prog_color = C["ok"] if done_n == total else C["accent"]
@@ -1211,7 +1179,7 @@ class HomeFrame(tk.Frame):
         lnk.bind("<Leave>", lambda e: lnk.configure(fg=C["ink_faint"]))
 
         sorted_rots = sorted(rots, key=RotinasData._rot_sort_key)
-        for rot in sorted_rots[:6]:   # máximo 6 itens na home
+        for rot in sorted_rots[:6]:
             self._make_home_rot_row(parent, rot, data)
 
         if len(rots) > 6:
@@ -1264,7 +1232,6 @@ class HomeFrame(tk.Frame):
             new = not data.is_done(rid)
             data.set_done(rid, new)
             _refresh_chk(new)
-            # Atualiza header de progresso
             self.refresh_rotinas()
 
         for w in [row, chk, name_lbl]:
@@ -1343,8 +1310,6 @@ def _rotinas_data_path():
 
 
 class RotinasData:
-    """Persistência de rotinas e conclusões diárias — JSON no mesmo diretório."""
-
     _instance = None
 
     @classmethod
@@ -1355,7 +1320,7 @@ class RotinasData:
 
     def __init__(self):
         self._rotinas    = []
-        self._conclusoes = {}  # {"YYYY-MM-DD": {"id": bool}}
+        self._conclusoes = {}
         self._load()
 
     def _load(self):
@@ -1367,7 +1332,6 @@ class RotinasData:
                 data = _json_mod.load(f)
             self._rotinas    = data.get("rotinas",    [])
             self._conclusoes = data.get("conclusoes", {})
-            # Migração formato antigo → novo
             for r in self._rotinas:
                 if "dias" not in r:
                     freq = r.get("frequencia", "diaria")
@@ -1399,7 +1363,6 @@ class RotinasData:
         except Exception:
             pass
 
-    # ── CRUD rotinas ────────────────────────────────────────────────────────
     def rotinas(self):
         return list(self._rotinas)
 
@@ -1407,8 +1370,8 @@ class RotinasData:
         r = {
             "id":      str(_uuid_mod.uuid4())[:8],
             "nome":    nome,
-            "dias":    dias,    # lista de ints 0-6
-            "alertas": alertas, # lista de "HH:MM"
+            "dias":    dias,
+            "alertas": alertas,
             "cor":     cor,
             "notas":   notas,
             "ativa":   True,
@@ -1429,7 +1392,6 @@ class RotinasData:
         self._rotinas = [r for r in self._rotinas if r["id"] != rid]
         self.save()
 
-    # ── Conclusões ──────────────────────────────────────────────────────────
     @staticmethod
     def _today_key():
         return date.today().isoformat()
@@ -1443,7 +1405,6 @@ class RotinasData:
         if key not in self._conclusoes:
             self._conclusoes[key] = {}
         self._conclusoes[key][rid] = done
-        # Manter apenas últimos 90 dias
         today = date.today()
         old_keys = [k for k in list(self._conclusoes)
                     if (today - date.fromisoformat(k)).days > 90]
@@ -1452,9 +1413,8 @@ class RotinasData:
         self.save()
 
     def today_rotinas(self):
-        """Rotinas que devem aparecer hoje conforme dias selecionados."""
         today = date.today()
-        wd    = today.weekday()  # 0=seg … 6=dom
+        wd    = today.weekday()
         result = []
         for r in self._rotinas:
             if not r.get("ativa", True):
@@ -1464,7 +1424,6 @@ class RotinasData:
                 if wd in dias:
                     result.append(r)
             else:
-                # fallback formato antigo
                 freq = r.get("frequencia", "diaria")
                 if freq == "diaria":
                     result.append(r)
@@ -1486,7 +1445,6 @@ class RotinasData:
         return (rot.get("hora_alerta") or "99:99")
 
     def today_stats(self):
-        """(concluidas, total) para hoje."""
         rots  = self.today_rotinas()
         total = len(rots)
         done  = sum(1 for r in rots if self.is_done(r["id"]))
@@ -1518,7 +1476,6 @@ class RotinasFrame(tk.Frame):
         self._build()
         self.after(500, self._start_alert_checker)
 
-    # ── Estrutura principal ──────────────────────────────────────────────────
     def _build(self):
         hdr_wrap = tk.Frame(self, bg=C["bg"])
         hdr_wrap.pack(fill="x", padx=44, pady=(36, 0))
@@ -1528,7 +1485,6 @@ class RotinasFrame(tk.Frame):
 
         make_hairline(self, bg=C["hair"]).pack(fill="x", pady=(20, 0))
 
-        # Tab bar
         tab_row = tk.Frame(self, bg=C["bg"])
         tab_row.pack(fill="x", padx=44)
         self._tab_btns = {}
@@ -1565,7 +1521,6 @@ class RotinasFrame(tk.Frame):
     def on_show(self):
         self._switch_tab(self._tab)
 
-    # ── HOJE ─────────────────────────────────────────────────────────────────
     def _build_hoje(self, parent):
         sf    = ScrollableFrame(parent, bg=C["bg"])
         sf.pack(fill="both", expand=True)
@@ -1576,7 +1531,6 @@ class RotinasFrame(tk.Frame):
         today_rots = self._data.today_rotinas()
         done_n, total = self._data.today_stats()
 
-        # Cabeçalho data + progresso
         hdr = tk.Frame(inner, bg=C["bg"])
         hdr.pack(fill="x", padx=44, pady=(28, 0))
         tk.Label(hdr, text=format_data_pt_br(now), bg=C["bg"],
@@ -1636,26 +1590,21 @@ class RotinasFrame(tk.Frame):
         inner_row = tk.Frame(row, bg=C["bg"], pady=9)
         inner_row.pack(fill="x")
 
-        # Checkbox canvas
         chk = tk.Canvas(inner_row, width=20, height=20,
                         bg=C["bg"], highlightthickness=0, bd=0, cursor="hand2")
         chk.pack(side="left", padx=(0, 12))
 
-        # Hora
         if hora:
             tk.Label(inner_row, text=hora, bg=C["bg"], fg=C["ink_faint"],
                      font=("Segoe UI", 8), width=5, anchor="w").pack(side="left")
 
-        # Dot
         dot = _make_dot(inner_row, color, 8, bg=C["bg"])
         dot.pack(side="left", padx=(0, 8))
 
-        # Nome
         name_lbl = tk.Label(inner_row, text=nome, bg=C["bg"],
                             fg=C["ink"], font=("Segoe UI", 10), anchor="w")
         name_lbl.pack(side="left", fill="x", expand=True)
 
-        # Notas
         note_lbl = None
         if notas:
             note_lbl = tk.Label(parent, text=f"      {notas}", bg=C["bg"],
@@ -1680,7 +1629,6 @@ class RotinasFrame(tk.Frame):
             new = not self._data.is_done(rid)
             self._data.set_done(rid, new)
             _refresh_visual(new)
-            # Atualiza barra de progresso no Home
             home = self.controller.frames.get("Home")
             if home and hasattr(home, "refresh_rotinas"):
                 home.refresh_rotinas()
@@ -1700,7 +1648,6 @@ class RotinasFrame(tk.Frame):
             canvas.create_oval(1, 1, 19, 19, fill="", outline=C["ink_faint"],
                                width=1.5)
 
-    # ── GERENCIAR ────────────────────────────────────────────────────────────
     def _build_gerenciar(self, parent):
         act = tk.Frame(parent, bg=C["bg"])
         act.pack(fill="x", padx=44, pady=(18, 2))
@@ -1795,12 +1742,12 @@ class RotinasFrame(tk.Frame):
 
         make_hairline(parent, bg=C["hair"]).pack(fill="x", padx=44)
 
-        # Hover effect
         def _bg_all(bg):
             for w in [row_o, row_i, dot_col, center, right]:
                 try: w.configure(bg=bg)
                 except Exception: pass
-            for w in center.winfo_children() + right.winfo_children() +                      dot_col.winfo_children():
+            for w in center.winfo_children() + right.winfo_children() + \
+                     dot_col.winfo_children():
                 try: w.configure(bg=bg)
                 except Exception: pass
         row_o.bind("<Enter>", lambda _: _bg_all(C["surface"]))
@@ -1816,7 +1763,6 @@ class RotinasFrame(tk.Frame):
             if home and hasattr(home, "refresh_rotinas"):
                 home.refresh_rotinas()
 
-    # ── Diálogo nova / editar ────────────────────────────────────────────────
     def _open_nova_dialog(self):
         self._open_rotina_dialog(None)
 
@@ -1854,17 +1800,14 @@ class RotinasFrame(tk.Frame):
         pad  = tk.Frame(form, bg=C["surface"])
         pad.pack(fill="both", expand=True, padx=24)
 
-        # ── Nome ────────────────────────────────────────────────────
         tk.Label(pad, text="NOME", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
         nome_var = tk.StringVar(value=(rot or {}).get("nome", ""))
         styled_entry(pad, textvariable=nome_var).pack(fill="x", pady=(4, 0))
 
-        # ── Dias da semana ──────────────────────────────────────────
         tk.Label(pad, text="DIAS DA SEMANA", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
 
-        # Resolve dias iniciais (migra formato antigo)
         rot_dias = (rot or {}).get("dias")
         if rot_dias is None:
             freq0 = (rot or {}).get("frequencia", "diaria")
@@ -1914,7 +1857,6 @@ class RotinasFrame(tk.Frame):
             btn.pack(side="left", padx=(0, 3))
             dias_btns[d] = btn
 
-        # Presets
         preset_row = tk.Frame(pad, bg=C["surface"])
         preset_row.pack(anchor="w", pady=(5, 0))
 
@@ -1930,11 +1872,9 @@ class RotinasFrame(tk.Frame):
                       font=("Segoe UI", 7), relief="flat", bd=0,
                       padx=6, pady=3, cursor="hand2").pack(side="left", padx=(0, 5))
 
-        # ── Alertas ─────────────────────────────────────────────────
         tk.Label(pad, text="ALERTAS", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(16, 0))
 
-        # Resolve alertas iniciais
         rot_als = list((rot or {}).get("alertas") or [])
         if not rot_als:
             h0 = (rot or {}).get("hora_alerta") or ""
@@ -1974,7 +1914,6 @@ class RotinasFrame(tk.Frame):
 
         _render_alertas()
 
-        # Linha: adicionar hora específica
         make_hairline(pad, bg=C["surface3"]).pack(fill="x", pady=(10, 0))
         add_lbl = tk.Frame(pad, bg=C["surface"])
         add_lbl.pack(fill="x", pady=(8, 0))
@@ -2004,7 +1943,6 @@ class RotinasFrame(tk.Frame):
                   font=("Segoe UI", 8), relief="flat", bd=0,
                   padx=8, pady=3, cursor="hand2").pack(side="left")
 
-        # Linha: X min antes
         antes_row = tk.Frame(pad, bg=C["surface"])
         antes_row.pack(fill="x", pady=(8, 0))
         antes_var = tk.StringVar(value="15")
@@ -2043,7 +1981,6 @@ class RotinasFrame(tk.Frame):
 
         make_hairline(pad, bg=C["surface3"]).pack(fill="x", pady=(10, 0))
 
-        # ── Cor ─────────────────────────────────────────────────────
         tk.Label(pad, text="COR", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(14, 0))
         color_row  = tk.Frame(pad, bg=C["surface"])
@@ -2068,13 +2005,11 @@ class RotinasFrame(tk.Frame):
             cv.bind("<Button-1>", lambda _, d=dc: _pick(d))
             color_btns[dc] = cv
 
-        # ── Notas ────────────────────────────────────────────────────
         tk.Label(pad, text="NOTAS  (opcional)", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(14, 0))
         notas_var = tk.StringVar(value=(rot or {}).get("notas", "") or "")
         styled_entry(pad, textvariable=notas_var).pack(fill="x", pady=(4, 12))
 
-        # ── Footer ───────────────────────────────────────────────────
         make_hairline(dlg, bg=C["hair"]).pack(fill="x")
         foot = tk.Frame(dlg, bg=C["surface"], padx=24, pady=12)
         foot.pack(fill="x")
@@ -2137,7 +2072,6 @@ class RotinasFrame(tk.Frame):
         now_str   = now.strftime("%H:%M")
         today_str = now.strftime("%Y-%m-%d")
 
-        # Reset flags a cada novo dia
         if self._alerted_date != today_str:
             self._alerted_flags = set()
             self._alerted_date  = today_str
@@ -2162,22 +2096,87 @@ class RotinasFrame(tk.Frame):
 
         self.after(30_000, self._check_alerts)
 
+    # ── PATCH 1: popup de alerta visual customizado ──────────────────────────
     def _show_alert(self, nome, hora):
         try:
             import winsound
             winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
         except Exception:
             pass
-        try:
-            if self.controller.winfo_exists():
-                messagebox.showinfo(
-                    "🔔 Lembrete",
-                    f"⏰  {hora}\n\n{nome}",
-                    parent=self.controller,
-                )
-        except Exception:
-            pass
 
+        try:
+            if not self.controller.winfo_exists():
+                return
+        except Exception:
+            return
+
+        dlg = tk.Toplevel(self.controller)
+        dlg.title("Lembrete")
+        dlg.configure(bg=C["surface"])
+        dlg.resizable(False, False)
+        dlg.overrideredirect(True)
+        dlg.attributes("-topmost", True)
+        dlg.lift()
+        dlg.focus_force()
+
+        # Força ao topo no Windows — aparece sobre qualquer app aberto
+        if sys.platform == "win32":
+            try:
+                import ctypes as _ctypes
+                _hwnd = _ctypes.windll.user32.GetParent(dlg.winfo_id())
+                if not _hwnd:
+                    _hwnd = dlg.winfo_id()
+                _ctypes.windll.user32.SetForegroundWindow(_hwnd)
+                _ctypes.windll.user32.BringWindowToTop(_hwnd)
+                _ctypes.windll.user32.FlashWindow(_hwnd, True)
+            except Exception:
+                pass
+
+        # Borda laranja no topo (identidade visual do app)
+        tk.Frame(dlg, bg=C["accent"], height=3).pack(fill="x")
+
+        body = tk.Frame(dlg, bg=C["surface"], padx=28, pady=20)
+        body.pack(fill="both", expand=True)
+
+        # Cabeçalho: sino + hora
+        hdr_row = tk.Frame(body, bg=C["surface"])
+        hdr_row.pack(fill="x")
+        tk.Label(hdr_row, text="\U0001f514", bg=C["surface"], fg=C["accent"],
+                 font=("Segoe UI", 18)).pack(side="left")
+        tk.Label(hdr_row, text=hora, bg=C["surface"], fg=C["accent"],
+                 font=("Segoe UI", 22, "bold")).pack(side="left", padx=(10, 0))
+
+        make_hairline(body, bg=C["hair"]).pack(fill="x", pady=(14, 12))
+
+        # Nome da rotina
+        tk.Label(body, text=nome, bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold"),
+                 wraplength=300, justify="left").pack(anchor="w")
+        tk.Label(body, text="Rotina programada para agora", bg=C["surface"],
+                 fg=C["ink_muted"], font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
+
+        make_hairline(body, bg=C["hair"]).pack(fill="x", pady=(16, 0))
+
+        foot = tk.Frame(body, bg=C["surface"])
+        foot.pack(fill="x", pady=(12, 0))
+
+        def _dismiss():
+            dlg.destroy()
+
+        styled_button(foot, "Dispensar", _dismiss, small=True).pack(side="right")
+        styled_button(foot, "Ok, entendido", _dismiss, accent=True, small=True).pack(
+            side="right", padx=(0, 6))
+
+        # Centraliza na tela
+        dlg.update_idletasks()
+        sw = dlg.winfo_screenwidth()
+        sh = dlg.winfo_screenheight()
+        w  = dlg.winfo_reqwidth()
+        h  = dlg.winfo_reqheight()
+        dlg.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+        dlg.bind("<Escape>", lambda _e: _dismiss())
+        dlg.grab_set()
 
 
 class BPMConfigFrame(tk.Frame):
@@ -2186,7 +2185,7 @@ class BPMConfigFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
         self.controller = controller
-        self._selected  = {}  # nome → StringVar(valor)
+        self._selected  = {}
         self._func_var  = tk.StringVar()
         self._senha_var = tk.StringVar()
         self._build()
@@ -2195,14 +2194,12 @@ class BPMConfigFrame(tk.Frame):
         return "".join(c for c in (s or "") if c.isdigit())
 
     def on_show(self):
-        # Preenche credenciais já salvas
         self._func_var.set(getattr(self.controller, "bpm_funcional", "") or "")
         self._senha_var.set(getattr(self.controller, "bpm_password", "") or "")
         if hasattr(self, "_sf"):
             self._sf.refresh_bindings()
 
     def _build(self):
-        # header
         hdr = tk.Frame(self, bg=C["bg"])
         hdr.pack(fill="x", padx=32, pady=(24,0))
         tk.Label(hdr, text="Configurar BPM", bg=C["bg"], fg=C["ink"],
@@ -2215,7 +2212,6 @@ class BPMConfigFrame(tk.Frame):
         body = self._sf.inner
         body.configure(bg=C["bg"])
 
-        # ── Credenciais ─────────────────────────────────────────
         sec = card_frame(body)
         sec.pack(fill="x", padx=32, pady=(20,0))
         tk.Label(sec, text="Credenciais do Painel de Serviços", bg=C["surface"],
@@ -2229,7 +2225,6 @@ class BPMConfigFrame(tk.Frame):
         cred_form.columnconfigure(0, weight=1)
         cred_form.columnconfigure(1, weight=1)
 
-        # Funcional
         fc = tk.Frame(cred_form, bg=C["surface"])
         fc.grid(row=0, column=0, sticky="ew", padx=(0,8))
         tk.Label(fc, text="Funcional (somente números)", bg=C["surface"],
@@ -2237,7 +2232,6 @@ class BPMConfigFrame(tk.Frame):
         self._ent_func = styled_entry(fc, textvariable=self._func_var)
         self._ent_func.pack(fill="x", pady=(4,0))
 
-        # Senha
         sc2 = tk.Frame(cred_form, bg=C["surface"])
         sc2.grid(row=0, column=1, sticky="ew", padx=(8,0))
         tk.Label(sc2, text="Senha (até 6 dígitos)", bg=C["surface"],
@@ -2262,7 +2256,6 @@ class BPMConfigFrame(tk.Frame):
         self._ent_func.bind("<KeyPress>", _key_func)
         self._ent_senha.bind("<KeyPress>", _key_senha)
 
-        # ── Seleção de clientes ──────────────────────────────────
         sec2 = card_frame(body)
         sec2.pack(fill="x", padx=32, pady=(16,0))
         tk.Label(sec2, text="Clientes e Valores", bg=C["surface"],
@@ -2280,7 +2273,6 @@ class BPMConfigFrame(tk.Frame):
 
         make_hairline(body, bg=C["hair"]).pack(fill="x", padx=32, pady=(20,0))
 
-        # ── Footer ──────────────────────────────────────────────
         foot = tk.Frame(body, bg=C["bg"])
         foot.pack(fill="x", padx=32, pady=16)
         styled_button(foot, "← Voltar",
@@ -2296,7 +2288,7 @@ class BPMConfigFrame(tk.Frame):
 
         selected = tk.BooleanVar(value=False)
         val_var  = tk.StringVar(value="R$ 0,00")
-        val_digits = [""]   # mutável via lista
+        val_digits = [""]
 
         cb = tk.Checkbutton(row, variable=selected, bg=C["surface"],
                             selectcolor=C["bg"], activebackground=C["surface"],
@@ -2384,7 +2376,6 @@ class ShareFrame(tk.Frame):
         self._build()
 
     def _build(self):
-        # header
         hdr = tk.Frame(self, bg=C["bg"])
         hdr.pack(fill="x", padx=32, pady=(24,0))
         tk.Label(hdr, text="Cadastro Share", bg=C["bg"], fg=C["ink"],
@@ -2400,7 +2391,6 @@ class ShareFrame(tk.Frame):
         body = self._sf.inner
         body.configure(bg=C["bg"])
 
-        # grid campos
         fields_card = card_frame(body)
         fields_card.pack(fill="x", padx=32, pady=(20,0))
         tk.Label(fields_card, text="Campos extraídos", bg=C["surface"], fg=C["ink"],
@@ -2449,13 +2439,11 @@ class ShareFrame(tk.Frame):
         for k,l,r,c,combo,w,ro in specs:
             field(k,l,r,c,combo,w,ro)
 
-        # ações
         act = tk.Frame(body, bg=C["bg"])
         act.pack(fill="x", padx=32, pady=(14,0))
         styled_button(act,"🔄  Gerar Resumo",  self._update_resumo, accent=True).pack(side="left")
         styled_button(act,"🧽  Limpar",          self._clear_all).pack(side="left", padx=(6,0))
 
-        # resumo
         res_card = card_frame(body)
         res_card.pack(fill="x", padx=32, pady=(14,0))
         tk.Label(res_card, text="Resumo", bg=C["surface"], fg=C["ink"],
@@ -2736,7 +2724,6 @@ class LimitesInvertidoFrame(tk.Frame):
     def _set_state(self, idx, state, info=""):
         if idx >= len(self._cards): return
         c = self._cards[idx]
-        # cancel spinner
         if c["spin_id"][0]:
             try: c["outer"].after_cancel(c["spin_id"][0])
             except: pass
@@ -2767,7 +2754,7 @@ class LimitesInvertidoFrame(tk.Frame):
             except: pass
 
         if state == "processing":
-            c["spin_id"][0] = True  # flag
+            c["spin_id"][0] = True
             c["tick"]()
 
     def _start_worker(self):
@@ -2809,24 +2796,69 @@ class LimitesInvertidoFrame(tk.Frame):
                     if not url:
                         self._ui(lambda i=idx: self._set_state(i,"error","URL não mapeada")); continue
                     try:
+                        # ── PATCH 2: espera inteligente de carregamento ──────────
                         page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                        time.sleep(7)
                         if self._cancel_requested: break
 
-                        # ler LTC
-                        ltc_str = None
+                        # Espera networkidle (max 30s) — sem sleep fixo
                         try:
-                            all_spans = page.locator("span.u-font-size--14.u-ml--8.u-mt--8.u-block")
-                            for si in range(all_spans.count()):
-                                txt = (all_spans.nth(si).inner_text() or "").strip()
-                                if RE_DATE.match(txt): ltc_str = txt; break
-                        except: pass
-                        if not ltc_str:
+                            page.wait_for_load_state("networkidle", timeout=30_000)
+                        except Exception:
+                            pass
+
+                        # Polling JS: aguarda spinners/loaders sumirem (max 25s)
+                        _deadline = time.time() + 25
+                        while time.time() < _deadline:
+                            if self._cancel_requested:
+                                break
                             try:
-                                body_text = page.locator("body").inner_text()
-                                m = RE_DATE.search(body_text)
-                                if m: ltc_str = m.group(0)
-                            except: pass
+                                _loading = page.evaluate(
+                                    "(function(){"
+                                    "var sels=['.loading','.spinner','[class*=\"loading\"]',"
+                                    "'[class*=\"spinner\"]','.u-loading',"
+                                    "'[aria-busy=\"true\"]','.itau-spinner'];"
+                                    "for(var i=0;i<sels.length;i++){"
+                                    "var els=document.querySelectorAll(sels[i]);"
+                                    "for(var j=0;j<els.length;j++){"
+                                    "var s=window.getComputedStyle(els[j]);"
+                                    "if(s.display!=='none'&&s.visibility!=='hidden'"
+                                    "&&s.opacity!=='0') return true;}}"
+                                    "return false;})()"
+                                )
+                                if not _loading:
+                                    break
+                            except Exception:
+                                break
+                            time.sleep(0.5)
+
+                        # Pausa mínima de segurança para renderização final
+                        time.sleep(2)
+                        if self._cancel_requested: break
+
+                        # ler LTC — 3 tentativas com pausa entre elas
+                        ltc_str = None
+                        for _ltc_try in range(3):
+                            try:
+                                all_spans = page.locator("span.u-font-size--14.u-ml--8.u-mt--8.u-block")
+                                for si in range(all_spans.count()):
+                                    txt = (all_spans.nth(si).inner_text() or "").strip()
+                                    if RE_DATE.match(txt):
+                                        ltc_str = txt
+                                        break
+                            except Exception:
+                                pass
+                            if not ltc_str:
+                                try:
+                                    body_text = page.locator("body").inner_text()
+                                    m = RE_DATE.search(body_text)
+                                    if m:
+                                        ltc_str = m.group(0)
+                                except Exception:
+                                    pass
+                            if ltc_str:
+                                break
+                            time.sleep(2)
+                        # ────────────────────────────────────────────────────────
 
                         try:
                             ltc_date = datetime.strptime(ltc_str,"%d/%m/%Y").date() if ltc_str else None
@@ -2936,7 +2968,6 @@ class BPMFrame(tk.Frame):
         self._cancel_btn.pack(side="right")
         make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14,0))
 
-        # grid de cards
         self._sf = ScrollableFrame(self, bg=C["bg"])
         self._sf.pack(fill="both", expand=True)
         self._sf.link_wheel(self)
@@ -2948,7 +2979,6 @@ class BPMFrame(tk.Frame):
         for c in range(3):
             self._grid.columnconfigure(c, weight=1, uniform="bcards")
 
-        # log
         make_hairline(self._grid_wrap, bg=C["hair"]).pack(fill="x", padx=32, pady=(8,0))
         log_hdr = tk.Frame(self._grid_wrap, bg=C["bg"])
         log_hdr.pack(fill="x", padx=32, pady=(10,4))
@@ -3394,7 +3424,6 @@ class App(tk.Tk):
         self._main = tk.Frame(self._shell, bg=C["bg"])
         self._main.pack(fill="both", expand=True)
 
-        # Layout: sidebar | conteúdo
         self._sidebar = Sidebar(self._main, self)
         self._sidebar.pack(side="left", fill="y")
 
@@ -3440,6 +3469,7 @@ class App(tk.Tk):
                     lightcolor=C["hair"], darkcolor=C["hair"])
         s.map("TCombobox", fieldbackground=[("readonly",C["bg"])],
               selectbackground=[("!focus",C["surface2"])])
+
     def _refresh_frame_scroll(self, frame):
         if isinstance(frame, ScrollableFrame):
             frame.refresh_bindings()
@@ -3447,7 +3477,6 @@ class App(tk.Tk):
             self._refresh_frame_scroll(child)
 
     def show_frame(self, name):
-        # remap: "BPM" sem seleção → config
         if name == "BPM" and not getattr(self,"bpm_run_selection",[]):
             name = "BPM_CONFIG"
         f = self.frames.get(name)
