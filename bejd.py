@@ -1,4 +1,4 @@
-import os, sys, re, random, struct, tkinter as tk, threading, time, tempfile, shutil, webbrowser, ctypes, json as _json_mod, uuid as _uuid_mod
+import os, sys, re, random, struct, tkinter as tk, threading, time, tempfile, shutil, webbrowser, ctypes, json as _json_mod, uuid as _uuid_mod, queue
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from tkinter import ttk, filedialog, messagebox, font as tkfont
 from datetime import datetime, date
@@ -22,6 +22,13 @@ try:
 except Exception:
     sync_playwright = None
     PLAYWRIGHT_OK = False
+
+try:
+    import openpyxl
+    OPENPYXL_OK = True
+except Exception:
+    openpyxl = None
+    OPENPYXL_OK = False
 
 C = {
     "bg":          "#191919",
@@ -113,6 +120,171 @@ def _fmt_brl_plain_web(raw: str) -> str:
     sign = "-" if d < 0 else ""
     return f"{sign}{'{:,}'.format(int(i)).replace(',','.')},{f}"
 
+
+def _fmt_date_short(val) -> str:
+    if isinstance(val, datetime):
+        return val.strftime("%d/%m/%Y")
+    if isinstance(val, date):
+        return val.strftime("%d/%m/%Y")
+    s = str(val or "").strip()
+    return s
+
+
+def _valor_to_decimal(val):
+    if val is None:
+        return Decimal("0")
+    if isinstance(val, Decimal):
+        return val.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if isinstance(val, (int, float)):
+        return Decimal(str(val)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    parsed = _parse_brl(str(val))
+    return parsed if parsed is not None else Decimal("0")
+
+
+def _fmt_valor_cell(val) -> str:
+    if val is None:
+        return "—"
+    if isinstance(val, (int, float, Decimal)):
+        try:
+            return _fmt_brl(Decimal(str(val)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        except Exception:
+            pass
+    return _fmt_brl_from_raw(str(val))
+
+
+def _normalize_sacado_key(name: str) -> str:
+    return RE_SPACES.sub(" ", (name or "").strip()).upper()
+
+
+def _find_invertido_header(ws) -> tuple:
+    """Localiza a linha de cabeçalho pelo texto 'Nome Sacado' (formato flexível)."""
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
+        if i > 30:
+            break
+        cells = [str(c or "").strip().lower() for c in (row or [])]
+        joined = " ".join(cells)
+        if "nome sacado" in joined or "nome_sacado" in joined:
+            col_map = {}
+            for j, cell in enumerate(cells):
+                if "doc sacado" in cell or cell == "doc sacado":
+                    col_map["doc_sacado"] = j
+                elif "nome sacado" in cell or cell == "nome sacado":
+                    col_map["nome"] = j
+                elif cell in ("número", "numero", "nº", "nf"):
+                    col_map["nf"] = j
+                elif cell == "valor":
+                    col_map["valor"] = j
+                elif "inclus" in cell:
+                    col_map["inclusao"] = j
+                elif "vencimento" in cell:
+                    col_map["vencimento"] = j
+                elif cell == "prazo":
+                    col_map["prazo"] = j
+            if "nome" not in col_map:
+                col_map["nome"] = 1
+            col_map.setdefault("doc_sacado", 0)
+            col_map.setdefault("nf", 4)
+            col_map.setdefault("valor", 5)
+            col_map.setdefault("inclusao", 6)
+            col_map.setdefault("vencimento", 7)
+            col_map.setdefault("prazo", 8)
+            return i, col_map
+    return 2, {"doc_sacado": 0, "nome": 1, "nf": 4, "valor": 5, "inclusao": 6, "vencimento": 7, "prazo": 8}
+
+
+def _parse_invertido_xlsx(path: str) -> list:
+    if not OPENPYXL_OK:
+        raise RuntimeError("Biblioteca openpyxl não disponível. Instale com: pip install openpyxl")
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb.active
+        header_row, cols = _find_invertido_header(ws)
+        rows = []
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            if i <= header_row:
+                continue
+            if not row:
+                continue
+            nome_idx = cols["nome"]
+            if nome_idx >= len(row) or row[nome_idx] is None:
+                continue
+            nome = str(row[nome_idx] or "").strip()
+            if not nome:
+                continue
+
+            def _cell(key):
+                idx = cols.get(key)
+                if idx is None or idx >= len(row):
+                    return None
+                return row[idx]
+
+            rows.append({
+                "doc_sacado":  only_digits(str(_cell("doc_sacado") or "")),
+                "nome_sacado": nome,
+                "nf":          str(_cell("nf") or "").strip(),
+                "valor_raw":   _valor_to_decimal(_cell("valor")),
+                "valor":       _fmt_valor_cell(_cell("valor")),
+                "data_inclusao": _fmt_date_short(_cell("inclusao")),
+                "data_vencimento": _fmt_date_short(_cell("vencimento")),
+                "prazo":       str(_cell("prazo") if _cell("prazo") is not None else "").strip(),
+            })
+        return rows
+    finally:
+        wb.close()
+
+
+def _group_invertido_ops(ops: list) -> list:
+    groups = {}
+    for op in ops:
+        key = _normalize_sacado_key(op["nome_sacado"])
+        if key not in groups:
+            groups[key] = {
+                "nome_sacado": op["nome_sacado"].strip(),
+                "doc_sacado":  only_digits(op.get("doc_sacado") or ""),
+                "notas": [],
+                "total": Decimal("0"),
+            }
+        if not groups[key]["doc_sacado"] and op.get("doc_sacado"):
+            groups[key]["doc_sacado"] = only_digits(op["doc_sacado"])
+        groups[key]["notas"].append(op)
+        groups[key]["total"] += op.get("valor_raw", Decimal("0"))
+    result = []
+    for g in groups.values():
+        g["count"] = len(g["notas"])
+        g["valor_total"] = _fmt_brl(g["total"])
+        g["notas"].sort(key=lambda n: (n.get("data_vencimento") or "", n.get("nf") or ""))
+        result.append(g)
+    result.sort(key=lambda g: g["nome_sacado"].upper())
+    return result
+
+
+LIMITE_SOBRA_MIN = 100_000
+
+
+def _evaluate_limite_operacao(montante: Decimal, limite_data: dict | None):
+    if not limite_data:
+        return "nao_validado", "Limites não validados"
+    state = limite_data.get("state")
+    if state == "processing":
+        return "validando", "Validando…"
+    if state in ("error", "ltc_expired"):
+        return "insuficiente", "Limite insuficiente"
+    limite = limite_data.get("limite_disp")
+    if limite is None or state not in ("ok", "warn"):
+        return "nao_validado", "Limites não validados"
+    mont = int(montante.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    if mont > limite:
+        return "insuficiente", "Limite insuficiente"
+    if (limite - mont) < LIMITE_SOBRA_MIN:
+        return "quase", "Limite quase lá"
+    return "ok", "Limite OK"
+
+
+def _fmt_limite_int(val) -> str:
+    if val is None:
+        return "N/D"
+    return f"R$ {int(val):,}".replace(",", ".")
+
 BPM_CLIENT_DATA = {
     "Transdourada":             {"CNPJ":"01259730000174","PLATAFORMA":"2939","AG":"1643","CONTA":"99451-8"},
     "RPB":                      {"CNPJ":"07075892000139","PLATAFORMA":"8973","AG":"6627","CONTA":"06471-7"},
@@ -194,6 +366,10 @@ def resource_path(p):
 
 def only_digits(s):
     return re.sub(r"\D","",s or "")
+
+LIMITE_INVERTIDO_CNPJS = frozenset(
+    only_digits(v["CNPJ"]) for v in BPM_CLIENT_DATA.values() if v.get("CNPJ")
+)
 
 def normalize_text_variants(t):
     return RE_SPACES.sub(" ",t).strip(), re.sub(r"\s+","",t or "")
@@ -334,6 +510,38 @@ def extract_modalidade(t, tn, tc):
 
 class BPMUserCancelled(Exception): pass
 
+
+class ThreadSafeUIMixin:
+    """Permite chamar `self._ui(fn)` de threads de worker sem tocar o Tcl
+    diretamente fora da thread principal — evita o crash de GIL/Fatal
+    Python error ao mover a janela enquanto uma rotina está em execução."""
+
+    def _init_ui_queue(self):
+        self._ui_q = queue.Queue()
+        self._poll_ui_queue()
+
+    def _ui(self, fn):
+        try:
+            self._ui_q.put_nowait(fn)
+        except Exception:
+            pass
+
+    def _poll_ui_queue(self):
+        try:
+            while True:
+                fn = self._ui_q.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        try:
+            if self.winfo_exists():
+                self.after(50, self._poll_ui_queue)
+        except Exception:
+            pass
+
 def make_hairline(parent, orient="h", **kwargs):
     kw = {"bg": C["hair"]}
     kw.update(kwargs)
@@ -366,12 +574,14 @@ def _canvas_round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
 
 
 FRAME_LABELS = {
-    "Home":             "Início",
-    "Rotinas":          "Rotinas",
-    "Share":            "Cadastro Share",
-    "BPM_CONFIG":       "Configurar BPM",
-    "BPM":              "BPM — Operações",
-    "LimitesInvertido": "Limites Invertido",
+    "Home":              "Início",
+    "Rotinas":           "Rotinas",
+    "Share":             "Cadastro Share",
+    "BPM_CONFIG":        "Configurar BPM",
+    "BPM":               "BPM — Operações",
+    "OperacoesInvertido":"Operações Invertido",
+    "LimitesInvertido":  "Limites Invertido",
+    "AnalisarOperacoes": "Analisar Operações",
 }
 
 
@@ -528,14 +738,30 @@ def apply_frameless_resize(root):
 
 
 def start_native_window_drag(root):
+    """Inicia o arrasto nativo da janela (estilo WM_NCLBUTTONDOWN/HTCAPTION).
+
+    Usa PostMessageW (assíncrono) em vez de SendMessageW: o SendMessageW
+    entra no loop modal de mover janela do Windows de forma síncrona,
+    dentro da chamada ctypes — que libera o GIL antes de chamar a API do
+    Windows. Qualquer callback do Tcl/Tk disparado durante esse loop modal
+    tenta reaquisitar o GIL num estado inconsistente, causando
+    'Fatal Python error: PyEval_RestoreThread' e o crash da aplicação.
+    PostMessageW apenas enfileira a mensagem e retorna imediatamente; o
+    loop de mover é processado depois, dentro do laço normal de eventos
+    do Tcl, onde o GIL é gerenciado corretamente.
+    """
     if sys.platform != "win32":
         return False
     try:
         hwnd = _window_hwnd(root)
+        if not hwnd:
+            return False
         WM_NCLBUTTONDOWN = 0x00A1
         HTCAPTION = 2
-        ctypes.windll.user32.ReleaseCapture()
-        ctypes.windll.user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+        user32 = ctypes.windll.user32
+        user32.ReleaseCapture()
+        user32.PostMessageW(ctypes.c_void_p(hwnd), WM_NCLBUTTONDOWN,
+                            ctypes.c_void_p(HTCAPTION), ctypes.c_void_p(0))
         return True
     except Exception:
         return False
@@ -725,6 +951,48 @@ def styled_button(parent, text, command, accent=False, danger=False, small=False
     return btn
 
 
+def styled_button_limite(parent, text, command, variant="warn", small=False, **kwargs):
+    styles = {
+        "ok":  (C["ok_dim"],  C["ok"],  C["ok"],  C["bg"]),
+        "warn":("#3d3520",    C["warn"], C["warn"], C["bg"]),
+        "err": (C["err_dim"],  C["err"], C["err"], C["bg"]),
+        "idle":(C["surface2"], C["ink_muted"], C["surface3"], C["ink"]),
+    }
+    bg, fg, abg, afg = styles.get(variant, styles["warn"])
+    pad = (7, 3) if small else (13, 6)
+    btn = tk.Button(parent, text=text, command=command,
+                    bg=bg, fg=fg, activebackground=abg, activeforeground=afg,
+                    font=("Segoe UI", 8 if small else 9),
+                    relief="flat", bd=0, padx=pad[0], pady=pad[1],
+                    cursor="hand2", **kwargs)
+    btn._limite_variant = variant
+    btn._limite_bg = bg
+    btn._limite_fg = fg
+    btn._limite_abg = abg
+    btn._limite_afg = afg
+    btn.bind("<Enter>", lambda _: btn.configure(bg=abg, fg=afg))
+    btn.bind("<Leave>", lambda _: btn.configure(bg=bg, fg=fg))
+    return btn
+
+
+def _set_limite_button(btn, text, variant):
+    styles = {
+        "ok":  (C["ok_dim"],  C["ok"],  C["ok"],  C["bg"]),
+        "warn":("#3d3520",    C["warn"], C["warn"], C["bg"]),
+        "err": (C["err_dim"],  C["err"], C["err"], C["bg"]),
+        "idle":(C["surface2"], C["ink_muted"], C["surface3"], C["ink"]),
+    }
+    bg, fg, abg, afg = styles.get(variant, styles["warn"])
+    btn.configure(text=text, bg=bg, fg=fg, activebackground=abg, activeforeground=afg)
+    btn._limite_variant = variant
+    btn._limite_bg = bg
+    btn._limite_fg = fg
+    btn._limite_abg = abg
+    btn._limite_afg = afg
+    btn.bind("<Enter>", lambda _: btn.configure(bg=abg, fg=afg))
+    btn.bind("<Leave>", lambda _: btn.configure(bg=bg, fg=fg))
+
+
 def styled_entry(parent, textvariable=None, width=20, show=None, **kwargs):
     return tk.Entry(parent, textvariable=textvariable, width=width,
                     show=show or "",
@@ -894,6 +1162,7 @@ class ScrollableFrame(tk.Frame):
         self._canvas.bind("<Configure>", self._on_canvas)
         self.bind("<Destroy>", self._on_destroy)
         self._wheel_roots = [self]
+        self._scroll_job = None
         self.refresh_bindings()
 
     def _canvas_alive(self):
@@ -942,8 +1211,22 @@ class ScrollableFrame(tk.Frame):
     def _on_inner(self, _event):
         if not self._canvas_alive():
             return
-        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
-        self.refresh_bindings()
+        if getattr(self, "_scroll_job", None):
+            try:
+                self.after_cancel(self._scroll_job)
+            except Exception:
+                pass
+        self._scroll_job = self.after(16, self._sync_scrollregion)
+
+    def _sync_scrollregion(self):
+        self._scroll_job = None
+        if not self._canvas_alive():
+            return
+        try:
+            self._canvas.update_idletasks()
+            self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        except tk.TclError:
+            pass
 
     def _on_canvas(self, event):
         if self._canvas_alive():
@@ -955,11 +1238,11 @@ class ScrollableFrame(tk.Frame):
 
 class Sidebar(tk.Frame):
     NAV = [
-        ("Home",             "⌂",  "Início"),
-        ("Rotinas",          "◈",  "Rotinas"),
-        ("Share",            "⊕",  "Cadastro Share"),
-        ("BPM",              "⚡",  "BPM"),
-        ("LimitesInvertido", "⬡",  "Limites Invertido"),
+        ("Home",              "⌂",  "Início"),
+        ("Rotinas",           "◈",  "Rotinas"),
+        ("Share",             "⊕",  "Cadastro Share"),
+        ("BPM",               "⚡",  "BPM"),
+        ("OperacoesInvertido","⬡",  "Operações Invertido"),
     ]
 
     def __init__(self, parent, controller, **kwargs):
@@ -1053,10 +1336,10 @@ class Sidebar(tk.Frame):
 
 class HomeFrame(tk.Frame):
     MODULES = [
-        {"name": "Cadastro Share",   "sub": "Extração e análise de PDF",          "icon": "⊕", "frame": "Share",           "color": "#5a9e72"},
-        {"name": "BPM",              "sub": "Abertura de solicitações",            "icon": "⚡", "frame": "BPM_CONFIG",      "color": "#EC7000"},
-        {"name": "Limites Invertido","sub": "Consulta LTC e limites disponíveis",  "icon": "⬡", "frame": "LimitesInvertido","color": "#c87941"},
-        {"name": "Rotinas",          "sub": "Sequências configuráveis",            "icon": "◈", "frame": "Rotinas",         "color": "#8b72c9"},
+        {"name": "Cadastro Share",     "sub": "Extração e análise de PDF",          "icon": "⊕", "frame": "Share",            "color": "#5a9e72"},
+        {"name": "BPM",                "sub": "Abertura de solicitações",            "icon": "⚡", "frame": "BPM_CONFIG",       "color": "#EC7000"},
+        {"name": "Operações Invertido","sub": "Limites, LTC e análise de planilhas", "icon": "⬡", "frame": "OperacoesInvertido","color": "#c87941"},
+        {"name": "Rotinas",            "sub": "Sequências configuráveis",            "icon": "◈", "frame": "Rotinas",          "color": "#8b72c9"},
     ]
 
     def __init__(self, parent, controller):
@@ -1108,7 +1391,7 @@ class HomeFrame(tk.Frame):
 
         links = [
             ("Nova solicitação BPM",    "BPM_CONFIG"),
-            ("Consultar limites",        "LimitesInvertido"),
+            ("Operações Invertido",      "OperacoesInvertido"),
             ("Extrair dados de PDF",     "Share"),
             ("Gerenciar rotinas",        "Rotinas"),
         ]
@@ -2571,7 +2854,706 @@ class ShareFrame(tk.Frame):
         self.hidden["liquidacao"] = "Débito em CC"
         self.txt_resumo.delete("1.0","end")
 
-class LimitesInvertidoFrame(tk.Frame):
+class OperacoesInvertidoFrame(tk.Frame):
+    """Hub de Operações Invertido — escolhe entre análise de planilhas
+    (.xlsx) e a consulta de Limites Invertido / LTC."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._xlsx_path = None
+        self._overlay   = None
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=44, pady=(36, 0))
+        eyebrow_label(hdr, "MESA DE OPERAÇÕES").pack(anchor="w")
+        tk.Label(hdr, text="Operações Invertido", bg=C["bg"], fg=C["ink"],
+                 font=("Segoe UI", 22, "bold")).pack(anchor="w", pady=(6, 0))
+        tk.Label(hdr, text="Escolha uma ferramenta para continuar.",
+                 bg=C["bg"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", pady=(20, 0))
+
+        body = tk.Frame(self, bg=C["bg"])
+        body.pack(fill="both", expand=True, padx=44, pady=(32, 0))
+        body.columnconfigure(0, weight=1, uniform="opc")
+        body.columnconfigure(1, weight=1, uniform="opc")
+
+        self._make_option_card(
+            body, 0, "▤", "Analisar Operações",
+            "Importe uma planilha .xlsx para análise das operações.",
+            self._open_analisar_overlay, "#5a9e72")
+
+        self._make_option_card(
+            body, 1, "⬡", "Limites Invertido",
+            "Consulta o LTC e o limite disponível de cada cliente.",
+            lambda: self.controller.show_frame("LimitesInvertido"), C["accent"])
+
+    def on_show(self):
+        pass
+
+    # ── Cards de opção ───────────────────────────────────────────────────────
+    def _make_option_card(self, parent, col, icon, title, sub, command, color):
+        pad = (0, 8) if col == 0 else (8, 0)
+        outer = tk.Frame(parent, bg=C["surface"],
+                         highlightthickness=1, highlightbackground=C["hair"],
+                         cursor="hand2")
+        outer.grid(row=0, column=col, sticky="nsew", padx=pad)
+
+        top_line = tk.Frame(outer, bg=C["hair"], height=2)
+        top_line.pack(fill="x")
+
+        body_f = tk.Frame(outer, bg=C["surface"], padx=22, pady=22)
+        body_f.pack(fill="both", expand=True)
+
+        icon_lbl = tk.Label(body_f, text=icon, bg=C["surface"], fg=color,
+                            font=("Segoe UI", 22))
+        icon_lbl.pack(anchor="w")
+        name_lbl = tk.Label(body_f, text=title, bg=C["surface"], fg=C["ink"],
+                            font=("Segoe UI", 12, "bold"), anchor="w")
+        name_lbl.pack(anchor="w", pady=(12, 4))
+        sub_lbl = tk.Label(body_f, text=sub, bg=C["surface"], fg=C["ink_muted"],
+                           font=("Segoe UI", 9), anchor="w", wraplength=220,
+                           justify="left")
+        sub_lbl.pack(anchor="w")
+        arrow_lbl = tk.Label(body_f, text="Abrir →", bg=C["surface"], fg=C["ink_faint"],
+                             font=("Segoe UI", 8, "bold"))
+        arrow_lbl.pack(anchor="w", pady=(18, 0))
+
+        widgets = [outer, top_line, body_f, icon_lbl, name_lbl, sub_lbl, arrow_lbl]
+
+        def _enter(_e=None):
+            outer.configure(bg=C["surface2"], highlightbackground=color)
+            top_line.configure(bg=color)
+            for w in (body_f, icon_lbl, name_lbl, sub_lbl):
+                w.configure(bg=C["surface2"])
+            arrow_lbl.configure(bg=C["surface2"], fg=color)
+
+        def _leave(_e=None):
+            outer.configure(bg=C["surface"], highlightbackground=C["hair"])
+            top_line.configure(bg=C["hair"])
+            for w in (body_f, icon_lbl, name_lbl, sub_lbl):
+                w.configure(bg=C["surface"])
+            arrow_lbl.configure(bg=C["surface"], fg=C["ink_faint"])
+
+        for w in widgets:
+            w.bind("<Button-1>", lambda _e: command())
+            w.bind("<Enter>", _enter)
+            w.bind("<Leave>", _leave)
+
+        return outer
+
+    # ── Overlay: Analisar Operações ─────────────────────────────────────────
+    def _open_analisar_overlay(self):
+        if self._overlay is not None:
+            return
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.bind("<Button-1>", lambda _e: self._close_analisar_overlay())
+        self._overlay = overlay
+
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=460, height=320)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=26, pady=22)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text="Analisar Operações", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold")).pack(side="left")
+        styled_button(top, "✕", self._close_analisar_overlay,
+                      small=True).pack(side="right")
+
+        tk.Label(pad, text="Selecione uma planilha .xlsx com as operações para análise.",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
+                 wraplength=400, justify="left").pack(anchor="w", pady=(10, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(16, 0))
+
+        drop = tk.Frame(pad, bg=C["surface2"], highlightthickness=1,
+                        highlightbackground=C["hair"])
+        drop.pack(fill="x", pady=(16, 0))
+        inner_drop = tk.Frame(drop, bg=C["surface2"], pady=24)
+        inner_drop.pack(fill="x")
+
+        has_file = bool(self._xlsx_path)
+        icon_lbl = tk.Label(inner_drop, text=("✓" if has_file else "▤"),
+                            bg=C["surface2"],
+                            fg=(C["ok"] if has_file else C["ink_faint"]),
+                            font=("Segoe UI", 20))
+        icon_lbl.pack()
+        file_lbl = tk.Label(inner_drop,
+                            text=(os.path.basename(self._xlsx_path) if has_file
+                                  else "Nenhum arquivo selecionado"),
+                            bg=C["surface2"],
+                            fg=(C["ink"] if has_file else C["ink_muted"]),
+                            font=("Segoe UI", 9))
+        file_lbl.pack(pady=(8, 0))
+
+        self._overlay_file_lbl = file_lbl
+        self._overlay_icon_lbl = icon_lbl
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(20, 0))
+        self._overlay_action_btn = styled_button(
+            foot, "Selecionar arquivo .xlsx…",
+            self._overlay_action_click, accent=True)
+        self._overlay_action_btn.pack(side="left")
+        self._overlay_ready = bool(self._xlsx_path)
+        if self._overlay_ready:
+            self._set_overlay_analyze_state(animate=False)
+        styled_button(foot, "Cancelar",
+                      self._close_analisar_overlay).pack(side="right")
+
+    def _overlay_action_click(self):
+        if self._overlay_ready:
+            self._start_analyze()
+        else:
+            self._pick_xlsx()
+
+    def _set_overlay_analyze_state(self, animate=True):
+        btn = getattr(self, "_overlay_action_btn", None)
+        if btn is None or not btn.winfo_exists():
+            return
+        self._overlay_ready = True
+        btn.configure(command=self._start_analyze)
+        if not animate:
+            btn.configure(text="Analisar", bg=C["ok_dim"], fg=C["ok"],
+                          activebackground=C["ok"], activeforeground=C["bg"])
+            btn.bind("<Enter>", lambda _: btn.configure(bg=C["ok"], fg=C["bg"]))
+            btn.bind("<Leave>", lambda _: btn.configure(bg=C["ok_dim"], fg=C["ok"]))
+            return
+
+        steps = [
+            (C["accent_dim"], C["accent"], "Selecionar arquivo .xlsx…"),
+            (C["surface3"],   C["ink"],    "Preparando…"),
+            ("#2d4a38",       "#6fbf96",   "Analisar"),
+            (C["ok_dim"],     C["ok"],     "Analisar"),
+        ]
+        def _step(i=0):
+            if btn is None or not btn.winfo_exists():
+                return
+            bg, fg, text = steps[min(i, len(steps) - 1)]
+            btn.configure(text=text, bg=bg, fg=fg,
+                          activebackground=C["ok"], activeforeground=C["bg"])
+            if i < len(steps) - 1:
+                self.after(55, lambda: _step(i + 1))
+            else:
+                btn.bind("<Enter>", lambda _: btn.configure(bg=C["ok"], fg=C["bg"]))
+                btn.bind("<Leave>", lambda _: btn.configure(bg=C["ok_dim"], fg=C["ok"]))
+        _step()
+
+    def _start_analyze(self):
+        if not self._xlsx_path:
+            return
+        self.controller.invertido_xlsx_path = self._xlsx_path
+        self._close_analisar_overlay()
+        self.controller.show_frame("AnalisarOperacoes")
+
+    def _pick_xlsx(self):
+        p = filedialog.askopenfilename(
+            title="Selecionar planilha de operações",
+            filetypes=[("Planilha Excel", "*.xlsx")])
+        if not p:
+            return
+        self._xlsx_path = p
+        if hasattr(self, "_overlay_file_lbl") and self._overlay_file_lbl.winfo_exists():
+            self._overlay_file_lbl.configure(text=os.path.basename(p), fg=C["ink"])
+            self._overlay_icon_lbl.configure(text="✓", fg=C["ok"])
+        self._set_overlay_analyze_state(animate=True)
+
+    def _close_analisar_overlay(self):
+        if self._overlay is not None:
+            try: self._overlay.destroy()
+            except Exception: pass
+            self._overlay = None
+        self._overlay_ready = bool(self._xlsx_path)
+
+
+class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
+    """Exibe as operações importadas de uma planilha .xlsx, agrupadas por sacado."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._groups = []
+        self._cards = []
+        self._limit_btns = {}
+        self._worker_running = False
+        self._last_path = None
+        self._detail_overlay = None
+        self._limite_overlay = None
+        self._init_ui_queue()
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        styled_button(hdr, "← Voltar",
+                      lambda: (self._close_detalhes(),
+                               self.controller.show_frame("OperacoesInvertido"))).pack(side="left")
+        tk.Label(hdr, text="Analisar Operações", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left", padx=(14, 0))
+
+        sub = tk.Frame(self, bg=C["bg"])
+        sub.pack(fill="x", padx=32)
+        self._sub_lbl = tk.Label(
+            sub, text="Importe e analise as operações da planilha selecionada.",
+            bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9))
+        self._sub_lbl.pack(anchor="w", pady=(4, 0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16, 0))
+
+        self._loading_outer = tk.Frame(self, bg=C["bg"])
+        self._loading_outer.pack(fill="x", padx=32, pady=(28, 0))
+        loading_card = tk.Frame(self._loading_outer, bg=C["surface"],
+                                highlightthickness=1, highlightbackground=C["hair"])
+        loading_card.pack(fill="x")
+        loading_body = tk.Frame(loading_card, bg=C["surface"], padx=18, pady=16)
+        loading_body.pack(fill="x")
+        self._loading_icon = tk.Label(loading_body, text="◐", bg=C["surface"],
+                                      fg=C["ok"], font=("Segoe UI", 16, "bold"))
+        self._loading_icon.pack()
+        self._loading_lbl = tk.Label(
+            loading_body, text="Analisando planilha…", bg=C["surface"],
+            fg=C["ink_muted"], font=("Segoe UI", 9))
+        self._loading_lbl.pack(pady=(8, 0))
+        self._loading_spin = [None]
+        self._loading_angle = [0]
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        self._grid_outer = self._sf.inner
+        self._grid_outer.configure(bg=C["bg"])
+
+        self._grid = tk.Frame(self._grid_outer, bg=C["bg"])
+        self._grid.pack(padx=32, pady=(16, 24), fill="x")
+        for c in range(3):
+            self._grid.columnconfigure(c, weight=1, uniform="acards")
+
+    def on_show(self):
+        self._sf.refresh_bindings()
+        path = getattr(self.controller, "invertido_xlsx_path", None)
+        if not path:
+            self.controller.show_frame("OperacoesInvertido")
+            return
+        fname = os.path.basename(path)
+        self._sub_lbl.configure(text=f"Planilha: {fname}")
+        if path == self._last_path and self._groups and not self._worker_running:
+            self._refresh_all_limit_buttons()
+            return
+        self._last_path = path
+        self._reset_view()
+        self._start_worker(path)
+        self.controller.register_limites_listener(self._on_limites_update)
+
+    def _on_limites_update(self, _cnpj=None):
+        self._ui(self._refresh_all_limit_buttons)
+
+    def _reset_view(self):
+        self._groups = []
+        self._cards = []
+        for w in self._grid.winfo_children():
+            w.destroy()
+        self._loading_lbl.configure(text="Analisando planilha…", fg=C["ink_muted"])
+        self._loading_icon.configure(text="◐", fg=C["ok"])
+        self._loading_outer.pack(fill="x", padx=32, pady=(28, 0))
+        self._start_loading_anim()
+
+    def _start_loading_anim(self):
+        if self._loading_spin[0]:
+            try:
+                self.after_cancel(self._loading_spin[0])
+            except Exception:
+                pass
+        self._loading_angle[0] = 0
+
+        def tick():
+            self._loading_angle[0] = (self._loading_angle[0] + 1) % 4
+            if self._loading_icon.winfo_exists():
+                self._loading_icon.configure(
+                    text=["◐", "◓", "◑", "◒"][self._loading_angle[0]])
+            self._loading_spin[0] = self.after(120, tick)
+
+        tick()
+
+    def _stop_loading_anim(self):
+        if self._loading_spin[0]:
+            try:
+                self.after_cancel(self._loading_spin[0])
+            except Exception:
+                pass
+            self._loading_spin[0] = None
+
+    def _make_group_card(self, group, row, col):
+        bg = C["surface"]
+        outer = tk.Frame(self._grid, bg=C["bg"])
+        outer.grid(row=row, column=col, sticky="new", padx=5, pady=5)
+
+        card = tk.Frame(outer, bg=bg, highlightthickness=1,
+                        highlightbackground=C["hair"], bd=0)
+        card.pack(fill="x")
+        top_bar = tk.Frame(card, bg=C["ok"], height=2)
+        top_bar.pack(fill="x")
+
+        body = tk.Frame(card, bg=bg, padx=14, pady=12)
+        body.pack(fill="x")
+
+        tk.Label(body, text=group["nome_sacado"], bg=bg, fg=C["ink"],
+                 font=("Segoe UI", 9, "bold"), wraplength=170,
+                 justify="center").pack()
+
+        info = tk.Frame(body, bg=bg)
+        info.pack(pady=(10, 0), fill="x")
+        for label, value, accent in (
+            ("Notas", str(group["count"]), False),
+            ("Montante", group["valor_total"], True),
+        ):
+            row_f = tk.Frame(info, bg=bg)
+            row_f.pack(fill="x", pady=(0, 3))
+            tk.Label(row_f, text=label, bg=bg, fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold"), width=9, anchor="w").pack(side="left")
+            fg = C["ok"] if accent else C["ink_muted"]
+            tk.Label(row_f, text=value, bg=bg, fg=fg,
+                     font=("Segoe UI", 8, "bold" if accent else "normal"),
+                     anchor="w").pack(side="left", fill="x", expand=True)
+
+        btn_row = tk.Frame(body, bg=bg)
+        btn_row.pack(fill="x", pady=(12, 0))
+        status, label = self._evaluate_group_limite(group)
+        lim_btn = styled_button_limite(
+            btn_row, label,
+            lambda g=group: self._open_limite_modal(g),
+            variant=self._limite_variant(status),
+            small=True)
+        lim_btn.pack(side="left")
+        styled_button(btn_row, "Detalhes →",
+                      lambda k=group["nome_sacado"]: self._open_detalhes(k),
+                      accent=True, small=True).pack(side="right")
+
+        cnpj = group.get("doc_sacado") or ""
+        self._limit_btns[self._group_limite_key(group)] = lim_btn
+
+        return {"outer": outer, "lim_btn": lim_btn, "group": group}
+
+    def _limite_variant(self, status):
+        return {"ok": "ok", "quase": "warn", "nao_validado": "warn",
+                "nao_encontrado": "warn", "validando": "idle",
+                "insuficiente": "err"}.get(status, "warn")
+
+    def _group_limite_key(self, group):
+        return group.get("doc_sacado") or _normalize_sacado_key(group["nome_sacado"])
+
+    def _get_limite_data(self, group):
+        cnpj = group.get("doc_sacado") or ""
+        if not cnpj:
+            return None
+        return getattr(self.controller, "invertido_limites_cache", {}).get(cnpj)
+
+    def _evaluate_group_limite(self, group):
+        cnpj = group.get("doc_sacado") or ""
+        if not cnpj or cnpj not in LIMITE_INVERTIDO_CNPJS:
+            return "nao_encontrado", "Limite não encontrado"
+        limite_data = self._get_limite_data(group)
+        lf = self.controller.frames.get("LimitesInvertido")
+        if lf and lf._worker_running and not limite_data:
+            return "validando", "Validando…"
+        if not limite_data:
+            return "nao_validado", "Limites não validados"
+        return _evaluate_limite_operacao(group["total"], limite_data)
+
+    def _refresh_all_limit_buttons(self):
+        for key, btn in list(self._limit_btns.items()):
+            if not btn.winfo_exists():
+                continue
+            group = next((g for g in self._groups if self._group_limite_key(g) == key), None)
+            if not group:
+                continue
+            status, label = self._evaluate_group_limite(group)
+            _set_limite_button(btn, label, self._limite_variant(status))
+
+    def _close_limite_modal(self):
+        if self._limite_overlay is not None:
+            try:
+                self._limite_overlay.destroy()
+            except Exception:
+                pass
+            self._limite_overlay = None
+
+    def _start_limites_validation(self):
+        lf = self.controller.frames.get("LimitesInvertido")
+        if lf is None or lf._worker_running:
+            return
+        self._close_limite_modal()
+        if lf._started and not lf._worker_running:
+            lf._restart_limites()
+        else:
+            lf._started = True
+            lf._cancel_requested = False
+            lf._setup_cards()
+            lf._start_worker()
+        self._refresh_all_limit_buttons()
+
+    def _open_limite_modal(self, group):
+        if self._limite_overlay is not None:
+            return
+        status, label = self._evaluate_group_limite(group)
+        limite_data = self._get_limite_data(group)
+
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._limite_overlay = overlay
+
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=420, height=300)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=24, pady=20)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        title_fg = {"ok": C["ok"], "quase": C["warn"], "insuficiente": C["err"],
+                    "nao_encontrado": C["warn"]}.get(status, C["warn"])
+        tk.Label(top, text=label, bg=C["surface"], fg=title_fg,
+                 font=("Segoe UI", 12, "bold")).pack(side="left")
+        styled_button(top, "✕", self._close_limite_modal, small=True).pack(side="right")
+
+        tk.Label(pad, text=group["nome_sacado"], bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9), wraplength=360, justify="left").pack(
+            anchor="w", pady=(10, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 0))
+
+        body = tk.Frame(pad, bg=C["surface"])
+        body.pack(fill="both", expand=True, pady=(12, 0))
+
+        if status == "nao_validado":
+            tk.Label(
+                body,
+                text=("Os limites ainda não foram consultados para este sacado.\n"
+                      "Deseja iniciar a validação agora?"),
+                bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
+                wraplength=360, justify="left",
+            ).pack(anchor="w")
+            foot = tk.Frame(pad, bg=C["surface"])
+            foot.pack(fill="x", pady=(16, 0))
+            styled_button(foot, "Cancelar", self._close_limite_modal, small=True).pack(side="right")
+            styled_button(foot, "Iniciar validação",
+                          self._start_limites_validation, accent=True, small=True).pack(
+                side="right", padx=(0, 8))
+            return
+
+        if status == "nao_encontrado":
+            doc = group.get("doc_sacado") or "—"
+            tk.Label(
+                body,
+                text=(f"CNPJ {doc} não consta na lista de Limites Invertido.\n"
+                      "Este sacado não possui consulta de limite cadastrada no app."),
+                bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
+                wraplength=360, justify="left",
+            ).pack(anchor="w")
+            foot = tk.Frame(pad, bg=C["surface"])
+            foot.pack(fill="x", pady=(16, 0))
+            styled_button(foot, "Fechar", self._close_limite_modal, accent=True, small=True).pack(
+                side="right")
+            return
+
+        mont = group["valor_total"]
+        lines = [f"Montante do grupo: {mont}"]
+        if limite_data:
+            if limite_data.get("ltc_str"):
+                lines.append(f"LTC ativo · vence {limite_data['ltc_str']}")
+            lines.append(f"Limite disp. (fornecedor): {_fmt_limite_int(limite_data.get('limite_disp'))}")
+            limite = limite_data.get("limite_disp")
+            if limite is not None:
+                slack = limite - int(group["total"].quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                lines.append(f"Sobra: {_fmt_limite_int(slack)}")
+            if limite_data.get("via"):
+                lines.append(f"Consulta via {limite_data['via']}")
+            if status == "quase":
+                lines.append(f"\nSobra abaixo de R$ {LIMITE_SOBRA_MIN:,}".replace(",", "."))
+            elif status == "insuficiente":
+                if limite_data.get("state") == "ltc_expired":
+                    lines.append("\nLTC vencido ou indisponível.")
+                else:
+                    lines.append("\nMontante superior ao limite disponível.")
+
+        tk.Label(body, text="\n".join(lines), bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9), wraplength=360, justify="left").pack(anchor="w")
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(16, 0))
+        styled_button(foot, "Fechar", self._close_limite_modal, accent=True, small=True).pack(
+            side="right")
+
+    def _find_group(self, nome_sacado):
+        key = _normalize_sacado_key(nome_sacado)
+        for g in self._groups:
+            if _normalize_sacado_key(g["nome_sacado"]) == key:
+                return g
+        return None
+
+    def _bind_modal_scroll(self, widgets, sf):
+        def _mw(event):
+            sf._scroll_mousewheel(event)
+            return "break"
+        for widget in widgets:
+            widget.bind("<MouseWheel>", _mw)
+            widget.bind("<Button-4>", _mw)
+            widget.bind("<Button-5>", _mw)
+
+    def _open_detalhes(self, nome_sacado):
+        group = self._find_group(nome_sacado)
+        if group is None or self._detail_overlay is not None:
+            return
+
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._detail_overlay = overlay
+
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=720, height=580)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=28, pady=22)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text=group["nome_sacado"], bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold"), wraplength=560,
+                 justify="left").pack(side="left", fill="x", expand=True)
+        styled_button(top, "✕", self._close_detalhes, small=True).pack(side="right")
+
+        tk.Label(
+            pad,
+            text=f"{group['count']} nota(s) · {group['valor_total']}",
+            bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(8, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(16, 0))
+
+        scroll_wrap = tk.Frame(pad, bg=C["surface"], height=420)
+        scroll_wrap.pack(fill="both", expand=True, pady=(12, 0))
+        scroll_wrap.pack_propagate(False)
+
+        sf = ScrollableFrame(scroll_wrap, bg=C["surface"])
+        sf.pack(fill="both", expand=True)
+        sf.link_wheel(scroll_wrap)
+        sf.link_wheel(pad)
+        sf.link_wheel(card)
+        list_outer = sf.inner
+        list_outer.configure(bg=C["surface"])
+
+        notas = list(group["notas"])
+        for idx, op in enumerate(notas, start=1):
+            item = tk.Frame(list_outer, bg=C["surface2"],
+                            highlightthickness=1, highlightbackground=C["hair"])
+            item.pack(fill="x", pady=(0, 8))
+
+            head = tk.Frame(item, bg=C["surface2"], padx=14, pady=10)
+            head.pack(fill="x")
+            tk.Label(head, text=f"Nota {idx} de {len(notas)}", bg=C["surface2"],
+                     fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(anchor="w")
+
+            body = tk.Frame(item, bg=C["surface2"], padx=14, pady=12)
+            body.pack(fill="x")
+            fields = [
+                ("NF", op["nf"] or "—", False),
+                ("Valor", op["valor"], True),
+                ("Inclusão", op["data_inclusao"] or "—", False),
+                ("Vencimento", op["data_vencimento"] or "—", False),
+                ("Prazo", f"{op['prazo']} dias" if op.get("prazo") else "—", False),
+            ]
+            for label, value, accent in fields:
+                row_f = tk.Frame(body, bg=C["surface2"])
+                row_f.pack(fill="x", pady=(0, 3))
+                tk.Label(row_f, text=label, bg=C["surface2"], fg=C["ink_faint"],
+                         font=("Segoe UI", 7, "bold"), width=10, anchor="w").pack(side="left")
+                fg = C["ok"] if accent else C["ink"]
+                tk.Label(row_f, text=value, bg=C["surface2"], fg=fg,
+                         font=("Segoe UI", 8, "bold" if accent else "normal"),
+                         anchor="w").pack(side="left", fill="x", expand=True)
+
+        self._bind_modal_scroll([overlay, card, pad, scroll_wrap], sf)
+
+        def _sync_modal():
+            sf.update_idletasks()
+            sf._sync_scrollregion()
+            sf.refresh_bindings()
+        self.after_idle(_sync_modal)
+
+    def _close_detalhes(self):
+        if self._detail_overlay is not None:
+            try:
+                self._detail_overlay.destroy()
+            except Exception:
+                pass
+            self._detail_overlay = None
+
+    def _render_results(self, ops):
+        self._stop_loading_anim()
+        self._loading_outer.pack_forget()
+        for w in self._grid.winfo_children():
+            w.destroy()
+        self._cards = []
+        groups = _group_invertido_ops(ops)
+        self._groups = groups
+        if not groups:
+            empty = tk.Frame(self._grid, bg=C["bg"])
+            empty.grid(row=0, column=0, columnspan=3, sticky="ew", pady=24)
+            tk.Label(empty, text="Nenhuma operação encontrada na planilha.",
+                     bg=C["bg"], fg=C["ink_muted"],
+                     font=("Segoe UI", 10)).pack()
+            return
+        for idx, group in enumerate(groups):
+            row, col = divmod(idx, 3)
+            self._cards.append(self._make_group_card(group, row, col))
+        total_notas = sum(g["count"] for g in groups)
+        self._sub_lbl.configure(
+            text=(f"{len(groups)} grupo(s) · {total_notas} nota(s) · "
+                  f"{os.path.basename(self._last_path or '')}"))
+        self._limit_btns = {}
+        for card in self._cards:
+            if card.get("lim_btn") and card.get("group"):
+                self._limit_btns[self._group_limite_key(card["group"])] = card["lim_btn"]
+        self.update_idletasks()
+        self._sf._sync_scrollregion()
+        self._sf.refresh_bindings()
+        self._refresh_all_limit_buttons()
+
+    def _show_error(self, msg):
+        self._stop_loading_anim()
+        self._loading_lbl.configure(text=msg, fg=C["err"])
+        self._loading_icon.configure(text="✗", fg=C["err"])
+
+    def _start_worker(self, path):
+        if self._worker_running:
+            return
+        self._worker_running = True
+        threading.Thread(target=self._worker, args=(path,), daemon=True).start()
+
+    def _worker(self, path):
+        try:
+            ops = _parse_invertido_xlsx(path)
+            self._ui(lambda: self._render_results(ops))
+        except Exception as e:
+            self._ui(lambda m=str(e): self._show_error(f"Erro ao analisar: {m}"))
+        finally:
+            self._worker_running = False
+
+
+class LimitesInvertidoFrame(tk.Frame, ThreadSafeUIMixin):
     COL_OK   = C["ok"]
     COL_WARN = C["warn"]
     COL_ERR  = C["err"]
@@ -2585,17 +3567,14 @@ class LimitesInvertidoFrame(tk.Frame):
         self._browser    = None
         self._started    = False
         self._restart_pending = False
+        self._init_ui_queue()
         self._build()
-
-    def _ui(self, fn):
-        try: self.after(0, fn)
-        except: pass
 
     def _build(self):
         hdr = tk.Frame(self, bg=C["bg"])
         hdr.pack(fill="x", padx=32, pady=(24,0))
         styled_button(hdr, "← Voltar",
-                      lambda: self.controller.show_frame("Home")).pack(side="left")
+                      lambda: self.controller.show_frame("OperacoesInvertido")).pack(side="left")
         self._restart_btn = styled_button(hdr, "↻  Atualizar",
                                           self._restart_limites)
         self._restart_btn.pack(side="right")
@@ -2757,6 +3736,30 @@ class LimitesInvertidoFrame(tk.Frame):
             c["spin_id"][0] = True
             c["tick"]()
 
+    def _publish_limite(self, name, ltc_str=None, ltc_date=None, limite_disp=None,
+                        state="processing", info=""):
+        cnpj = only_digits(BPM_CLIENT_DATA.get(name, {}).get("CNPJ", ""))
+        if not cnpj:
+            return
+        data = {
+            "client_name": name,
+            "cnpj": cnpj,
+            "ltc_str": ltc_str,
+            "ltc_date": ltc_date,
+            "limite_disp": limite_disp,
+            "state": state,
+            "info": info,
+        }
+        self.controller.publish_limite_result(cnpj, data)
+        for mn in LIMITE_SHARED_RESULTS.get(name, []):
+            mcnpj = only_digits(BPM_CLIENT_DATA.get(mn, {}).get("CNPJ", ""))
+            if not mcnpj:
+                continue
+            mdata = dict(data)
+            mdata["client_name"] = mn
+            mdata["via"] = name
+            self.controller.publish_limite_result(mcnpj, mdata)
+
     def _start_worker(self):
         if self._worker_running: return
         self._worker_running = True
@@ -2791,6 +3794,7 @@ class LimitesInvertidoFrame(tk.Frame):
                     if name not in MAPPED_CLIENTS: continue
                     idx = self._find_idx(name)
                     if idx == -1: continue
+                    self._publish_limite(name, state="processing")
                     self._ui(lambda i=idx: self._set_state(i, "processing"))
                     url = LIMITE_CLIENT_URLS.get(name)
                     if not url:
@@ -2866,6 +3870,7 @@ class LimitesInvertidoFrame(tk.Frame):
 
                         if ltc_date is None:
                             inf = "Não foi possível ler\ndata do LTC"
+                            self._publish_limite(name, ltc_str=ltc_str, state="error", info=inf)
                             self._ui(lambda i=idx,inf=inf: self._set_state(i,"error",inf))
                             for mn in LIMITE_SHARED_RESULTS.get(name,[]):
                                 mi = self._find_idx(mn)
@@ -2874,6 +3879,8 @@ class LimitesInvertidoFrame(tk.Frame):
 
                         if ltc_date <= today:
                             inf = f"LTC vencido em {ltc_str}"
+                            self._publish_limite(name, ltc_str=ltc_str, ltc_date=ltc_date,
+                                                 state="ltc_expired", info=inf)
                             self._ui(lambda i=idx,inf=inf: self._set_state(i,"ltc_expired",inf))
                             for mn in LIMITE_SHARED_RESULTS.get(name,[]):
                                 mi = self._find_idx(mn)
@@ -2917,6 +3924,8 @@ class LimitesInvertidoFrame(tk.Frame):
                         final_state = "warn" if warn else "ok"
                         if warn: inf += f"\n⚠ Limite abaixo de R$ {BAIXO:,}".replace(",",".")
 
+                        self._publish_limite(name, ltc_str=ltc_str, ltc_date=ltc_date,
+                                             limite_disp=limite_disp, state=final_state, info=inf)
                         self._ui(lambda i=idx,s=final_state,inf=inf: self._set_state(i,s,inf))
                         for mn in LIMITE_SHARED_RESULTS.get(name,[]):
                             mi = self._find_idx(mn)
@@ -2928,6 +3937,7 @@ class LimitesInvertidoFrame(tk.Frame):
                     except Exception as e:
                         if self._cancel_requested: break
                         es = str(e)[:80]
+                        self._publish_limite(name, state="error", info=es)
                         self._ui(lambda i=idx,es=es: self._set_state(i,"error",es))
 
             except Exception as e:
@@ -2942,7 +3952,7 @@ class LimitesInvertidoFrame(tk.Frame):
                 self._worker_running = False
 
 
-class BPMFrame(tk.Frame):
+class BPMFrame(tk.Frame, ThreadSafeUIMixin):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
         self.controller = controller
@@ -2952,11 +3962,8 @@ class BPMFrame(tk.Frame):
         self._cancel_requested = False
         self._browser = None
         self._started = False
+        self._init_ui_queue()
         self._build()
-
-    def _ui(self, fn):
-        try: self.after(0, fn)
-        except: pass
 
     def _build(self):
         hdr = tk.Frame(self, bg=C["bg"])
@@ -3411,6 +4418,8 @@ class App(tk.Tk):
         self.overrideredirect(True)
         self.bpm_run_selection = []
         self.bpm_funcional     = ""
+        self.invertido_limites_cache = {}
+        self._limites_listeners = []
         self.bpm_password      = ""
         self.rotina_em_execucao= None
         self._active_frame     = "Home"
@@ -3441,6 +4450,8 @@ class App(tk.Tk):
             (ShareFrame,             "Share"),
             (BPMConfigFrame,         "BPM_CONFIG"),
             (BPMFrame,               "BPM"),
+            (OperacoesInvertidoFrame,"OperacoesInvertido"),
+            (AnalisarOperacoesFrame, "AnalisarOperacoes"),
             (LimitesInvertidoFrame,  "LimitesInvertido"),
         ]:
             f = Cls(self._content, self)
@@ -3476,14 +4487,35 @@ class App(tk.Tk):
         for child in frame.winfo_children():
             self._refresh_frame_scroll(child)
 
+    def register_limites_listener(self, fn):
+        if fn not in self._limites_listeners:
+            self._limites_listeners.append(fn)
+
+    def unregister_limites_listener(self, fn):
+        try:
+            self._limites_listeners.remove(fn)
+        except ValueError:
+            pass
+
+    def publish_limite_result(self, cnpj_digits, data):
+        self.invertido_limites_cache[cnpj_digits] = data
+        for fn in list(self._limites_listeners):
+            try:
+                fn(cnpj_digits)
+            except Exception:
+                pass
+
     def show_frame(self, name):
         if name == "BPM" and not getattr(self,"bpm_run_selection",[]):
             name = "BPM_CONFIG"
         f = self.frames.get(name)
         if f is None: return
         self._active_frame = name
-        sidebar_name = name if name in ("Home","Rotinas","Share","LimitesInvertido") \
-                       else ("BPM" if name in ("BPM","BPM_CONFIG") else name)
+        sidebar_name = name
+        if name in ("BPM", "BPM_CONFIG"):
+            sidebar_name = "BPM"
+        elif name in ("OperacoesInvertido", "LimitesInvertido", "AnalisarOperacoes"):
+            sidebar_name = "OperacoesInvertido"
         self._sidebar.set_active(sidebar_name)
         self._titlebar.set_module(name)
         self._statusbar.set_module(name)
