@@ -2856,7 +2856,8 @@ class ShareFrame(tk.Frame):
 
 class OperacoesInvertidoFrame(tk.Frame):
     """Hub de Operações Invertido — escolhe entre análise de planilhas
-    (.xlsx) e a consulta de Limites Invertido / LTC."""
+    (.xlsx), a consulta de Limites Invertido / LTC e o histórico de
+    operações (em breve)."""
 
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
@@ -2879,8 +2880,8 @@ class OperacoesInvertidoFrame(tk.Frame):
 
         body = tk.Frame(self, bg=C["bg"])
         body.pack(fill="both", expand=True, padx=44, pady=(32, 0))
-        body.columnconfigure(0, weight=1, uniform="opc")
-        body.columnconfigure(1, weight=1, uniform="opc")
+        for c in range(3):
+            body.columnconfigure(c, weight=1, uniform="opc")
 
         self._make_option_card(
             body, 0, "▤", "Analisar Operações",
@@ -2892,12 +2893,17 @@ class OperacoesInvertidoFrame(tk.Frame):
             "Consulta o LTC e o limite disponível de cada cliente.",
             lambda: self.controller.show_frame("LimitesInvertido"), C["accent"])
 
+        self._make_option_card(
+            body, 2, "▦", "Histórico Operações",
+            "Consulta o histórico de operações já realizadas.",
+            self._open_historico_placeholder, "#8b72c9")
+
     def on_show(self):
         pass
 
     # ── Cards de opção ───────────────────────────────────────────────────────
     def _make_option_card(self, parent, col, icon, title, sub, command, color):
-        pad = (0, 8) if col == 0 else (8, 0)
+        pad = {0: (0, 6), 1: (6, 6), 2: (6, 0)}.get(col, (6, 6))
         outer = tk.Frame(parent, bg=C["surface"],
                          highlightthickness=1, highlightbackground=C["hair"],
                          cursor="hand2")
@@ -2916,7 +2922,7 @@ class OperacoesInvertidoFrame(tk.Frame):
                             font=("Segoe UI", 12, "bold"), anchor="w")
         name_lbl.pack(anchor="w", pady=(12, 4))
         sub_lbl = tk.Label(body_f, text=sub, bg=C["surface"], fg=C["ink_muted"],
-                           font=("Segoe UI", 9), anchor="w", wraplength=220,
+                           font=("Segoe UI", 9), anchor="w", wraplength=200,
                            justify="left")
         sub_lbl.pack(anchor="w")
         arrow_lbl = tk.Label(body_f, text="Abrir →", bg=C["surface"], fg=C["ink_faint"],
@@ -2945,6 +2951,13 @@ class OperacoesInvertidoFrame(tk.Frame):
             w.bind("<Leave>", _leave)
 
         return outer
+
+    # ── Histórico Operações (placeholder) ───────────────────────────────────
+    def _open_historico_placeholder(self):
+        messagebox.showinfo(
+            "Histórico Operações",
+            "Histórico Operações estará disponível em breve.",
+            parent=self.controller)
 
     # ── Overlay: Analisar Operações ─────────────────────────────────────────
     def _open_analisar_overlay(self):
