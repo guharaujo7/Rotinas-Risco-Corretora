@@ -157,7 +157,6 @@ def _normalize_sacado_key(name: str) -> str:
 
 
 def _find_invertido_header(ws) -> tuple:
-    """Localiza a linha de cabeçalho pelo texto 'Nome Sacado' (formato flexível)."""
     for i, row in enumerate(ws.iter_rows(values_only=True)):
         if i > 30:
             break
@@ -316,6 +315,22 @@ LIMITE_SHARED_RESULTS = {
     "Mirian Varzea":  ["Mirian Cuiaba"],
     "Petrocal":       ["PetroMix","PetroVel"],
     "Posto Sapucaia": ["Auto Posto M Timbozao","Posto Gasol Timbo III","Posto Timbozao Itaperuna","Posto Pioneiro"],
+}
+
+# ─── PRAZO CONFIG ────────────────────────────────────────────────────────────
+PRAZO_CONFIG = {
+    "RPB":                      {"max": 11, "min_alert": None},
+    "Transdourada":             {"max": 90, "min_alert": 50},
+    "Posto Sapucaia":           {"max": 15, "min_alert": 7},
+    "Auto Posto M Timbozao":    {"max": 15, "min_alert": 7},
+    "Posto Gasol Timbo III":    {"max": 15, "min_alert": 7},
+    "Posto Timbozao Itaperuna": {"max": 15, "min_alert": 7},
+    "Posto Pioneiro":           {"max": 15, "min_alert": 7},
+    "Mirian Cuiaba":            {"max": 10, "min_alert": None},
+    "Mirian Varzea":            {"max": 10, "min_alert": None},
+    "Petrocal":                 {"max": 10, "min_alert": None},
+    "PetroMix":                 {"max": 10, "min_alert": None},
+    "PetroVel":                 {"max": 10, "min_alert": None},
 }
 
 MAPPED_CLIENTS = {"Transdourada","RPB","Posto Arinos","Mirian Varzea","Petrocal","Posto Sapucaia"}
@@ -508,14 +523,91 @@ def extract_modalidade(t, tn, tc):
         if m: return normalize_modalidade(m.group(1).strip())
     return None
 
+# ─── Validação de Alertas ────────────────────────────────────────────────────
+
+def _find_client_for_prazo(doc_sacado, nome_sacado):
+    """Match sacado to a client in PRAZO_CONFIG via CNPJ then name."""
+    cnpj = only_digits(doc_sacado or "")
+    if cnpj:
+        for client_name, data in BPM_CLIENT_DATA.items():
+            if only_digits(data.get("CNPJ", "")) == cnpj:
+                return client_name
+    key = _normalize_sacado_key(nome_sacado or "")
+    for client in PRAZO_CONFIG:
+        if _normalize_sacado_key(client) == key:
+            return client
+    for client in PRAZO_CONFIG:
+        ck = _normalize_sacado_key(client)
+        if ck in key or key in ck:
+            return client
+    return None
+
+
+def _validate_nf(nf_str):
+    """Alert if NF has leading zeros or is suspiciously low."""
+    nf = (nf_str or "").strip()
+    if not nf:
+        return "NF vazia"
+    if len(nf) > 1 and nf.startswith("0"):
+        return f"NF com zeros à esquerda ({nf})"
+    try:
+        val = int(re.sub(r'\D', '', nf))
+        if val <= 0:
+            return f"NF inválida ({nf})"
+    except ValueError:
+        return f"NF não numérica ({nf})"
+    return None
+
+
+def _validate_valor(valor_raw):
+    """Alert if value is below R$ 10.000,00."""
+    if valor_raw is None or valor_raw < Decimal("10000"):
+        return "Valor abaixo de R$ 10.000,00"
+    return None
+
+
+def _validate_prazo(nome_sacado, doc_sacado, prazo_str):
+    """Alert if prazo exceeds max or is significantly below for known clients."""
+    client = _find_client_for_prazo(doc_sacado, nome_sacado)
+    if not client:
+        return None
+    config = PRAZO_CONFIG.get(client)
+    if not config:
+        return None
+    try:
+        prazo = int(re.sub(r'\D', '', prazo_str or ""))
+    except (ValueError, TypeError):
+        return f"Prazo inválido ({prazo_str})"
+    if prazo > config["max"]:
+        return f"Prazo ({prazo}d) acima do máximo ({config['max']}d) para {client}"
+    min_alert = config.get("min_alert")
+    if min_alert is not None and prazo < min_alert:
+        return f"Prazo ({prazo}d) muito abaixo do esperado ({config['max']}d) para {client}"
+    return None
+
+
+def _validate_operation(op):
+    """Validate a single operation and return list of alert reasons."""
+    alerts = []
+    nf_alert = _validate_nf(op.get("nf", ""))
+    if nf_alert:
+        alerts.append(nf_alert)
+    valor_alert = _validate_valor(op.get("valor_raw"))
+    if valor_alert:
+        alerts.append(valor_alert)
+    prazo_alert = _validate_prazo(
+        op.get("nome_sacado", ""),
+        op.get("doc_sacado", ""),
+        op.get("prazo", ""))
+    if prazo_alert:
+        alerts.append(prazo_alert)
+    return alerts
+
+
 class BPMUserCancelled(Exception): pass
 
 
 class ThreadSafeUIMixin:
-    """Permite chamar `self._ui(fn)` de threads de worker sem tocar o Tcl
-    diretamente fora da thread principal — evita o crash de GIL/Fatal
-    Python error ao mover a janela enquanto uma rotina está em execução."""
-
     def _init_ui_queue(self):
         self._ui_q = queue.Queue()
         self._poll_ui_queue()
@@ -552,7 +644,6 @@ def make_hairline(parent, orient="h", **kwargs):
 
 
 def _make_dot(parent, color, size=10, bg=None):
-    """Bolinha colorida via Canvas — estilo Notion."""
     bg = bg or parent.cget("bg")
     c = tk.Canvas(parent, width=size + 4, height=size + 4,
                   bg=bg, highlightthickness=0, bd=0)
@@ -738,18 +829,6 @@ def apply_frameless_resize(root):
 
 
 def start_native_window_drag(root):
-    """Inicia o arrasto nativo da janela (estilo WM_NCLBUTTONDOWN/HTCAPTION).
-
-    Usa PostMessageW (assíncrono) em vez de SendMessageW: o SendMessageW
-    entra no loop modal de mover janela do Windows de forma síncrona,
-    dentro da chamada ctypes — que libera o GIL antes de chamar a API do
-    Windows. Qualquer callback do Tcl/Tk disparado durante esse loop modal
-    tenta reaquisitar o GIL num estado inconsistente, causando
-    'Fatal Python error: PyEval_RestoreThread' e o crash da aplicação.
-    PostMessageW apenas enfileira a mensagem e retorna imediatamente; o
-    loop de mover é processado depois, dentro do laço normal de eventos
-    do Tcl, onde o GIL é gerenciado corretamente.
-    """
     if sys.platform != "win32":
         return False
     try:
@@ -2338,7 +2417,6 @@ class RotinasFrame(tk.Frame):
             side="right", padx=(6, 0))
         styled_button(foot, "Salvar", salvar, accent=True, small=True).pack(side="right")
 
-    # ── Alertas ──────────────────────────────────────────────────────────────
     def _start_alert_checker(self):
         self._alerted_flags: set = set()
         self._alerted_date:  str = ""
@@ -2379,7 +2457,6 @@ class RotinasFrame(tk.Frame):
 
         self.after(30_000, self._check_alerts)
 
-    # ── PATCH 1: popup de alerta visual customizado ──────────────────────────
     def _show_alert(self, nome, hora):
         try:
             import winsound
@@ -2402,7 +2479,6 @@ class RotinasFrame(tk.Frame):
         dlg.lift()
         dlg.focus_force()
 
-        # Força ao topo no Windows — aparece sobre qualquer app aberto
         if sys.platform == "win32":
             try:
                 import ctypes as _ctypes
@@ -2415,13 +2491,11 @@ class RotinasFrame(tk.Frame):
             except Exception:
                 pass
 
-        # Borda laranja no topo (identidade visual do app)
         tk.Frame(dlg, bg=C["accent"], height=3).pack(fill="x")
 
         body = tk.Frame(dlg, bg=C["surface"], padx=28, pady=20)
         body.pack(fill="both", expand=True)
 
-        # Cabeçalho: sino + hora
         hdr_row = tk.Frame(body, bg=C["surface"])
         hdr_row.pack(fill="x")
         tk.Label(hdr_row, text="\U0001f514", bg=C["surface"], fg=C["accent"],
@@ -2431,7 +2505,6 @@ class RotinasFrame(tk.Frame):
 
         make_hairline(body, bg=C["hair"]).pack(fill="x", pady=(14, 12))
 
-        # Nome da rotina
         tk.Label(body, text=nome, bg=C["surface"], fg=C["ink"],
                  font=("Segoe UI", 13, "bold"),
                  wraplength=300, justify="left").pack(anchor="w")
@@ -2450,7 +2523,6 @@ class RotinasFrame(tk.Frame):
         styled_button(foot, "Ok, entendido", _dismiss, accent=True, small=True).pack(
             side="right", padx=(0, 6))
 
-        # Centraliza na tela
         dlg.update_idletasks()
         sw = dlg.winfo_screenwidth()
         sh = dlg.winfo_screenheight()
@@ -2471,6 +2543,8 @@ class BPMConfigFrame(tk.Frame):
         self._selected  = {}
         self._func_var  = tk.StringVar()
         self._senha_var = tk.StringVar()
+        self._mode_var  = tk.StringVar(value="invertido")
+        self._custom_entries = []
         self._build()
 
     def _only_digits(self, s):
@@ -2489,21 +2563,49 @@ class BPMConfigFrame(tk.Frame):
                  font=("Georgia",18,"bold")).pack(side="left")
         make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14,0))
 
-        self._sf = ScrollableFrame(self, bg=C["bg"])
-        self._sf.pack(fill="both", expand=True)
-        self._sf.link_wheel(self)
-        body = self._sf.inner
-        body.configure(bg=C["bg"])
+        # ── Mode selector ──
+        mode_card = card_frame(self)
+        mode_card.pack(fill="x", padx=32, pady=(20, 0))
+        mode_body = tk.Frame(mode_card, bg=C["surface"], padx=18, pady=14)
+        mode_body.pack(fill="x")
 
-        sec = card_frame(body)
-        sec.pack(fill="x", padx=32, pady=(20,0))
-        tk.Label(sec, text="Credenciais do Painel de Serviços", bg=C["surface"],
+        tk.Label(mode_body, text="Tipo de Operação", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tk.Label(mode_body, text="Selecione o modo de abertura BPM.",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 10))
+
+        mode_row = tk.Frame(mode_body, bg=C["surface"])
+        mode_row.pack(fill="x")
+
+        for val, label, desc in [
+            ("invertido", "BPM Invertido", "Clientes mapeados com dados pré-configurados"),
+            ("nova_plataforma", "BPM Nova Plataforma", "Informe CNPJ, Agência, Conta, Plataforma e Valor manualmente"),
+        ]:
+            rf = tk.Frame(mode_row, bg=C["surface"], pady=4)
+            rf.pack(fill="x")
+            rb = tk.Radiobutton(rf, text=label, variable=self._mode_var, value=val,
+                                bg=C["surface"], fg=C["ink"],
+                                selectcolor=C["surface2"],
+                                activebackground=C["surface"],
+                                activeforeground=C["ink"],
+                                font=("Segoe UI", 9, "bold"),
+                                command=self._on_mode_change,
+                                cursor="hand2")
+            rb.pack(side="left")
+            tk.Label(rf, text=f"  — {desc}", bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 8)).pack(side="left")
+
+        # ── Credenciais ──
+        self._cred_sec = card_frame(self)
+        self._cred_sec.pack(fill="x", padx=32, pady=(16, 0))
+        cred_sec = self._cred_sec
+        tk.Label(cred_sec, text="Credenciais do Painel de Serviços", bg=C["surface"],
                  fg=C["ink"], font=("Segoe UI",10,"bold")).pack(anchor="w", padx=18, pady=(14,0))
-        tk.Label(sec, text="Funcional e senha para login no Painel BPM",
+        tk.Label(cred_sec, text="Funcional e senha para login no Painel BPM",
                  bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI",8)).pack(anchor="w", padx=18, pady=(2,10))
-        make_hairline(sec, bg=C["hair"]).pack(fill="x")
+        make_hairline(cred_sec, bg=C["hair"]).pack(fill="x")
 
-        cred_form = tk.Frame(sec, bg=C["surface"], padx=18, pady=14)
+        cred_form = tk.Frame(cred_sec, bg=C["surface"], padx=18, pady=14)
         cred_form.pack(fill="x")
         cred_form.columnconfigure(0, weight=1)
         cred_form.columnconfigure(1, weight=1)
@@ -2539,8 +2641,41 @@ class BPMConfigFrame(tk.Frame):
         self._ent_func.bind("<KeyPress>", _key_func)
         self._ent_senha.bind("<KeyPress>", _key_senha)
 
-        sec2 = card_frame(body)
-        sec2.pack(fill="x", padx=32, pady=(16,0))
+        # ── Container dinâmico ──
+        self._dynamic_area = tk.Frame(self, bg=C["bg"])
+        self._dynamic_area.pack(fill="both", expand=True)
+
+        # ── Invertido panel ──
+        self._invertido_panel = tk.Frame(self._dynamic_area, bg=C["bg"])
+        self._nova_panel = tk.Frame(self._dynamic_area, bg=C["bg"])
+
+        self._build_invertido_panel()
+        self._build_nova_panel()
+
+        # ── Footer ──
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(10, 0))
+
+        foot = tk.Frame(self, bg=C["bg"])
+        foot.pack(fill="x", padx=32, pady=16)
+        styled_button(foot, "← Voltar",
+                      lambda: self.controller.show_frame("Home")).pack(side="left")
+        self._run_btn = styled_button(foot, "▶  Iniciar BPM",
+                                      self._start_bpm, accent=True)
+        self._run_btn.pack(side="right")
+
+        self._on_mode_change()
+
+    def _on_mode_change(self):
+        self._invertido_panel.pack_forget()
+        self._nova_panel.pack_forget()
+        if self._mode_var.get() == "invertido":
+            self._invertido_panel.pack(fill="both", expand=True, padx=32)
+        else:
+            self._nova_panel.pack(fill="both", expand=True, padx=32)
+
+    def _build_invertido_panel(self):
+        sec2 = card_frame(self._invertido_panel)
+        sec2.pack(fill="x", pady=(0, 0))
         tk.Label(sec2, text="Clientes e Valores", bg=C["surface"],
                  fg=C["ink"], font=("Segoe UI",10,"bold")).pack(anchor="w", padx=18, pady=(14,0))
         tk.Label(sec2, text="Selecione os clientes e informe o valor da operação",
@@ -2553,16 +2688,6 @@ class BPMConfigFrame(tk.Frame):
         self._client_rows = {}
         for cli in self.CLIENTS:
             self._make_client_row(clients_frame, cli)
-
-        make_hairline(body, bg=C["hair"]).pack(fill="x", padx=32, pady=(20,0))
-
-        foot = tk.Frame(body, bg=C["bg"])
-        foot.pack(fill="x", padx=32, pady=16)
-        styled_button(foot, "← Voltar",
-                      lambda: self.controller.show_frame("Home")).pack(side="left")
-        self._run_btn = styled_button(foot, "▶  Iniciar BPM",
-                                      self._start_bpm, accent=True)
-        self._run_btn.pack(side="right")
 
     def _make_client_row(self, parent, cli):
         row = tk.Frame(parent, bg=C["surface"], pady=3)
@@ -2619,6 +2744,96 @@ class BPMConfigFrame(tk.Frame):
         ent.bind("<Control-v>", on_paste)
         self._client_rows[cli] = {"selected": selected, "val_var": val_var, "val_digits": val_digits, "entry": ent}
 
+    def _build_nova_panel(self):
+        sec = card_frame(self._nova_panel)
+        sec.pack(fill="x", pady=(0, 0))
+        tk.Label(sec, text="Dados da Nova Plataforma", bg=C["surface"],
+                 fg=C["ink"], font=("Segoe UI",10,"bold")).pack(anchor="w", padx=18, pady=(14,0))
+        tk.Label(sec, text="Adicione entradas com CNPJ, Agência, Conta, Plataforma e Valor.",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI",8)).pack(anchor="w", padx=18, pady=(2,10))
+        make_hairline(sec, bg=C["hair"]).pack(fill="x")
+
+        self._nova_list_frame = tk.Frame(sec, bg=C["surface"], padx=18, pady=12)
+        self._nova_list_frame.pack(fill="x")
+
+        add_btn_frame = tk.Frame(sec, bg=C["surface"], padx=18, pady=(0, 12))
+        add_btn_frame.pack(fill="x")
+        styled_button(add_btn_frame, "+ Adicionar entrada", self._add_nova_entry,
+                      accent=True, small=True).pack(side="left")
+
+        self._custom_entries = []
+        self._add_nova_entry()
+
+    def _add_nova_entry(self):
+        idx = len(self._custom_entries)
+        entry_data = {
+            "ref": tk.StringVar(value=f"Cliente {idx + 1}"),
+            "cnpj": tk.StringVar(),
+            "ag": tk.StringVar(),
+            "conta": tk.StringVar(),
+            "plataforma": tk.StringVar(),
+            "valor_digits": [""],
+            "valor_var": tk.StringVar(value="R$ 0,00"),
+        }
+        self._custom_entries.append(entry_data)
+
+        item = tk.Frame(self._nova_list_frame, bg=C["surface2"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        item.pack(fill="x", pady=(0, 8))
+
+        head = tk.Frame(item, bg=C["surface2"], padx=12, pady=8)
+        head.pack(fill="x")
+        tk.Label(head, text=f"Entrada {idx + 1}", bg=C["surface2"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(side="left")
+        styled_button(head, "✕", lambda e=entry_data, i=item: self._remove_nova_entry(e, i),
+                      danger=True, small=True).pack(side="right")
+
+        body = tk.Frame(item, bg=C["surface2"], padx=12, pady=10)
+        body.pack(fill="x")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.columnconfigure(2, weight=1)
+
+        fields = [
+            ("Referência", entry_data["ref"], 0, 0),
+            ("CNPJ (somente números)", entry_data["cnpj"], 0, 1),
+            ("Plataforma", entry_data["plataforma"], 1, 0),
+            ("Agência", entry_data["ag"], 1, 1),
+            ("Conta Corrente", entry_data["conta"], 2, 0),
+        ]
+        for label, var, r, c in fields:
+            f = tk.Frame(body, bg=C["surface2"])
+            f.grid(row=r, column=c, sticky="ew", padx=(0 if c == 0 else 6, 0), pady=3)
+            tk.Label(f, text=label, bg=C["surface2"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7)).pack(anchor="w")
+            styled_entry(f, textvariable=var, width=18).pack(fill="x", pady=(2, 0))
+
+        # Valor field
+        vf = tk.Frame(body, bg=C["surface2"])
+        vf.grid(row=2, column=1, sticky="ew", padx=(6, 0), pady=3)
+        tk.Label(vf, text="Valor da Operação", bg=C["surface2"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7)).pack(anchor="w")
+        val_ent = styled_entry(vf, textvariable=entry_data["valor_var"], width=18)
+        val_ent.pack(fill="x", pady=(2, 0))
+
+        def fmt_val(e=entry_data):
+            if not e["valor_digits"][0]: e["valor_var"].set("R$ 0,00"); return
+            d = Decimal(int(e["valor_digits"][0])) / Decimal("100")
+            e["valor_var"].set(_fmt_brl(d))
+
+        def on_key(e_arg, e=entry_data):
+            if e_arg.keysym == "BackSpace": e["valor_digits"][0] = e["valor_digits"][0][:-1]; fmt_val(e); return "break"
+            if e_arg.char and e_arg.char.isdigit(): e["valor_digits"][0] += e_arg.char; fmt_val(e); return "break"
+            if e_arg.keysym in {"Tab","Left","Right","Home","End"}: return
+            return "break"
+
+        val_ent.bind("<KeyPress>", on_key)
+
+    def _remove_nova_entry(self, entry_data, item_frame):
+        if entry_data in self._custom_entries:
+            self._custom_entries.remove(entry_data)
+        item_frame.destroy()
+
     def _start_bpm(self):
         func = self._only_digits(self._func_var.get())
         senha = self._only_digits(self._senha_var.get())
@@ -2627,23 +2842,51 @@ class BPMConfigFrame(tk.Frame):
         if not (1 <= len(senha) <= 6):
             messagebox.showwarning("Senha inválida", "Senha deve ter 1 a 6 dígitos."); return
 
+        mode = self._mode_var.get()
         selection = []
-        for cli in self.CLIENTS:
-            row = self._client_rows[cli]
-            if not row["selected"].get(): continue
-            raw = row["val_var"].get()
-            d = _parse_brl(raw)
-            if d is None or d == Decimal("0.00"):
-                messagebox.showwarning("Valor inválido", f"Informe um valor válido para {cli}."); return
-            selection.append({"cliente": cli, "valor": _fmt_brl_from_raw(raw)})
+
+        if mode == "invertido":
+            for cli in self.CLIENTS:
+                row = self._client_rows[cli]
+                if not row["selected"].get(): continue
+                raw = row["val_var"].get()
+                d = _parse_brl(raw)
+                if d is None or d == Decimal("0.00"):
+                    messagebox.showwarning("Valor inválido", f"Informe um valor válido para {cli}."); return
+                selection.append({"cliente": cli, "valor": _fmt_brl_from_raw(raw), "mode": "invertido"})
+        else:
+            if not self._custom_entries:
+                messagebox.showwarning("Nenhuma entrada", "Adicione ao menos uma entrada para BPM Nova Plataforma."); return
+            for e in self._custom_entries:
+                ref = e["ref"].get().strip()
+                cnpj = self._only_digits(e["cnpj"].get())
+                ag = e["ag"].get().strip()
+                conta = e["conta"].get().strip()
+                plat = e["plataforma"].get().strip()
+                if not cnpj or not ag or not conta or not plat:
+                    messagebox.showwarning("Dados incompletos", f"Preencha CNPJ, Agência, Conta e Plataforma para '{ref or 'entrada'}'."); return
+                raw = e["valor_var"].get()
+                d = _parse_brl(raw)
+                if d is None or d == Decimal("0.00"):
+                    messagebox.showwarning("Valor inválido", f"Informe um valor válido para '{ref or 'entrada'}'."); return
+                selection.append({
+                    "cliente": ref or cnpj,
+                    "valor": _fmt_brl_from_raw(raw),
+                    "mode": "nova_plataforma",
+                    "custom_cnpj": cnpj,
+                    "custom_ag": ag,
+                    "custom_conta": conta,
+                    "custom_plataforma": plat,
+                })
 
         if not selection:
-            messagebox.showwarning("Seleção vazia", "Selecione ao menos um cliente."); return
+            messagebox.showwarning("Seleção vazia", "Selecione ao menos um cliente/entrada."); return
 
         self.controller.bpm_funcional    = func
         self.controller.bpm_password     = senha
         self.controller.bpm_run_selection = selection
         self.controller.show_frame("BPM")
+
 
 class ShareFrame(tk.Frame):
     def __init__(self, parent, controller):
@@ -2855,10 +3098,6 @@ class ShareFrame(tk.Frame):
         self.txt_resumo.delete("1.0","end")
 
 class OperacoesInvertidoFrame(tk.Frame):
-    """Hub de Operações Invertido — escolhe entre análise de planilhas
-    (.xlsx), a consulta de Limites Invertido / LTC e o histórico de
-    operações (em breve)."""
-
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
         self.controller = controller
@@ -2901,7 +3140,6 @@ class OperacoesInvertidoFrame(tk.Frame):
     def on_show(self):
         pass
 
-    # ── Cards de opção ───────────────────────────────────────────────────────
     def _make_option_card(self, parent, col, icon, title, sub, command, color):
         pad = {0: (0, 6), 1: (6, 6), 2: (6, 0)}.get(col, (6, 6))
         outer = tk.Frame(parent, bg=C["surface"],
@@ -2952,14 +3190,12 @@ class OperacoesInvertidoFrame(tk.Frame):
 
         return outer
 
-    # ── Histórico Operações (placeholder) ───────────────────────────────────
     def _open_historico_placeholder(self):
         messagebox.showinfo(
             "Histórico Operações",
             "Histórico Operações estará disponível em breve.",
             parent=self.controller)
 
-    # ── Overlay: Analisar Operações ─────────────────────────────────────────
     def _open_analisar_overlay(self):
         if self._overlay is not None:
             return
@@ -3090,8 +3326,6 @@ class OperacoesInvertidoFrame(tk.Frame):
 
 
 class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
-    """Exibe as operações importadas de uma planilha .xlsx, agrupadas por sacado."""
-
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
         self.controller = controller
@@ -3251,7 +3485,6 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                       lambda k=group["nome_sacado"]: self._open_detalhes(k),
                       accent=True, small=True).pack(side="right")
 
-        cnpj = group.get("doc_sacado") or ""
         self._limit_btns[self._group_limite_key(group)] = lim_btn
 
         return {"outer": outer, "lim_btn": lim_btn, "group": group}
@@ -3514,6 +3747,218 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                 pass
             self._detail_overlay = None
 
+    # ── Alerta de Validação ──────────────────────────────────────────────────
+    def _show_alert_dialog(self, ops, alerts_map):
+        """Janela modal com alertas de validação. O usuário aceita ou rejeita cada nota."""
+        dlg = tk.Toplevel(self.controller)
+        dlg.title("Alertas de Validação")
+        dlg.configure(bg=C["surface"])
+        dlg.geometry("780x620")
+        dlg.resizable(True, True)
+        dlg.grab_set()
+        dlg.transient(self.controller)
+        dlg.attributes("-topmost", True)
+
+        # Impede fechar sem confirmar
+        def _on_close():
+            pass
+        dlg.protocol("WM_DELETE_WINDOW", _on_close)
+
+        # Header
+        hdr = tk.Frame(dlg, bg=C["surface"], padx=24, pady=18)
+        hdr.pack(fill="x")
+
+        hdr_top = tk.Frame(hdr, bg=C["surface"])
+        hdr_top.pack(fill="x")
+
+        tk.Label(hdr_top, text="⚠", bg=C["surface"], fg=C["warn"],
+                 font=("Segoe UI", 18)).pack(side="left")
+        tk.Label(hdr_top, text="Alertas de Validação", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 15, "bold")).pack(side="left", padx=(8, 0))
+
+        alert_count = len(alerts_map)
+        tk.Label(hdr, text=f"Foram encontrados alertas em {alert_count} nota{'s' if alert_count != 1 else ''}. "
+                           f"Revise e decida se deseja manter cada nota.",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
+                 wraplength=700, justify="left").pack(anchor="w", pady=(8, 0))
+
+        # Bulk actions
+        bulk_row = tk.Frame(hdr, bg=C["surface"])
+        bulk_row.pack(anchor="w", pady=(10, 0))
+
+        decisions = {}  # op_index -> "accept" or "reject"
+
+        def _accept_all():
+            for idx in alerts_map:
+                decisions[idx] = "accept"
+            _refresh_all_items()
+
+        def _reject_all():
+            for idx in alerts_map:
+                decisions[idx] = "reject"
+            _refresh_all_items()
+
+        styled_button(bulk_row, "✓ Aceitar Todos", _accept_all,
+                      accent=True, small=True).pack(side="left")
+        styled_button(bulk_row, "✕ Rejeitar Todos", _reject_all,
+                      danger=True, small=True).pack(side="left", padx=(6, 0))
+
+        make_hairline(dlg, bg=C["hair"]).pack(fill="x")
+
+        # Scrollable alert list
+        list_wrap = tk.Frame(dlg, bg=C["surface"])
+        list_wrap.pack(fill="both", expand=True)
+
+        sf = ScrollableFrame(list_wrap, bg=C["surface"])
+        sf.pack(fill="both", expand=True)
+        sf.link_wheel(dlg)
+        alert_list = sf.inner
+        alert_list.configure(bg=C["surface"])
+
+        item_frames = {}
+
+        def _refresh_all_items():
+            for idx in alerts_map:
+                _refresh_item(idx)
+
+        def _refresh_item(idx):
+            frame_data = item_frames.get(idx)
+            if frame_data is None:
+                return
+            card_f = frame_data["card"]
+            accept_btn = frame_data["accept_btn"]
+            reject_btn = frame_data["reject_btn"]
+            status_lbl = frame_data["status_lbl"]
+
+            dec = decisions.get(idx, "accept")
+            if dec == "accept":
+                card_f.configure(highlightbackground=C["ok"])
+                accept_btn.configure(bg=C["ok"], fg=C["bg"],
+                                     activebackground=C["ok"], activeforeground=C["bg"])
+                reject_btn.configure(bg=C["surface3"], fg=C["ink_muted"],
+                                     activebackground=C["surface3"], activeforeground=C["ink"])
+                status_lbl.configure(text="✓ Aceita", fg=C["ok"])
+            else:
+                card_f.configure(highlightbackground=C["err"])
+                accept_btn.configure(bg=C["surface3"], fg=C["ink_muted"],
+                                     activebackground=C["surface3"], activeforeground=C["ink"])
+                reject_btn.configure(bg=C["err"], fg=C["bg"],
+                                     activebackground=C["err"], activeforeground=C["bg"])
+                status_lbl.configure(text="✕ Rejeitada", fg=C["err"])
+
+        for op_idx in sorted(alerts_map.keys()):
+            op = ops[op_idx]
+            op_alerts = alerts_map[op_idx]
+            decisions[op_idx] = "accept"  # Default: accept
+
+            card_f = tk.Frame(alert_list, bg=C["surface2"],
+                              highlightthickness=2, highlightbackground=C["ok"],
+                              padx=0, pady=0)
+            card_f.pack(fill="x", padx=20, pady=(8, 0))
+
+            # Header da nota
+            note_hdr = tk.Frame(card_f, bg=C["surface2"], padx=16, pady=10)
+            note_hdr.pack(fill="x")
+            tk.Label(note_hdr, text=op.get("nome_sacado", "—"), bg=C["surface2"],
+                     fg=C["ink"], font=("Segoe UI", 10, "bold")).pack(side="left")
+
+            status_lbl = tk.Label(note_hdr, text="✓ Aceita", bg=C["surface2"],
+                                  fg=C["ok"], font=("Segoe UI", 8, "bold"))
+            status_lbl.pack(side="right")
+
+            # Detalhes
+            detail = tk.Frame(card_f, bg=C["surface2"], padx=16, pady=(0, 8))
+            detail.pack(fill="x")
+
+            detail_row = tk.Frame(detail, bg=C["surface2"])
+            detail_row.pack(fill="x")
+            for lbl, val in [
+                ("NF", op.get("nf") or "—"),
+                ("Valor", op.get("valor") or "—"),
+                ("Vencimento", op.get("data_vencimento") or "—"),
+                ("Prazo", f"{op.get('prazo', '—')} dias" if op.get("prazo") else "—"),
+            ]:
+                f = tk.Frame(detail_row, bg=C["surface2"])
+                f.pack(side="left", padx=(0, 16))
+                tk.Label(f, text=lbl, bg=C["surface2"], fg=C["ink_faint"],
+                         font=("Segoe UI", 7, "bold")).pack(anchor="w")
+                tk.Label(f, text=val, bg=C["surface2"], fg=C["ink"],
+                         font=("Segoe UI", 9)).pack(anchor="w")
+
+            # Motivos do alerta
+            motives_f = tk.Frame(card_f, bg=C["surface2"], padx=16, pady=(0, 8))
+            motives_f.pack(fill="x")
+            for motive in op_alerts:
+                mf = tk.Frame(motives_f, bg=C["surface2"])
+                mf.pack(fill="x", pady=(1, 0))
+                tk.Label(mf, text="⚠", bg=C["surface2"], fg=C["warn"],
+                         font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
+                tk.Label(mf, text=motive, bg=C["surface2"], fg=C["warn"],
+                         font=("Segoe UI", 8)).pack(side="left")
+
+            # Botões Aceitar/Rejeitar
+            btn_row = tk.Frame(card_f, bg=C["surface2"], padx=16, pady=(0, 12))
+            btn_row.pack(fill="x")
+
+            accept_btn = styled_button(btn_row, "✓ Aceitar",
+                                       lambda idx=op_idx: (decisions.__setitem__(idx, "accept"), _refresh_item(idx)),
+                                       accent=True, small=True)
+            accept_btn.pack(side="left")
+
+            reject_btn = styled_button(btn_row, "✕ Rejeitar",
+                                       lambda idx=op_idx: (decisions.__setitem__(idx, "reject"), _refresh_item(idx)),
+                                       danger=True, small=True)
+            reject_btn.pack(side="left", padx=(6, 0))
+
+            item_frames[op_idx] = {
+                "card": card_f,
+                "accept_btn": accept_btn,
+                "reject_btn": reject_btn,
+                "status_lbl": status_lbl,
+            }
+
+        # Footer
+        make_hairline(dlg, bg=C["hair"]).pack(fill="x")
+        foot = tk.Frame(dlg, bg=C["surface"], padx=24, pady=14)
+        foot.pack(fill="x")
+
+        rejected_summary = tk.Label(foot, text="", bg=C["surface"], fg=C["ink_faint"],
+                                    font=("Segoe UI", 8))
+        rejected_summary.pack(side="left")
+
+        def _confirm():
+            rejected_indices = {idx for idx, dec in decisions.items() if dec == "reject"}
+            # Notas sem alerta são sempre aceitas
+            filtered_ops = [op for i, op in enumerate(ops) if i not in rejected_indices]
+            dlg.destroy()
+            self._render_results(filtered_ops)
+
+        styled_button(foot, "Confirmar Decisões", _confirm,
+                      accent=True).pack(side="right")
+
+        # Atualiza resumo ao vivo
+        def _update_summary(*_):
+            n_rejected = sum(1 for d in decisions.values() if d == "reject")
+            n_accepted = len(decisions) - n_rejected
+            rejected_summary.configure(
+                text=f"{n_accepted} aceita{'s' if n_accepted != 1 else ''} · "
+                     f"{n_rejected} rejeitada{'s' if n_rejected != 1 else ''}")
+
+        # Observer pattern simples: refresh summary on any decision change
+        _orig_setitem = decisions.__setitem__
+        def _patched_setitem(key, value):
+            _orig_setitem(key, value)
+            _update_summary()
+        decisions.__setitem__ = _patched_setitem
+        _update_summary()
+
+        dlg.update_idletasks()
+        sw = dlg.winfo_screenwidth()
+        sh = dlg.winfo_screenheight()
+        w = dlg.winfo_reqwidth()
+        h = dlg.winfo_reqheight()
+        dlg.geometry(f"+{max(0,(sw - w) // 2)}+{max(0,(sh - h) // 2)}")
+
     def _render_results(self, ops):
         self._stop_loading_anim()
         self._loading_outer.pack_forget()
@@ -3559,7 +4004,18 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
     def _worker(self, path):
         try:
             ops = _parse_invertido_xlsx(path)
-            self._ui(lambda: self._render_results(ops))
+            # Validar todas as operações
+            alerts_map = {}
+            for i, op in enumerate(ops):
+                op_alerts = _validate_operation(op)
+                if op_alerts:
+                    alerts_map[i] = op_alerts
+
+            if alerts_map:
+                # Mostrar janela de alertas na thread UI
+                self._ui(lambda: self._show_alert_dialog(ops, alerts_map))
+            else:
+                self._ui(lambda: self._render_results(ops))
         except Exception as e:
             self._ui(lambda m=str(e): self._show_error(f"Erro ao analisar: {m}"))
         finally:
@@ -3809,739 +4265,4 @@ class LimitesInvertidoFrame(tk.Frame, ThreadSafeUIMixin):
                     if idx == -1: continue
                     self._publish_limite(name, state="processing")
                     self._ui(lambda i=idx: self._set_state(i, "processing"))
-                    url = LIMITE_CLIENT_URLS.get(name)
-                    if not url:
-                        self._ui(lambda i=idx: self._set_state(i,"error","URL não mapeada")); continue
-                    try:
-                        # ── PATCH 2: espera inteligente de carregamento ──────────
-                        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                        if self._cancel_requested: break
-
-                        # Espera networkidle (max 30s) — sem sleep fixo
-                        try:
-                            page.wait_for_load_state("networkidle", timeout=30_000)
-                        except Exception:
-                            pass
-
-                        # Polling JS: aguarda spinners/loaders sumirem (max 25s)
-                        _deadline = time.time() + 25
-                        while time.time() < _deadline:
-                            if self._cancel_requested:
-                                break
-                            try:
-                                _loading = page.evaluate(
-                                    "(function(){"
-                                    "var sels=['.loading','.spinner','[class*=\"loading\"]',"
-                                    "'[class*=\"spinner\"]','.u-loading',"
-                                    "'[aria-busy=\"true\"]','.itau-spinner'];"
-                                    "for(var i=0;i<sels.length;i++){"
-                                    "var els=document.querySelectorAll(sels[i]);"
-                                    "for(var j=0;j<els.length;j++){"
-                                    "var s=window.getComputedStyle(els[j]);"
-                                    "if(s.display!=='none'&&s.visibility!=='hidden'"
-                                    "&&s.opacity!=='0') return true;}}"
-                                    "return false;})()"
-                                )
-                                if not _loading:
-                                    break
-                            except Exception:
-                                break
-                            time.sleep(0.5)
-
-                        # Pausa mínima de segurança para renderização final
-                        time.sleep(2)
-                        if self._cancel_requested: break
-
-                        # ler LTC — 3 tentativas com pausa entre elas
-                        ltc_str = None
-                        for _ltc_try in range(3):
-                            try:
-                                all_spans = page.locator("span.u-font-size--14.u-ml--8.u-mt--8.u-block")
-                                for si in range(all_spans.count()):
-                                    txt = (all_spans.nth(si).inner_text() or "").strip()
-                                    if RE_DATE.match(txt):
-                                        ltc_str = txt
-                                        break
-                            except Exception:
-                                pass
-                            if not ltc_str:
-                                try:
-                                    body_text = page.locator("body").inner_text()
-                                    m = RE_DATE.search(body_text)
-                                    if m:
-                                        ltc_str = m.group(0)
-                                except Exception:
-                                    pass
-                            if ltc_str:
-                                break
-                            time.sleep(2)
-                        # ────────────────────────────────────────────────────────
-
-                        try:
-                            ltc_date = datetime.strptime(ltc_str,"%d/%m/%Y").date() if ltc_str else None
-                        except: ltc_date = None
-
-                        if ltc_date is None:
-                            inf = "Não foi possível ler\ndata do LTC"
-                            self._publish_limite(name, ltc_str=ltc_str, state="error", info=inf)
-                            self._ui(lambda i=idx,inf=inf: self._set_state(i,"error",inf))
-                            for mn in LIMITE_SHARED_RESULTS.get(name,[]):
-                                mi = self._find_idx(mn)
-                                if mi!=-1: self._ui(lambda i=mi,inf=inf: self._set_state(i,"error",inf))
-                            continue
-
-                        if ltc_date <= today:
-                            inf = f"LTC vencido em {ltc_str}"
-                            self._publish_limite(name, ltc_str=ltc_str, ltc_date=ltc_date,
-                                                 state="ltc_expired", info=inf)
-                            self._ui(lambda i=idx,inf=inf: self._set_state(i,"ltc_expired",inf))
-                            for mn in LIMITE_SHARED_RESULTS.get(name,[]):
-                                mi = self._find_idx(mn)
-                                if mi!=-1: self._ui(lambda i=mi,inf=inf: self._set_state(i,"ltc_expired",inf))
-                            continue
-
-                        # ler limite
-                        limite_disp = None
-                        BAIXO = 1_000_000
-                        try:
-                            val_js = page.evaluate("""
-                                (function(){
-                                    var rows=document.querySelectorAll('table.atual tbody tr');
-                                    for(var i=0;i<rows.length;i++){
-                                        var n=rows[i].querySelector('td.tdNomeFinalidade');
-                                        if(!n||String(n.textContent).trim().toLowerCase()!=='fornecedor') continue;
-                                        var d=rows[i].querySelector('td[id^="valorDisponibilidade_"]');
-                                        if(!d) continue;
-                                        return String(d.textContent).trim();
-                                    }
-                                    return null;
-                                })()
-                            """)
-                            if val_js:
-                                s = val_js.replace(".","").replace(",","")
-                                try: limite_disp = int(s)
-                                except: pass
-                            if limite_disp is None:
-                                tds = page.locator("td.tdValorDisp")
-                                for ti in range(tds.count()):
-                                    s = re.sub(r"[^\d]","", tds.nth(ti).inner_text() or "")
-                                    try:
-                                        v = int(s)
-                                        if limite_disp is None or v > limite_disp: limite_disp = v
-                                    except: pass
-                        except: pass
-
-                        disp_fmt = f"R$ {limite_disp:,}".replace(",",".") if limite_disp is not None else "N/D"
-                        inf = f"LTC ativo · vence {ltc_str}\nLimite Disp. (fornecedor): {disp_fmt}"
-                        warn = limite_disp is not None and limite_disp < BAIXO
-                        final_state = "warn" if warn else "ok"
-                        if warn: inf += f"\n⚠ Limite abaixo de R$ {BAIXO:,}".replace(",",".")
-
-                        self._publish_limite(name, ltc_str=ltc_str, ltc_date=ltc_date,
-                                             limite_disp=limite_disp, state=final_state, info=inf)
-                        self._ui(lambda i=idx,s=final_state,inf=inf: self._set_state(i,s,inf))
-                        for mn in LIMITE_SHARED_RESULTS.get(name,[]):
-                            mi = self._find_idx(mn)
-                            if mi!=-1:
-                                minf = inf + f"\n(via {name})"
-                                self._ui(lambda i=mi,s=final_state,inf=minf: self._set_state(i,s,inf))
-
-                    except BPMUserCancelled: break
-                    except Exception as e:
-                        if self._cancel_requested: break
-                        es = str(e)[:80]
-                        self._publish_limite(name, state="error", info=es)
-                        self._ui(lambda i=idx,es=es: self._set_state(i,"error",es))
-
-            except Exception as e:
-                if not self._cancel_requested:
-                    em = str(e)
-                    self._ui(lambda: messagebox.showerror("Erro na consulta",em))
-            finally:
-                self._browser = None
-                if browser:
-                    try: browser.close()
-                    except: pass
-                self._worker_running = False
-
-
-class BPMFrame(tk.Frame, ThreadSafeUIMixin):
-    def __init__(self, parent, controller):
-        super().__init__(parent, bg=C["bg"])
-        self.controller = controller
-        self._cards   = []
-        self._selected= []
-        self._worker_running   = False
-        self._cancel_requested = False
-        self._browser = None
-        self._started = False
-        self._init_ui_queue()
-        self._build()
-
-    def _build(self):
-        hdr = tk.Frame(self, bg=C["bg"])
-        hdr.pack(fill="x", padx=32, pady=(24,0))
-        tk.Label(hdr, text="BPM — Operações em andamento", bg=C["bg"], fg=C["ink"],
-                 font=("Georgia",18,"bold")).pack(side="left")
-        self._cancel_btn = styled_button(hdr, "✕  Cancelar",
-                                         self._on_cancel, danger=True)
-        self._cancel_btn.pack(side="right")
-        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14,0))
-
-        self._sf = ScrollableFrame(self, bg=C["bg"])
-        self._sf.pack(fill="both", expand=True)
-        self._sf.link_wheel(self)
-        self._grid_wrap = self._sf.inner
-        self._grid_wrap.configure(bg=C["bg"])
-
-        self._grid = tk.Frame(self._grid_wrap, bg=C["bg"])
-        self._grid.pack(padx=32, pady=(16,8), fill="x")
-        for c in range(3):
-            self._grid.columnconfigure(c, weight=1, uniform="bcards")
-
-        make_hairline(self._grid_wrap, bg=C["hair"]).pack(fill="x", padx=32, pady=(8,0))
-        log_hdr = tk.Frame(self._grid_wrap, bg=C["bg"])
-        log_hdr.pack(fill="x", padx=32, pady=(10,4))
-        tk.Label(log_hdr, text="Log de execução", bg=C["bg"], fg=C["ink_muted"],
-                 font=("Segoe UI",8,"bold")).pack(side="left")
-        styled_button(log_hdr, "Limpar log",
-                      self._clear_log, small=True).pack(side="right")
-
-        log_frame = tk.Frame(self._grid_wrap, bg=C["bg"])
-        log_frame.pack(fill="x", padx=32, pady=(0,24))
-        log_frame.columnconfigure(0, weight=1)
-        self._log = tk.Text(log_frame, height=10, wrap="word", bd=0, relief="flat",
-                            bg=C["surface"], fg=C["log_step"],
-                            font=("Consolas",8), padx=10, pady=8,
-                            state="disabled")
-        self._log.grid(row=0, column=0, sticky="ew")
-        lsb = MinimalScrollbar(log_frame, command=self._log.yview, bg=C["bg"])
-        lsb.grid(row=0, column=1, sticky="ns")
-        self._log.configure(yscrollcommand=lsb.set)
-        bind_text_mousewheel(self._log)
-        self._log.tag_configure("step",    foreground=C["log_step"])
-        self._log.tag_configure("heading", foreground=C["ink"])
-        self._log.tag_configure("ok",      foreground=C["log_ok"])
-        self._log.tag_configure("warn",    foreground=C["log_warn"])
-        self._log.tag_configure("err",     foreground=C["log_err"])
-
-    def _log_line(self, msg, tag="step"):
-        def _do():
-            self._log.configure(state="normal")
-            self._log.insert("end", f"{datetime.now().strftime('%H:%M:%S')}  {msg}\n", tag)
-            self._log.see("end")
-            self._log.configure(state="disabled")
-        self._ui(_do)
-
-    def _clear_log(self):
-        self._log.configure(state="normal")
-        self._log.delete("1.0","end")
-        self._log.configure(state="disabled")
-
-    def on_show(self):
-        self._sf.refresh_bindings()
-        sel = getattr(self.controller,"bpm_run_selection",None) or []
-        if not sel: return
-        self._cancel_requested = False
-        if self._started: return
-        self._started = True
-        self._selected = sel
-        self._setup_cards()
-        self._start_worker()
-
-    def _on_cancel(self):
-        self._cancel_requested = True
-        self.controller.bpm_run_selection = []
-        br = getattr(self,"_browser",None)
-        if br:
-            try: br.close()
-            except: pass
-        self._reset()
-        self._started = False
-        self.controller.show_frame("BPM_CONFIG")
-
-    def _reset(self):
-        self._cards = []
-        for w in self._grid.winfo_children(): w.destroy()
-
-    def _setup_cards(self):
-        self._reset()
-        for idx, item in enumerate(self._selected):
-            cli = item.get("cliente","")
-            raw = (item.get("valor","")).strip()
-            display = raw[2:].strip() if raw.lower().startswith("r$") else raw
-            row, col = divmod(idx,3)
-            c = self._make_card(cli, display, row, col)
-            self._cards.append(c)
-        for i in range(1, len(self._cards)):
-            self.after(60*i, lambda i=i: self._set_card_state(i,"waiting",show=True))
-        if self._cards:
-            self.after(0, lambda: self._set_card_state(0,"processing",show=True))
-
-    def _make_card(self, name, val_display, row, col):
-        bg = C["surface"]; bord = C["hair"]
-        outer = tk.Frame(self._grid, bg=C["bg"])
-        outer.grid(row=row, column=col, sticky="nsew", padx=5, pady=5)
-        outer.grid_remove()
-        card = tk.Frame(outer, bg=bg, highlightthickness=1, highlightbackground=bord)
-        card.pack(fill="both", expand=True)
-        top_bar = tk.Frame(card, bg=bord, height=2)
-        top_bar.pack(fill="x")
-        body = tk.Frame(card, bg=bg, padx=14, pady=12)
-        body.pack(fill="both", expand=True)
-        icon_lbl = tk.Label(body, text="–", bg=bg, fg=C["ink_faint"],
-                            font=("Segoe UI",14,"bold"))
-        icon_lbl.pack()
-        tk.Label(body, text=name, bg=bg, fg=C["ink"],
-                 font=("Segoe UI",10,"bold")).pack(pady=(6,0))
-        tk.Label(body, text=f"R$ {val_display}", bg=bg, fg=C["ink_muted"],
-                 font=("Segoe UI",8)).pack(pady=(2,0))
-        status_lbl = tk.Label(body, text="EM ESPERA", bg=bg, fg=C["ink_faint"],
-                              font=("Segoe UI",7,"bold"))
-        status_lbl.pack(pady=(8,0))
-        angle = [0]; spin_id = [None]
-        def tick():
-            angle[0]=(angle[0]+90)%360
-            status_lbl.configure(text=["◐","◓","◑","◒"][angle[0]//90])
-            spin_id[0] = outer.after(180, tick) if spin_id[0] else None
-        return {"outer":outer,"card":card,"top_bar":top_bar,"body":body,
-                "icon_lbl":icon_lbl,"status_lbl":status_lbl,
-                "spin_id":spin_id,"angle":angle,"tick":tick,"state":"init"}
-
-    def _set_card_state(self, idx, state, show=False):
-        if idx >= len(self._cards): return
-        c = self._cards[idx]
-        if c["spin_id"][0]:
-            try: c["outer"].after_cancel(c["spin_id"][0])
-            except: pass
-            c["spin_id"][0] = None
-        c["state"] = state
-
-        cfg = {
-            "waiting":    (C["surface"],  C["hair"],  "–",  C["ink_faint"], "EM ESPERA",  C["ink_faint"]),
-            "processing": (C["surface"],  C["ok"],    "…",  C["ok"],        "EXECUTANDO", C["ok"]),
-            "done":       (C["surface"],  C["ok"],    "✓",  C["ok"],        "CONCLUÍDO",  C["ok"]),
-            "error":      (C["surface"],  C["err"],   "✗",  C["err"],       "ERRO",       C["err"]),
-        }.get(state, (C["surface"], C["hair"], "–", C["ink_faint"], state, C["ink_faint"]))
-
-        bg,bord,ic,ic_fg,st,st_fg = cfg
-        c["card"].configure(bg=bg, highlightbackground=bord)
-        c["top_bar"].configure(bg=bord)
-        c["body"].configure(bg=bg)
-        c["icon_lbl"].configure(bg=bg, text=ic, fg=ic_fg)
-        c["status_lbl"].configure(bg=bg, text=st, fg=st_fg)
-        for w in c["body"].winfo_children():
-            try: w.configure(bg=bg)
-            except: pass
-        if show: c["outer"].grid()
-        if state=="processing":
-            c["spin_id"][0] = True
-            c["tick"]()
-
-    def _update_card_status(self, idx, text):
-        if idx >= len(self._cards): return
-        self._cards[idx]["status_lbl"].configure(text=text)
-
-    def _start_worker(self):
-        if self._worker_running: return
-        self._worker_running = True
-        threading.Thread(target=self._worker, daemon=True).start()
-
-    def _worker(self):
-        if not PLAYWRIGHT_OK:
-            self._ui(lambda: messagebox.showerror("Erro","Playwright não disponível."))
-            self._worker_running = False; return
-
-        funcional = (getattr(self.controller,"bpm_funcional","") or "").strip()
-        senha     = (getattr(self.controller,"bpm_password","") or "").strip()
-        if not funcional or not senha:
-            self._ui(lambda: messagebox.showerror("BPM","Credenciais não informadas."))
-            self._worker_running = False; return
-
-        PAINEL = "https://painelservicos.cloud.ihf/AplicAutSolicitacoesMiddle"
-        PACE   = 0.85
-
-        def pace(a=1.15, b=1.75):
-            time.sleep(random.uniform(a*PACE, b*PACE))
-
-        def pick_browser(p):
-            for ch in ("chrome","msedge"):
-                try: return p.chromium.launch(channel=ch, headless=False)
-                except: pass
-            return p.chromium.launch(headless=False)
-
-        def wait_enabled(loc, timeout_ms=120_000):
-            end = time.time() + timeout_ms/1000
-            loc.wait_for(state="visible", timeout=timeout_ms)
-            while time.time() < end:
-                if self._cancel_requested: raise BPMUserCancelled()
-                try:
-                    if not loc.is_disabled(): return
-                except: pass
-                time.sleep(0.2)
-            raise TimeoutError("Timeout aguardando campo habilitar.")
-
-        def _to_dec(s):
-            s = re.sub(r"[^\d,.\-]","",s or "")
-            if not s: return None
-            ld,lc = s.rfind("."),s.rfind(",")
-            si = max(ld,lc)
-            try:
-                if si==-1: d=Decimal(re.sub(r"[^\d\-]","",s))
-                else:
-                    ip=re.sub(r"[^\d\-]","",s[:si]); dp=re.sub(r"[^\d]","",s[si+1:])
-                    if not dp: return None
-                    d=Decimal((ip if ip not in {"","-"} else "0")+"."+dp)
-            except: return None
-            return d.quantize(Decimal("0.01"),rounding=ROUND_HALF_UP)
-
-        def fill_currency(ctx, loc, amount, timeout_ms=120_000):
-            wait_enabled(loc, timeout_ms)
-            loc.scroll_into_view_if_needed(); loc.click()
-            pace(0.18,0.35); loc.press("Control+A"); loc.press("Backspace")
-            pace(0.12,0.25); loc.press("Delete"); pace(0.15,0.30)
-            digits = re.sub(r"\D","",amount or "")
-            if not digits: raise RuntimeError(f"Valor inválido: {amount}")
-            for ch in digits:
-                loc.type(ch, delay=random.randint(int(85*PACE),int(150*PACE)))
-            loc.press("Tab"); pace(0.45,0.85)
-            exp = _to_dec(amount); got = _to_dec(loc.input_value())
-            if exp is None or got is None or got != exp:
-                raise RuntimeError(f"Valor mascarado divergente. Esperado {amount}, obtido '{loc.input_value()}'.")
-
-        def resolve_frame(timeout_ms=120_000):
-            deadline = time.time()+timeout_ms/1000
-            while time.time()<deadline:
-                if self._cancel_requested: raise BPMUserCancelled()
-                for frame in list(page.frames):
-                    try:
-                        if frame.is_detached(): continue
-                        if frame.locator("#nova-solicitacao").count()>0: return frame
-                    except: pass
-                time.sleep(0.35*PACE)
-            raise TimeoutError("Timeout: #nova-solicitacao não encontrado.")
-
-        def wait_continuar(ctx, timeout_ms=120_000):
-            deadline = time.time()+timeout_ms/1000
-            while time.time()<deadline:
-                if self._cancel_requested: raise BPMUserCancelled()
-                ok = ctx.evaluate("""(function(){
-                    var el=document.querySelector('#continuar');
-                    if(!el||el.disabled) return false;
-                    var s=window.getComputedStyle(el);
-                    if(s.display==='none'||s.visibility==='hidden') return false;
-                    return true;
-                })()""")
-                if ok: return
-                time.sleep(0.25)
-            raise TimeoutError("Timeout: #continuar não ficou clicável.")
-
-        def click_continuar(ctx, timeout_ms=120_000):
-            loc = ctx.locator('input#continuar[type="submit"]').first
-            for action in [
-                lambda: loc.click(timeout=12_000),
-                lambda: loc.click(force=True, timeout=12_000),
-                lambda: ctx.evaluate("document.querySelector('#continuar').click()"),
-            ]:
-                try: action(); return
-                except: pass
-            raise RuntimeError("Falha ao clicar #continuar.")
-
-        def wait_nova(ctx, timeout_ms=120_000):
-            deadline = time.time()+timeout_ms/1000
-            while time.time()<deadline:
-                if self._cancel_requested: raise BPMUserCancelled()
-                ok = ctx.evaluate("""(function(){
-                    var el=document.querySelector('#nova-solicitacao');
-                    if(!el||el.disabled) return false;
-                    var s=window.getComputedStyle(el);
-                    return !(s.display==='none'||s.visibility==='hidden');
-                })()""")
-                if ok: return
-                time.sleep(0.4)
-            raise TimeoutError("Timeout: #nova-solicitacao.")
-
-        def click_nova(ctx, timeout_ms=120_000):
-            wait_nova(ctx, timeout_ms)
-            def done():
-                try: ctx.locator("#tipooper").wait_for(state="visible",timeout=5_000); return True
-                except: return False
-            for action in [
-                lambda: ctx.locator("#nova-solicitacao").first.click(timeout=8_000),
-                lambda: ctx.evaluate("document.querySelector('#nova-solicitacao').click()"),
-                lambda: ctx.locator("#nova-solicitacao").first.click(force=True,timeout=8_000),
-            ]:
-                try: action()
-                except: pass
-                for _ in range(12):
-                    if done(): return
-                    time.sleep(0.5)
-            raise RuntimeError("Falha ao clicar #nova-solicitacao.")
-
-        def ensure_painel():
-            if self._cancel_requested: raise BPMUserCancelled()
-            page.goto(PAINEL, wait_until="domcontentloaded")
-            if "/Home" in page.url: page.goto(PAINEL, wait_until="domcontentloaded")
-            if page.locator("#username").count()>0 or "login.itau/oauth" in page.url:
-                page.locator("#username").fill(funcional)
-                page.locator("#password").fill(senha)
-                page.locator("#btLogin").click()
-                page.wait_for_load_state("domcontentloaded")
-                page.goto(PAINEL, wait_until="domcontentloaded")
-            ctx = resolve_frame(timeout_ms=120_000)
-            wait_nova(ctx, timeout_ms=120_000)
-            return ctx
-
-        STEP = 15_000
-        with sync_playwright() as p:
-            browser = pick_browser(p)
-            self._browser = browser
-            page = browser.new_page()
-            page.set_default_timeout(120_000)
-            try:
-                for idx, item in enumerate(self._selected):
-                    if self._cancel_requested: raise BPMUserCancelled()
-                    client_name = item.get("cliente","")
-                    raw_amount  = item.get("valor","")
-                    info = BPM_CLIENT_DATA.get(client_name)
-                    if not info:
-                        self._log_line(f"[{client_name}] Sem mapeamento interno.", "err"); continue
-                    amount_web = _fmt_brl_plain_web(raw_amount)
-                    if not amount_web:
-                        self._log_line(f"[{client_name}] Valor inválido: {raw_amount}", "err"); continue
-
-                    self._log_line(f"━━ {client_name} ━━", "heading")
-                    tentativa = 0
-                    while True:
-                        if self._cancel_requested: raise BPMUserCancelled()
-                        tentativa += 1
-                        try:
-                            ctx = ensure_painel()
-                            self._log_line(f"  Painel pronto.", "step")
-                            click_nova(ctx)
-                            pace()
-                            self._log_line("  Nova solicitação aberta.", "step")
-
-                            ctx.locator("#tipooper").wait_for(state="visible",timeout=STEP)
-                            ctx.locator("#tipooper").select_option(value="AT")
-                            pace()
-                            ctx.locator("#CPNJ").fill(info["CNPJ"]); pace()
-                            ctx.locator('input[name="agenciafiltro"]').fill(info["AG"]); pace()
-                            ctx.locator('input[name="contadacfiltro"]').fill(info["CONTA"]); pace()
-                            self._log_line("  Dados do cliente preenchidos.", "step")
-
-                            loc_proc = ctx.locator("#processar-nova")
-                            wait_enabled(loc_proc, STEP); loc_proc.click(); pace()
-
-                            loc_plat = ctx.locator('input[name="plataforma"]')
-                            wait_enabled(loc_plat,STEP); loc_plat.fill(info["PLATAFORMA"]); pace()
-
-                            loc_fn = ctx.locator("#funcionalac")
-                            wait_enabled(loc_fn,STEP); loc_fn.fill(funcional)
-                            loc_fn.press("Tab")
-                            try: loc_fn.evaluate("el=>{el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.blur();}")
-                            except: pass
-                            time.sleep(0.35*PACE)
-                            wait_continuar(ctx,STEP); click_continuar(ctx,STEP); pace()
-                            self._log_line("  Filtro AplicAut preenchido.", "step")
-
-                            ctx.locator('select[name="produto"]').wait_for(state="visible",timeout=STEP)
-                            ctx.locator('select[name="produto"]').select_option(value="34"); pace()
-                            ctx.locator('select[name="tpOperacao"]').wait_for(state="visible",timeout=STEP)
-                            ctx.locator('select[name="tpOperacao"]').select_option(value="1"); pace()
-
-                            loc_buscar = ctx.locator('input[type="submit"][data-ng-click="BuscarListaPN()"]')
-                            if loc_buscar.count()==0: loc_buscar=ctx.locator('input[type="submit"][value="Processar"]')
-                            wait_enabled(loc_buscar,STEP); loc_buscar.click(); pace()
-
-                            checkbox = ctx.locator('input[type="checkbox"]')
-                            checkbox.first.wait_for(state="visible",timeout=STEP)
-                            checkbox.first.click(); pace()
-
-                            loc_val = ctx.locator('input[name="ValordaOperacao0"]')
-                            self._log_line(f"  Preenchendo valor {raw_amount}…", "step")
-                            fill_currency(ctx, loc_val, amount_web, STEP); pace()
-                            self._log_line("  Valor preenchido.", "step")
-
-                            loc_final = ctx.locator('input[type="submit"][ng-click="vm.finalizarSol()"]')
-                            if loc_final.count()==0: loc_final=ctx.locator('input[type="submit"][value="Continuar"]')
-                            wait_enabled(loc_final,STEP); loc_final.click(); pace()
-
-                            loc_inc = ctx.locator('input[type="submit"][value="Incluir"]')
-                            if loc_inc.count()==0: loc_inc=ctx.locator('input[type="submit"][ng-click="vm.IncluirConta()"]')
-                            wait_enabled(loc_inc,STEP); loc_inc.click(); pace(1.4,2.1)
-
-                            def try_grey():
-                                loc_g=ctx.locator('input[type="button"].grey[ng-click="vm.continuar()"]')
-                                if loc_g.count()==0: return False
-                                wait_enabled(loc_g.first,STEP); loc_g.first.click(); return True
-
-                            try_grey(); pace()
-                            try: try_grey()
-                            except: pass
-
-                            loc_v = ctx.locator('input[type="button"].grey[ng-click="vm.voltarAplicAut()"]')
-                            if loc_v.count()==0: loc_v=ctx.locator('input.grey[ng-click="vm.voltarAplicAut()"]')
-                            if loc_v.count()>0:
-                                wait_enabled(loc_v.first,max(STEP,25_000)); loc_v.first.click()
-
-                            ctx_after = resolve_frame(120_000)
-                            wait_nova(ctx_after,120_000)
-                            self._log_line(f"  {client_name} → CONCLUÍDO ✓", "ok")
-                            self._ui(lambda i=idx: self._set_card_state(i,"done",show=True))
-                            break
-
-                        except BPMUserCancelled: raise
-                        except Exception as e:
-                            self._log_line(f"  Tentativa {tentativa} falhou: {e}", "warn")
-                            if tentativa >= 20:
-                                self._log_line(f"  {client_name} → FALHA PERMANENTE ✗", "err")
-                                self._ui(lambda i=idx: self._set_card_state(i,"error",show=True))
-                                raise RuntimeError(f"Falha recorrente {client_name}: {e}") from e
-                            try: page.goto(PAINEL, wait_until="domcontentloaded")
-                            except: pass
-
-            except BPMUserCancelled: self._log_line("Operações canceladas pelo usuário.", "warn")
-            except Exception as e:
-                if not self._cancel_requested:
-                    em = str(e)
-                    self._log_line(f"ERRO GERAL: {em}", "err")
-                    self._ui(lambda: messagebox.showerror("Erro na rotina", em))
-            finally:
-                self._browser = None
-                try: browser.close()
-                except: pass
-                self._worker_running = False
-                self._started = False
-
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Mesa Itaú — Risco Sacado")
-        self.geometry("1060x720")
-        self.minsize(860, 580)
-        self.configure(bg=C["bg"])
-        self._setup_ttk_styles()
-        ico_path = _ensure_ico_path()
-        if ico_path:
-            try:
-                self.iconbitmap(default=ico_path)
-            except Exception:
-                pass
-        self.overrideredirect(True)
-        self.bpm_run_selection = []
-        self.bpm_funcional     = ""
-        self.invertido_limites_cache = {}
-        self._limites_listeners = []
-        self.bpm_password      = ""
-        self.rotina_em_execucao= None
-        self._active_frame     = "Home"
-
-        self._shell = tk.Frame(self, bg=C["bg"])
-        self._shell.pack(fill="both", expand=True)
-
-        self._titlebar = AppTitleBar(self._shell, self)
-        self._titlebar.pack(side="top", fill="x")
-
-        self._main = tk.Frame(self._shell, bg=C["bg"])
-        self._main.pack(fill="both", expand=True)
-
-        self._sidebar = Sidebar(self._main, self)
-        self._sidebar.pack(side="left", fill="y")
-
-        make_hairline(self._main, orient="v", bg=C["hair"]).pack(side="left", fill="y")
-
-        self._content = tk.Frame(self._main, bg=C["bg"])
-        self._content.pack(side="left", fill="both", expand=True)
-        self._content.rowconfigure(0, weight=1)
-        self._content.columnconfigure(0, weight=1)
-
-        self.frames = {}
-        for Cls, name in [
-            (HomeFrame,              "Home"),
-            (RotinasFrame,           "Rotinas"),
-            (ShareFrame,             "Share"),
-            (BPMConfigFrame,         "BPM_CONFIG"),
-            (BPMFrame,               "BPM"),
-            (OperacoesInvertidoFrame,"OperacoesInvertido"),
-            (AnalisarOperacoesFrame, "AnalisarOperacoes"),
-            (LimitesInvertidoFrame,  "LimitesInvertido"),
-        ]:
-            f = Cls(self._content, self)
-            self.frames[name] = f
-            f.grid(row=0, column=0, sticky="nsew")
-
-        self._statusbar = AppStatusBar(self._shell, self)
-        self._statusbar.pack(side="bottom", fill="x")
-
-        self.show_frame("Home")
-        self.after(120, self._apply_window_chrome)
-
-    def _apply_window_chrome(self):
-        apply_modern_window_chrome(self)
-        apply_frameless_resize(self)
-        apply_windows_shell(self)
-
-    def _setup_ttk_styles(self):
-        s = ttk.Style(self)
-        try: s.theme_use("clam")
-        except: pass
-        s.configure("TCombobox",
-                    fieldbackground=C["bg"], background=C["surface"],
-                    foreground=C["ink"], selectbackground=C["surface2"],
-                    selectforeground=C["ink"], borderwidth=1,
-                    lightcolor=C["hair"], darkcolor=C["hair"])
-        s.map("TCombobox", fieldbackground=[("readonly",C["bg"])],
-              selectbackground=[("!focus",C["surface2"])])
-
-    def _refresh_frame_scroll(self, frame):
-        if isinstance(frame, ScrollableFrame):
-            frame.refresh_bindings()
-        for child in frame.winfo_children():
-            self._refresh_frame_scroll(child)
-
-    def register_limites_listener(self, fn):
-        if fn not in self._limites_listeners:
-            self._limites_listeners.append(fn)
-
-    def unregister_limites_listener(self, fn):
-        try:
-            self._limites_listeners.remove(fn)
-        except ValueError:
-            pass
-
-    def publish_limite_result(self, cnpj_digits, data):
-        self.invertido_limites_cache[cnpj_digits] = data
-        for fn in list(self._limites_listeners):
-            try:
-                fn(cnpj_digits)
-            except Exception:
-                pass
-
-    def show_frame(self, name):
-        if name == "BPM" and not getattr(self,"bpm_run_selection",[]):
-            name = "BPM_CONFIG"
-        f = self.frames.get(name)
-        if f is None: return
-        self._active_frame = name
-        sidebar_name = name
-        if name in ("BPM", "BPM_CONFIG"):
-            sidebar_name = "BPM"
-        elif name in ("OperacoesInvertido", "LimitesInvertido", "AnalisarOperacoes"):
-            sidebar_name = "OperacoesInvertido"
-        self._sidebar.set_active(sidebar_name)
-        self._titlebar.set_module(name)
-        self._statusbar.set_module(name)
-        f.tkraise()
-        self._refresh_frame_scroll(f)
-        if hasattr(f,"on_show"):
-            try: f.on_show()
-            except: pass
-
-if __name__ == "__main__":
-    if sys.platform == "win32":
-        try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
-        except Exception:
-            pass
-    App().mainloop()
+                    url = LIMITE_CLIENT_URLS
