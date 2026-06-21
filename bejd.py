@@ -219,6 +219,7 @@ def _parse_invertido_xlsx(path: str) -> list:
                 return row[idx]
 
             rows.append({
+                "uid":         len(rows),
                 "doc_sacado":  only_digits(str(_cell("doc_sacado") or "")),
                 "nome_sacado": nome,
                 "nf":          str(_cell("nf") or "").strip(),
@@ -501,6 +502,35 @@ def app_base_dir():
 
 def resource_path(p):
     return os.path.join(getattr(sys,"_MEIPASS",app_base_dir()), p)
+
+def to_universal_unc_path(path: str) -> str:
+    """Converte um caminho com letra de unidade mapeada (ex.: Z:\\pasta\\arquivo)
+    no caminho UNC universal (\\\\servidor\\compartilhamento\\pasta\\arquivo),
+    que funciona igual para qualquer pessoa, independente de qual letra cada
+    um mapeou para aquele mesmo local de rede. Se o caminho já for UNC, ou se
+    não for possível resolver (drive local, sem rede), retorna o caminho
+    original (absoluto) sem alterações.
+    """
+    if not path:
+        return path
+    path = os.path.abspath(path)
+    if path.startswith("\\\\") or path.startswith("//"):
+        return path
+    try:
+        buf_len = ctypes.c_ulong(1024)
+        buf = ctypes.create_unicode_buffer(buf_len.value)
+        # UNIVERSAL_NAME_INFO_LEVEL = 1
+        ret = ctypes.windll.mpr.WNetGetUniversalNameW(
+            ctypes.c_wchar_p(path), 1, ctypes.byref(buf), ctypes.byref(buf_len))
+        if ret == 0:
+            # struct UNIVERSAL_NAME_INFO { LPWSTR lpUniversalName; }
+            ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_wchar_p))
+            universal = ptr.contents.value
+            if universal:
+                return universal
+    except Exception:
+        pass
+    return path
 
 def only_digits(s):
     return re.sub(r"\D","",s or "")
@@ -3093,6 +3123,14 @@ class OperacoesInvertidoFrame(tk.Frame):
 
         make_hairline(self, bg=C["hair"]).pack(fill="x", pady=(20, 0))
 
+        debug_row = tk.Frame(self, bg=C["bg"])
+        debug_row.pack(fill="x", padx=44, pady=(14, 0))
+        styled_button(
+            debug_row, "🔧 Converter caminho de rede (temporário)",
+            self._open_unc_path_tool, small=True).pack(anchor="w")
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", pady=(14, 0))
+
         body = tk.Frame(self, bg=C["bg"])
         body.pack(fill="both", expand=True, padx=44, pady=(32, 0))
         for c in range(3):
@@ -3208,6 +3246,85 @@ class OperacoesInvertidoFrame(tk.Frame):
             "Histórico Operações",
             "Histórico Operações estará disponível em breve.",
             parent=self.controller)
+
+    # ── Ferramenta temporária: conversão de caminho de rede p/ UNC ──────────
+    def _open_unc_path_tool(self):
+        escolha = messagebox.askyesnocancel(
+            "Converter caminho de rede",
+            "Selecionar um ARQUIVO (Sim) ou uma PASTA (Não)?\n"
+            "(Cancelar para fechar)",
+            parent=self.controller)
+        if escolha is None:
+            return
+        if escolha:
+            caminho = filedialog.askopenfilename(
+                title="Selecione o arquivo na pasta de rede", parent=self.controller)
+        else:
+            caminho = filedialog.askdirectory(
+                title="Selecione a pasta de rede", parent=self.controller)
+        if not caminho:
+            return
+
+        universal = to_universal_unc_path(caminho)
+        self._show_unc_result_dialog(caminho, universal)
+
+    def _show_unc_result_dialog(self, original, universal):
+        dlg = tk.Toplevel(self)
+        dlg.title("Caminho universal (UNC)")
+        dlg.configure(bg=C["surface"])
+        dlg.geometry("560x300")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.transient(self.controller)
+
+        pad = tk.Frame(dlg, bg=C["surface"], padx=24, pady=20)
+        pad.pack(fill="both", expand=True)
+
+        tk.Label(pad, text="Caminho universal (UNC)", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(
+            pad,
+            text=("Use este caminho no rotinas_data.json (ou em qualquer outra "
+                  "configuração) para que funcione igual em qualquer computador, "
+                  "independente da letra de unidade mapeada por cada pessoa."),
+            bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 8),
+            wraplength=510, justify="left",
+        ).pack(anchor="w", pady=(8, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 12))
+
+        tk.Label(pad, text="ORIGINAL (com letra de unidade)", bg=C["surface"],
+                 fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(anchor="w")
+        orig_entry = styled_entry(pad, width=64)
+        orig_entry.insert(0, original)
+        orig_entry.configure(state="readonly")
+        orig_entry.pack(anchor="w", fill="x", pady=(4, 12))
+
+        tk.Label(pad, text="UNIVERSAL (UNC)", bg=C["surface"],
+                 fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(anchor="w")
+        uni_entry = styled_entry(pad, width=64)
+        uni_entry.insert(0, universal)
+        uni_entry.configure(state="readonly")
+        uni_entry.pack(anchor="w", fill="x", pady=(4, 0))
+
+        if universal == original:
+            tk.Label(
+                pad,
+                text=("⚠ Não foi possível identificar um servidor de rede por trás "
+                      "deste caminho (pode já ser local, ou já estar em formato UNC)."),
+                bg=C["surface"], fg=C["warn"], font=("Segoe UI", 8),
+                wraplength=510, justify="left",
+            ).pack(anchor="w", pady=(10, 0))
+
+        def _copiar():
+            dlg.clipboard_clear()
+            dlg.clipboard_append(universal)
+
+        btn_row = tk.Frame(pad, bg=C["surface"])
+        btn_row.pack(fill="x", pady=(18, 0))
+        styled_button(btn_row, "Copiar caminho universal", _copiar,
+                      accent=True, small=True).pack(side="left")
+        styled_button(btn_row, "Fechar", dlg.destroy, small=True).pack(side="right")
 
     # ── Overlay: Analisar Operações ─────────────────────────────────────────
     def _open_analisar_overlay(self):
@@ -3536,7 +3653,10 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         self._limit_btns = {}
         self._worker_running = False
         self._last_path = None
+        self._all_ops = []
+        self._excluded_uids = set()
         self._detail_overlay = None
+        self._detail_key = None
         self._limite_overlay = None
         self._alert_overlay = None
         self._alert_decisions = {}
@@ -3739,7 +3859,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
     def _limite_variant(self, status):
         return {"ok": "ok", "quase": "warn", "nao_validado": "warn",
                 "nao_encontrado": "warn", "validando": "idle",
-                "insuficiente": "err"}.get(status, "warn")
+                "insuficiente": "err", "sem_taxa": "err"}.get(status, "warn")
 
     def _group_limite_key(self, group):
         return group.get("doc_sacado") or _normalize_sacado_key(group["nome_sacado"])
@@ -3753,6 +3873,9 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
     def _evaluate_group_limite(self, group):
         cnpj = group.get("doc_sacado") or ""
         if not cnpj or cnpj not in LIMITE_INVERTIDO_CNPJS:
+            tem_taxa = bool(cnpj) and TaxasData.get().get_taxa(cnpj) is not None
+            if not tem_taxa:
+                return "sem_taxa", "Sem taxa Parametrizada"
             return "nao_encontrado", "Limite não encontrado"
         limite_data = self._get_limite_data(group)
         lf = self.controller.frames.get("LimitesInvertido")
@@ -3815,7 +3938,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         top = tk.Frame(pad, bg=C["surface"])
         top.pack(fill="x")
         title_fg = {"ok": C["ok"], "quase": C["warn"], "insuficiente": C["err"],
-                    "nao_encontrado": C["warn"]}.get(status, C["warn"])
+                    "nao_encontrado": C["warn"], "sem_taxa": C["err"]}.get(status, C["warn"])
         tk.Label(top, text=label, bg=C["surface"], fg=title_fg,
                  font=("Segoe UI", 12, "bold")).pack(side="left")
         styled_button(top, "✕", self._close_limite_modal, small=True).pack(side="right")
@@ -3828,6 +3951,19 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         body = tk.Frame(pad, bg=C["surface"])
         body.pack(fill="both", expand=True, pady=(12, 0))
+
+        if status == "sem_taxa":
+            tk.Label(
+                body,
+                text="Sem taxa parametrizada ou convênio ativo para operações invertidos.",
+                bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
+                wraplength=360, justify="left",
+            ).pack(anchor="w")
+            foot = tk.Frame(pad, bg=C["surface"])
+            foot.pack(fill="x", pady=(16, 0))
+            styled_button(foot, "Fechar", self._close_limite_modal, accent=True, small=True).pack(
+                side="right")
+            return
 
         if status == "nao_validado":
             tk.Label(
@@ -3912,10 +4048,12 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         overlay = tk.Frame(self, bg="#0c0c0c")
         overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._detail_overlay = overlay
+        self._detail_key = self._group_limite_key(group)
+        self._detail_nome = group["nome_sacado"]
 
         card = tk.Frame(overlay, bg=C["surface"],
                         highlightthickness=1, highlightbackground=C["hair"])
-        card.place(relx=0.5, rely=0.5, anchor="center", width=720, height=580)
+        card.place(relx=0.5, rely=0.5, anchor="center", width=720, height=620)
         card.bind("<Button-1>", lambda _e: "break")
 
         pad = tk.Frame(card, bg=C["surface"], padx=28, pady=22)
@@ -3924,21 +4062,28 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         top = tk.Frame(pad, bg=C["surface"])
         top.pack(fill="x")
         tk.Label(top, text=group["nome_sacado"], bg=C["surface"], fg=C["ink"],
-                 font=("Segoe UI", 13, "bold"), wraplength=560,
+                 font=("Segoe UI", 13, "bold"), wraplength=480,
                  justify="left").pack(side="left", fill="x", expand=True)
         styled_button(top, "✕", self._close_detalhes, small=True).pack(side="right")
 
+        self._detail_sub_lbl = tk.Label(
+            pad, text="", bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9))
+        self._detail_sub_lbl.pack(anchor="w", pady=(8, 0))
+
         tk.Label(
             pad,
-            text=f"{group['count']} nota(s) · {group['valor_total']}",
-            bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
-        ).pack(anchor="w", pady=(8, 0))
+            text=("Inclua notas excluídas na triagem ou exclua notas que não devem "
+                  "compor o montante. Apenas notas já existentes nesta planilha."),
+            bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 8),
+            wraplength=660, justify="left",
+        ).pack(anchor="w", pady=(2, 0))
 
-        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(16, 0))
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 0))
 
         scroll_wrap = tk.Frame(pad, bg=C["surface"], height=420)
         scroll_wrap.pack(fill="both", expand=True, pady=(12, 0))
         scroll_wrap.pack_propagate(False)
+        self._detail_scroll_wrap = scroll_wrap
 
         sf = ScrollableFrame(scroll_wrap, bg=C["surface"])
         sf.pack(fill="both", expand=True)
@@ -3947,20 +4092,66 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         sf.link_wheel(card)
         list_outer = sf.inner
         list_outer.configure(bg=C["surface"])
+        self._detail_sf = sf
+        self._detail_list_outer = list_outer
+        self._detail_card = card
+        self._detail_pad = pad
 
-        notas = list(group["notas"])
-        for idx, op in enumerate(notas, start=1):
+        self._render_detalhes_list()
+
+    def _detail_ops_do_cliente(self):
+        """Todas as ops da planilha (incluídas ou não) para o cliente em detalhe."""
+        key = self._detail_key
+
+        def _op_key(op):
+            doc = only_digits(op.get("doc_sacado") or "")
+            return doc or _normalize_sacado_key(op.get("nome_sacado") or "")
+
+        return [op for op in self._all_ops if _op_key(op) == key]
+
+    def _render_detalhes_list(self):
+        list_outer = self._detail_list_outer
+        sf = self._detail_sf
+        for w in list_outer.winfo_children():
+            w.destroy()
+
+        scroll_targets = [self._detail_overlay, self._detail_card, self._detail_pad,
+                          self._detail_scroll_wrap, sf, list_outer]
+
+        todas = self._detail_ops_do_cliente()
+        incluidas = [op for op in todas if op["uid"] not in self._excluded_uids]
+        excluidas = [op for op in todas if op["uid"] in self._excluded_uids]
+        total = sum((op.get("valor_raw", Decimal("0")) for op in incluidas), Decimal("0"))
+        self._detail_sub_lbl.configure(
+            text=f"{len(incluidas)} nota(s) no montante · {_fmt_brl(total)}"
+                 + (f" · {len(excluidas)} excluída(s)" if excluidas else ""))
+
+        def _nota_card(op, included):
             item = tk.Frame(list_outer, bg=C["surface2"],
-                            highlightthickness=1, highlightbackground=C["hair"])
+                            highlightthickness=1,
+                            highlightbackground=C["hair"] if included else C["err"])
             item.pack(fill="x", pady=(0, 8))
+            scroll_targets.append(item)
 
             head = tk.Frame(item, bg=C["surface2"], padx=14, pady=10)
             head.pack(fill="x")
-            tk.Label(head, text=f"Nota {idx} de {len(notas)}", bg=C["surface2"],
-                     fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(anchor="w")
+            scroll_targets.append(head)
+            badge_txt = "No montante" if included else "Excluída"
+            badge_fg = C["ok"] if included else C["err"]
+            tk.Label(head, text=badge_txt, bg=C["surface2"],
+                     fg=badge_fg, font=("Segoe UI", 7, "bold")).pack(side="left")
+            if included:
+                styled_button(
+                    head, "Excluir", lambda o=op: self._toggle_nota(o, exclude=True),
+                    danger=True, small=True).pack(side="right")
+            else:
+                styled_button(
+                    head, "Incluir", lambda o=op: self._toggle_nota(o, exclude=False),
+                    accent=True, small=True).pack(side="right")
 
             body = tk.Frame(item, bg=C["surface2"], padx=14, pady=12)
             body.pack(fill="x")
+            scroll_targets.append(body)
             fields = [
                 ("NF", op["nf"] or "—", False),
                 ("Valor", op["valor"], True),
@@ -3971,6 +4162,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             for label, value, accent in fields:
                 row_f = tk.Frame(body, bg=C["surface2"])
                 row_f.pack(fill="x", pady=(0, 3))
+                scroll_targets.append(row_f)
                 tk.Label(row_f, text=label, bg=C["surface2"], fg=C["ink_faint"],
                          font=("Segoe UI", 7, "bold"), width=10, anchor="w").pack(side="left")
                 fg = C["ok"] if accent else C["ink"]
@@ -3978,13 +4170,76 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                          font=("Segoe UI", 8, "bold" if accent else "normal"),
                          anchor="w").pack(side="left", fill="x", expand=True)
 
-        self._bind_modal_scroll([overlay, card, pad, scroll_wrap], sf)
+        if incluidas:
+            tk.Label(list_outer, text=f"NO MONTANTE ({len(incluidas)})", bg=C["surface"],
+                     fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(
+                         anchor="w", pady=(0, 6))
+            scroll_targets.append(list_outer)
+        for op in incluidas:
+            _nota_card(op, included=True)
+
+        if excluidas:
+            tk.Label(list_outer, text=f"EXCLUÍDAS / DISPONÍVEIS ({len(excluidas)})",
+                     bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(14, 6))
+            for op in excluidas:
+                _nota_card(op, included=False)
+
+        if not todas:
+            empty = tk.Frame(list_outer, bg=C["surface"])
+            empty.pack(fill="x", pady=24)
+            scroll_targets.append(empty)
+            tk.Label(empty, text="Nenhuma nota encontrada para este cliente na planilha.",
+                     bg=C["surface"], fg=C["ink_muted"],
+                     font=("Segoe UI", 9)).pack()
+
+        self._bind_modal_scroll(scroll_targets, sf)
 
         def _sync_modal():
             sf.update_idletasks()
             sf._sync_scrollregion()
             sf.refresh_bindings()
         self.after_idle(_sync_modal)
+
+    def _toggle_nota(self, op, exclude):
+        uid = op["uid"]
+        if exclude:
+            if not messagebox.askyesno(
+                "Excluir nota",
+                f"Excluir a NF {op.get('nf') or '—'} ({op.get('valor')}) do montante "
+                "deste cliente?",
+                parent=self.controller):
+                return
+            self._excluded_uids.add(uid)
+        else:
+            self._excluded_uids.discard(uid)
+        self._render_detalhes_list()
+        self._rebuild_group_cards()
+
+    def _rebuild_group_cards(self):
+        excluded = self._excluded_uids
+        visible_ops = [op for op in self._all_ops if op["uid"] not in excluded]
+        groups = _group_invertido_ops(visible_ops)
+        self._groups = groups
+        for w in self._grid.winfo_children():
+            w.destroy()
+        self._cards = []
+        self._limit_btns = {}
+        if not groups:
+            empty = tk.Frame(self._grid, bg=C["bg"])
+            empty.grid(row=0, column=0, columnspan=3, sticky="ew", pady=24)
+            tk.Label(empty, text="Nenhuma operação encontrada na planilha.",
+                     bg=C["bg"], fg=C["ink_muted"],
+                     font=("Segoe UI", 10)).pack()
+            self._sub_lbl.configure(text="0 grupo(s) · 0 nota(s)")
+            return
+        for idx, group in enumerate(groups):
+            row, col = divmod(idx, 3)
+            self._cards.append(self._make_group_card(group, row, col))
+        total_notas = sum(g["count"] for g in groups)
+        self._sub_lbl.configure(
+            text=(f"{len(groups)} grupo(s) · {total_notas} nota(s) · "
+                  f"{os.path.basename(self._last_path or '')}"))
 
     def _close_alerts_modal(self):
         if self._alert_overlay is not None:
@@ -4031,6 +4286,14 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             card.configure(highlightbackground=C["err"])
         self._update_alerts_footer()
 
+    def _accept_all_alerts(self):
+        for item, widgets in getattr(self, "_alert_item_widgets", []):
+            self._set_alert_decision(item, "accept", widgets)
+
+    def _reject_all_alerts(self):
+        for item, widgets in getattr(self, "_alert_item_widgets", []):
+            self._set_alert_decision(item, "reject", widgets)
+
     def _cancel_alerts_review(self):
         self._close_alerts_modal()
         self._pending_ops = []
@@ -4045,13 +4308,16 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         )
         if pending:
             return
-        filtered = _invertido_apply_alert_decisions(
-            self._pending_ops, self._alert_items, self._alert_decisions)
+        rejected_uids = {
+            item["op"]["uid"] for item in self._alert_items
+            if self._alert_decisions.get(item["index"]) == "reject"
+        }
+        self._excluded_uids = set(rejected_uids)
         self._close_alerts_modal()
         self._pending_ops = []
         self._alert_items = []
         self._alert_decisions = {}
-        self._render_results(filtered)
+        self._render_results(self._all_ops)
 
     def _show_alerts_modal(self, ops, alerts):
         self._close_alerts_modal()
@@ -4062,6 +4328,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         overlay = tk.Frame(self, bg="#0c0c0c")
         overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._alert_overlay = overlay
+        self._alert_item_widgets = []
 
         card = tk.Frame(overlay, bg=C["surface"],
                         highlightthickness=1, highlightbackground=C["hair"])
@@ -4076,6 +4343,10 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         tk.Label(top, text="Alertas na análise", bg=C["surface"], fg=C["warn"],
                  font=("Segoe UI", 13, "bold")).pack(side="left")
         styled_button(top, "✕", self._cancel_alerts_review, small=True).pack(side="right")
+        styled_button(top, "✕ Recusar todas", self._reject_all_alerts,
+                      danger=True, small=True).pack(side="right", padx=(0, 8))
+        styled_button(top, "✓ Aprovar todas", self._accept_all_alerts,
+                      accent=True, small=True).pack(side="right", padx=(0, 8))
 
         tk.Label(
             pad,
@@ -4155,6 +4426,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             btn_row.pack(fill="x", pady=(6, 12))
             all_scroll_targets.append(btn_row)
             widgets = {"card": item_card, "badge": badge}
+            self._alert_item_widgets.append((item, widgets))
             styled_button(
                 btn_row, "✓ Aceitar",
                 lambda it=item, w=widgets: self._set_alert_decision(it, "accept", w),
@@ -4188,6 +4460,8 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
     def _on_parse_complete(self, ops):
         self._stop_loading_anim()
         self._loading_outer.pack_forget()
+        self._all_ops = ops
+        self._excluded_uids = set()
         alerts = _invertido_collect_alerts(ops)
         if alerts:
             self._show_alerts_modal(ops, alerts)
@@ -4201,6 +4475,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             except Exception:
                 pass
             self._detail_overlay = None
+        self._detail_key = None
 
     def _render_results(self, ops):
         self._stop_loading_anim()
@@ -4208,7 +4483,9 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         for w in self._grid.winfo_children():
             w.destroy()
         self._cards = []
-        groups = _group_invertido_ops(ops)
+        excluded = getattr(self, "_excluded_uids", set())
+        visible_ops = [op for op in ops if op.get("uid") not in excluded]
+        groups = _group_invertido_ops(visible_ops)
         self._groups = groups
         if not groups:
             empty = tk.Frame(self._grid, bg=C["bg"])
