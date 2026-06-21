@@ -258,6 +258,144 @@ def _group_invertido_ops(ops: list) -> list:
     return result
 
 
+INVERTIDO_VALOR_MIN = Decimal("10000")
+
+INVERTIDO_PRAZO_MAX = {
+    "RPB": 11,
+}
+
+INVERTIDO_PRAZO_EXPECTED = {
+    "Transdourada":             (90, 70),
+    "Posto Sapucaia":           (15, 10),
+    "Auto Posto M Timbozao":    (15, 10),
+    "Posto Gasol Timbo III":    (15, 10),
+    "Posto Timbozao Itaperuna": (15, 10),
+    "Posto Pioneiro":           (15, 10),
+    "Mirian Cuiaba":            (10, 7),
+    "Mirian Varzea":            (10, 7),
+    "Petrocal":                 (10, 7),
+    "PetroMix":                 (10, 7),
+    "PetroVel":                 (10, 7),
+}
+
+INVERTIDO_PRAZO_ALIASES = {
+    "POSTO GASOL TIMB III": "Posto Gasol Timbo III",
+}
+
+
+def _invertido_sacado_key(name: str) -> str:
+    return _normalize_sacado_key(name)
+
+
+def _invertido_sacado_matches(nome_sacado: str, rule_name: str) -> bool:
+    key = _invertido_sacado_key(nome_sacado)
+    alias = INVERTIDO_PRAZO_ALIASES.get(key)
+    if alias:
+        key = _invertido_sacado_key(alias)
+    rule_key = _invertido_sacado_key(rule_name)
+    if key == rule_key or rule_key in key or key in rule_key:
+        return True
+    # Tentativa por palavras significativas (ignora artigos/preposições curtas)
+    stop = {"DE","DO","DA","DOS","DAS","E","EM","A","O","AS","OS"}
+    key_words = {w for w in key.split() if len(w) > 2 and w not in stop}
+    rule_words = {w for w in rule_key.split() if len(w) > 2 and w not in stop}
+    if key_words and rule_words and len(key_words & rule_words) >= max(1, len(rule_words) - 1):
+        return True
+    return False
+
+
+def _invertido_parse_prazo_days(prazo) -> int | None:
+    s = str(prazo if prazo is not None else "").strip()
+    if not s:
+        return None
+    m = re.search(r"\d+", s)
+    return int(m.group()) if m else None
+
+
+def _invertido_check_nf(nf: str) -> str | None:
+    s = str(nf or "").strip()
+    if not s:
+        return "NF ausente ou vazia"
+    # Suspeito: contém letra(s) misturada(s) ao número (ex: 002141zz04)
+    if re.search(r"[A-Za-z]", s):
+        return f"NF contém letra(s) ({s})"
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return None
+    inner = digits.lstrip("0")
+    if not inner:
+        return f"NF inválida — apenas zeros ({s})"
+    # Suspeito: muitos zeros à esquerda escondendo um número minúsculo
+    # (ex: 001, 000000001) — NF normal com zero à esquerda mas número
+    # longo (ex: 0010407103) NÃO é suspeito.
+    if digits != inner and len(inner) <= 2:
+        return f"NF com zeros à esquerda e número muito curto ({s})"
+    # Suspeito: número de apenas 1 dígito, sem zeros à esquerda
+    if len(digits) <= 1:
+        return f"NF com número suspeito — muito curto ({s})"
+    return None
+
+
+def _invertido_check_valor(valor_raw: Decimal) -> str | None:
+    if valor_raw < INVERTIDO_VALOR_MIN:
+        return f"Valor abaixo de R$ 10.000,00 ({_fmt_brl(valor_raw)})"
+    return None
+
+
+def _invertido_check_prazo(nome_sacado: str, prazo) -> str | None:
+    days = _invertido_parse_prazo_days(prazo)
+    if days is None:
+        for rule_name in list(INVERTIDO_PRAZO_MAX) + list(INVERTIDO_PRAZO_EXPECTED):
+            if _invertido_sacado_matches(nome_sacado, rule_name):
+                return "Prazo ausente ou inválido"
+        return None
+
+    for rule_name, max_days in INVERTIDO_PRAZO_MAX.items():
+        if _invertido_sacado_matches(nome_sacado, rule_name):
+            if days > max_days:
+                return (f"Prazo de {days} dias excede o máximo de {max_days} dias "
+                        f"({rule_name})")
+            return None
+
+    for rule_name, (expected, min_ok) in INVERTIDO_PRAZO_EXPECTED.items():
+        if _invertido_sacado_matches(nome_sacado, rule_name):
+            if days < min_ok:
+                return (f"Prazo de {days} dias muito abaixo do esperado "
+                        f"({expected} dias — {rule_name})")
+            if days > expected:
+                return (f"Prazo de {days} dias acima do esperado "
+                        f"({expected} dias — {rule_name})")
+            return None
+
+    return None
+
+
+def _invertido_collect_alerts(ops: list) -> list:
+    alerts = []
+    for idx, op in enumerate(ops):
+        motivos = []
+        nf_msg = _invertido_check_nf(op.get("nf"))
+        if nf_msg:
+            motivos.append(nf_msg)
+        val_msg = _invertido_check_valor(op.get("valor_raw", Decimal("0")))
+        if val_msg:
+            motivos.append(val_msg)
+        prazo_msg = _invertido_check_prazo(op.get("nome_sacado"), op.get("prazo"))
+        if prazo_msg:
+            motivos.append(prazo_msg)
+        if motivos:
+            alerts.append({"index": idx, "op": op, "motivos": motivos})
+    return alerts
+
+
+def _invertido_apply_alert_decisions(ops: list, alerts: list, decisions: dict) -> list:
+    rejected = {
+        item["index"] for item in alerts
+        if decisions.get(item["index"]) == "reject"
+    }
+    return [op for i, op in enumerate(ops) if i not in rejected]
+
+
 LIMITE_SOBRA_MIN = 100_000
 
 
@@ -582,6 +720,7 @@ FRAME_LABELS = {
     "OperacoesInvertido":"Operações Invertido",
     "LimitesInvertido":  "Limites Invertido",
     "AnalisarOperacoes": "Analisar Operações",
+    "TaxasInvertido":    "Taxas (Depara)",
 }
 
 
@@ -1734,6 +1873,82 @@ class RotinasData:
         return done, total
 
 
+# ─── Taxas (Depara) Data Layer ──────────────────────────────────────────────
+# Persistido no MESMO arquivo de rotinas (rotinas_data.json), chave "taxas".
+# Estrutura: { cnpj: {"taxa": "1,3950", "validade_mes": "2026-06"} }
+
+def _mes_atual_key():
+    today = date.today()
+    return f"{today.year:04d}-{today.month:02d}"
+
+
+class TaxasData:
+    _instance = None
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._taxas = {}
+        self._load()
+
+    def _path(self):
+        return _rotinas_data_path()
+
+    def _load(self):
+        path = self._path()
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = _json_mod.load(f)
+            self._taxas = data.get("taxas", {})
+        except Exception:
+            pass
+
+    def save(self):
+        path = self._path()
+        try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = _json_mod.load(f)
+            else:
+                data = {}
+        except Exception:
+            data = {}
+        data["taxas"] = self._taxas
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                _json_mod.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def get_taxa(self, cnpj):
+        return self._taxas.get(cnpj)
+
+    def set_taxa(self, cnpj, valor_str):
+        self._taxas[cnpj] = {
+            "taxa": valor_str,
+            "validade_mes": _mes_atual_key(),
+        }
+        self.save()
+
+    def is_vigente(self, cnpj):
+        info = self._taxas.get(cnpj)
+        if not info:
+            return False
+        return info.get("validade_mes") == _mes_atual_key()
+
+    def todas_vigentes(self, cnpjs):
+        return all(self.is_vigente(c) for c in cnpjs if c)
+
+    def vencidas(self, cnpjs):
+        return [c for c in cnpjs if c and not self.is_vigente(c)]
+
+
 # ─── RotinasFrame ────────────────────────────────────────────────────────────
 
 class RotinasFrame(tk.Frame):
@@ -2882,32 +3097,56 @@ class OperacoesInvertidoFrame(tk.Frame):
         body.pack(fill="both", expand=True, padx=44, pady=(32, 0))
         for c in range(3):
             body.columnconfigure(c, weight=1, uniform="opc")
+        self._cards_body = body
 
         self._make_option_card(
-            body, 0, "▤", "Analisar Operações",
+            body, 0, 0, "▤", "Analisar Operações",
             "Importe uma planilha .xlsx para análise das operações.",
             self._open_analisar_overlay, "#5a9e72")
 
         self._make_option_card(
-            body, 1, "⬡", "Limites Invertido",
+            body, 0, 1, "⬡", "Limites Invertido",
             "Consulta o LTC e o limite disponível de cada cliente.",
             lambda: self.controller.show_frame("LimitesInvertido"), C["accent"])
 
         self._make_option_card(
-            body, 2, "▦", "Histórico Operações",
+            body, 0, 2, "▦", "Histórico Operações",
             "Consulta o histórico de operações já realizadas.",
             self._open_historico_placeholder, "#8b72c9")
 
+        self._taxas_card = None
+        self._refresh_taxas_card()
+
+    def _taxas_vencidas(self):
+        try:
+            return len(TaxasData.get().vencidas(LIMITE_INVERTIDO_CNPJS)) > 0
+        except Exception:
+            return False
+
     def on_show(self):
-        pass
+        self._refresh_taxas_card()
+
+    def _refresh_taxas_card(self):
+        try:
+            if self._taxas_card is not None and self._taxas_card.winfo_exists():
+                self._taxas_card.destroy()
+        except Exception:
+            pass
+        self._taxas_card = self._make_option_card(
+            self._cards_body, 1, 0, "⇄", "Taxas (Depara)",
+            "Tabela de depara de taxas por cliente/modalidade.",
+            lambda: self.controller.show_frame("TaxasInvertido"), "#c4a832",
+            alert=self._taxas_vencidas())
 
     # ── Cards de opção ───────────────────────────────────────────────────────
-    def _make_option_card(self, parent, col, icon, title, sub, command, color):
-        pad = {0: (0, 6), 1: (6, 6), 2: (6, 0)}.get(col, (6, 6))
+    def _make_option_card(self, parent, row, col, icon, title, sub, command, color,
+                           alert=False):
+        pad_x = {0: (0, 6), 1: (6, 6), 2: (6, 0)}.get(col, (6, 6))
+        pad_y = (0, 0) if row == 0 else (12, 0)
         outer = tk.Frame(parent, bg=C["surface"],
                          highlightthickness=1, highlightbackground=C["hair"],
                          cursor="hand2")
-        outer.grid(row=0, column=col, sticky="nsew", padx=pad)
+        outer.grid(row=row, column=col, sticky="nsew", padx=pad_x, pady=pad_y)
 
         top_line = tk.Frame(outer, bg=C["hair"], height=2)
         top_line.pack(fill="x")
@@ -2915,9 +3154,16 @@ class OperacoesInvertidoFrame(tk.Frame):
         body_f = tk.Frame(outer, bg=C["surface"], padx=22, pady=22)
         body_f.pack(fill="both", expand=True)
 
-        icon_lbl = tk.Label(body_f, text=icon, bg=C["surface"], fg=color,
+        icon_row = tk.Frame(body_f, bg=C["surface"])
+        icon_row.pack(fill="x", anchor="w")
+        icon_lbl = tk.Label(icon_row, text=icon, bg=C["surface"], fg=color,
                             font=("Segoe UI", 22))
-        icon_lbl.pack(anchor="w")
+        icon_lbl.pack(side="left")
+        alert_lbl = None
+        if alert:
+            alert_lbl = tk.Label(icon_row, text="● Taxas vencidas", bg=C["surface"],
+                                 fg=C["err"], font=("Segoe UI", 7, "bold"))
+            alert_lbl.pack(side="right", anchor="n", pady=(4, 0))
         name_lbl = tk.Label(body_f, text=title, bg=C["surface"], fg=C["ink"],
                             font=("Segoe UI", 12, "bold"), anchor="w")
         name_lbl.pack(anchor="w", pady=(12, 4))
@@ -2929,20 +3175,24 @@ class OperacoesInvertidoFrame(tk.Frame):
                              font=("Segoe UI", 8, "bold"))
         arrow_lbl.pack(anchor="w", pady=(18, 0))
 
-        widgets = [outer, top_line, body_f, icon_lbl, name_lbl, sub_lbl, arrow_lbl]
+        widgets = [outer, top_line, body_f, icon_row, icon_lbl, name_lbl, sub_lbl, arrow_lbl]
 
         def _enter(_e=None):
             outer.configure(bg=C["surface2"], highlightbackground=color)
             top_line.configure(bg=color)
-            for w in (body_f, icon_lbl, name_lbl, sub_lbl):
+            for w in (body_f, icon_row, icon_lbl, name_lbl, sub_lbl):
                 w.configure(bg=C["surface2"])
+            if alert_lbl is not None:
+                alert_lbl.configure(bg=C["surface2"])
             arrow_lbl.configure(bg=C["surface2"], fg=color)
 
         def _leave(_e=None):
             outer.configure(bg=C["surface"], highlightbackground=C["hair"])
             top_line.configure(bg=C["hair"])
-            for w in (body_f, icon_lbl, name_lbl, sub_lbl):
+            for w in (body_f, icon_row, icon_lbl, name_lbl, sub_lbl):
                 w.configure(bg=C["surface"])
+            if alert_lbl is not None:
+                alert_lbl.configure(bg=C["surface"])
             arrow_lbl.configure(bg=C["surface"], fg=C["ink_faint"])
 
         for w in widgets:
@@ -3089,6 +3339,192 @@ class OperacoesInvertidoFrame(tk.Frame):
         self._overlay_ready = bool(self._xlsx_path)
 
 
+class TaxasInvertidoFrame(tk.Frame):
+    """Tabela de depara de taxas (%) por cliente de Operações Invertido.
+    Taxas têm validade mensal: ao virar o mês, ficam vencidas até serem
+    atualizadas novamente."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._data = TaxasData.get()
+        self._cards = {}
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        styled_button(hdr, "← Voltar",
+                      lambda: self.controller.show_frame("OperacoesInvertido")).pack(side="left")
+        tk.Label(hdr, text="Taxas (Depara)", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left", padx=(14, 0))
+
+        sub = tk.Frame(self, bg=C["bg"])
+        sub.pack(fill="x", padx=32)
+        tk.Label(sub, text="Taxa (%) vigente por cliente. Validade mensal — "
+                            "renove ao virar o mês.",
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
+        self._validade_lbl = tk.Label(sub, text="", bg=C["bg"], fg=C["ink_faint"],
+                                      font=("Segoe UI", 8))
+        self._validade_lbl.pack(anchor="w", pady=(2, 0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16, 0))
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        self._grid_outer = self._sf.inner
+        self._grid_outer.configure(bg=C["bg"])
+
+        self._grid = tk.Frame(self._grid_outer, bg=C["bg"])
+        self._grid.pack(padx=32, pady=(16, 24), fill="x")
+        for c in range(3):
+            self._grid.columnconfigure(c, weight=1, uniform="tcards")
+
+    def on_show(self):
+        self._sf.refresh_bindings()
+        self._validade_lbl.configure(
+            text=f"Mês de referência: {self._mes_atual_label()}")
+        self._setup_cards()
+
+    @staticmethod
+    def _mes_atual_label():
+        MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
+                  "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+        today = date.today()
+        return f"{MESES[today.month - 1]}/{today.year}"
+
+    def _setup_cards(self):
+        for w in self._grid.winfo_children():
+            w.destroy()
+        self._cards = {}
+        nomes = list(BPM_CLIENT_DATA.keys())
+        for idx, nome in enumerate(nomes):
+            row, col = divmod(idx, 3)
+            self._make_card(nome, row, col)
+
+    def _make_card(self, nome, row, col):
+        cnpj = only_digits(BPM_CLIENT_DATA[nome].get("CNPJ", ""))
+        info = self._data.get_taxa(cnpj)
+        vigente = self._data.is_vigente(cnpj)
+
+        bg = C["surface"]
+        outer = tk.Frame(self._grid, bg=C["bg"])
+        outer.grid(row=row, column=col, sticky="nsew", padx=5, pady=5)
+
+        card = tk.Frame(outer, bg=bg, highlightthickness=1, highlightbackground=C["hair"], bd=0)
+        card.pack(fill="both", expand=True)
+        top_color = C["ok"] if vigente else (C["err"] if info else C["hair"])
+        top_bar = tk.Frame(card, bg=top_color, height=2)
+        top_bar.pack(fill="x")
+
+        body = tk.Frame(card, bg=bg, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(body, text=nome, bg=bg, fg=C["ink"],
+                 font=("Segoe UI", 10, "bold"), wraplength=190,
+                 justify="left", anchor="w").pack(fill="x")
+        tk.Label(body, text=f"CNPJ {cnpj}" if cnpj else "CNPJ não cadastrado",
+                 bg=bg, fg=C["ink_faint"], font=("Segoe UI", 7), anchor="w").pack(
+                     fill="x", pady=(2, 10))
+
+        taxa_row = tk.Frame(body, bg=bg)
+        taxa_row.pack(fill="x")
+        tk.Label(taxa_row, text="TAXA", bg=bg, fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold"), width=6, anchor="w").pack(side="left")
+        taxa_txt = f"{info['taxa']}%" if info else "—"
+        taxa_lbl = tk.Label(taxa_row, text=taxa_txt, bg=bg,
+                            fg=C["ink"] if info else C["ink_faint"],
+                            font=("Segoe UI", 11, "bold"), anchor="w")
+        taxa_lbl.pack(side="left", fill="x", expand=True)
+
+        status_row = tk.Frame(body, bg=bg)
+        status_row.pack(fill="x", pady=(6, 0))
+        if vigente:
+            status_text, status_color = "Vigente", C["ok"]
+        elif info:
+            status_text, status_color = "Vencida — renovar", C["err"]
+        else:
+            status_text, status_color = "Sem taxa cadastrada", C["ink_faint"]
+        status_lbl = tk.Label(status_row, text=status_text, bg=bg, fg=status_color,
+                              font=("Segoe UI", 7, "bold"))
+        status_lbl.pack(side="left")
+
+        btn_row = tk.Frame(body, bg=bg)
+        btn_row.pack(fill="x", pady=(12, 0))
+        styled_button(
+            btn_row, "Editar" if info else "Definir taxa",
+            lambda n=nome, c=cnpj: self._open_edit_dialog(n, c),
+            accent=not vigente, small=True).pack(side="left")
+
+        self._cards[cnpj] = {
+            "outer": outer, "taxa_lbl": taxa_lbl, "status_lbl": status_lbl,
+            "top_bar": top_bar,
+        }
+
+    def _open_edit_dialog(self, nome, cnpj):
+        info = self._data.get_taxa(cnpj)
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Taxa — {nome}")
+        dlg.configure(bg=C["surface"])
+        dlg.geometry("380x260")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        pad = tk.Frame(dlg, bg=C["surface"], padx=24, pady=20)
+        pad.pack(fill="both", expand=True)
+
+        tk.Label(pad, text=nome, bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(pad, text=f"CNPJ {cnpj}", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 14))
+
+        tk.Label(pad, text="TAXA (%)", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w")
+        taxa_var = tk.StringVar(value=(info["taxa"] if info else ""))
+        entry = styled_entry(pad, textvariable=taxa_var, width=14)
+        entry.configure(font=("Segoe UI", 14, "bold"))
+        entry.pack(anchor="w", pady=(6, 0))
+        entry.focus_set()
+
+        hint_lbl = tk.Label(pad, text="Formato: 1,3950  •  2,0000  •  1,4300",
+                            bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 7))
+        hint_lbl.pack(anchor="w", pady=(6, 0))
+
+        err_lbl = tk.Label(pad, text="", bg=C["surface"], fg=C["err"],
+                           font=("Segoe UI", 8))
+        err_lbl.pack(anchor="w", pady=(4, 0))
+
+        def _valido(txt):
+            txt = (txt or "").strip()
+            return bool(re.fullmatch(r"\d{1,3},\d{1,4}", txt))
+
+        def _normalizar(txt):
+            inteiro, dec = txt.strip().split(",")
+            dec = dec.ljust(4, "0")
+            return f"{inteiro},{dec}"
+
+        def _salvar():
+            txt = taxa_var.get().strip()
+            if not _valido(txt):
+                err_lbl.configure(
+                    text="Formato inválido. Use vírgula, ex.: 1,3950")
+                return
+            txt = _normalizar(txt)
+            self._data.set_taxa(cnpj, txt)
+            dlg.destroy()
+            self._setup_cards()
+
+        btn_row = tk.Frame(pad, bg=C["surface"])
+        btn_row.pack(fill="x", pady=(18, 0))
+        styled_button(btn_row, "Cancelar", dlg.destroy).pack(side="left")
+        styled_button(btn_row, "Salvar", _salvar, accent=True).pack(side="right")
+
+        entry.bind("<Return>", lambda _e: _salvar())
+
+
 class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
     """Exibe as operações importadas de uma planilha .xlsx, agrupadas por sacado."""
 
@@ -3102,6 +3538,10 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         self._last_path = None
         self._detail_overlay = None
         self._limite_overlay = None
+        self._alert_overlay = None
+        self._alert_decisions = {}
+        self._alert_items = []
+        self._pending_ops = []
         self._init_ui_queue()
         self._build()
 
@@ -3122,6 +3562,18 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         self._sub_lbl.pack(anchor="w", pady=(4, 0))
 
         make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16, 0))
+
+        self._taxas_banner = tk.Frame(self, bg=C["err_dim"])
+        self._taxas_banner_lbl = tk.Label(
+            self._taxas_banner, text="", bg=C["err_dim"], fg=C["err"],
+            font=("Segoe UI", 9, "bold"), anchor="w", justify="left", wraplength=900)
+        self._taxas_banner_lbl.pack(side="left", fill="x", expand=True,
+                                    padx=18, pady=10)
+        styled_button(
+            self._taxas_banner, "Atualizar taxas →",
+            lambda: self.controller.show_frame("TaxasInvertido"),
+            danger=True, small=True).pack(side="right", padx=18)
+        # _taxas_banner é exibido condicionalmente via _refresh_taxas_banner()
 
         self._loading_outer = tk.Frame(self, bg=C["bg"])
         self._loading_outer.pack(fill="x", padx=32, pady=(28, 0))
@@ -3153,6 +3605,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
     def on_show(self):
         self._sf.refresh_bindings()
+        self._refresh_taxas_banner()
         path = getattr(self.controller, "invertido_xlsx_path", None)
         if not path:
             self.controller.show_frame("OperacoesInvertido")
@@ -3166,6 +3619,33 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         self._reset_view()
         self._start_worker(path)
         self.controller.register_limites_listener(self._on_limites_update)
+
+    def _refresh_taxas_banner(self):
+        try:
+            vencidas = TaxasData.get().vencidas(LIMITE_INVERTIDO_CNPJS)
+        except Exception:
+            vencidas = []
+        if vencidas:
+            nomes_vencidos = sorted({
+                nome for nome, info in BPM_CLIENT_DATA.items()
+                if only_digits(info.get("CNPJ", "")) in vencidas
+            })
+            qtd = len(nomes_vencidos)
+            texto = (f"⚠ {qtd} taxa(s) vencida(s) este mês "
+                     f"({self._mes_atual_label()}): " + ", ".join(nomes_vencidos[:6]) +
+                     ("…" if qtd > 6 else "") +
+                     ". Atualize em Taxas (Depara) antes de seguir com as operações.")
+            self._taxas_banner_lbl.configure(text=texto)
+            self._taxas_banner.pack(fill="x", padx=0, pady=(0, 0), before=self._loading_outer)
+        else:
+            self._taxas_banner.pack_forget()
+
+    @staticmethod
+    def _mes_atual_label():
+        MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
+                  "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+        today = date.today()
+        return f"{MESES[today.month - 1]}/{today.year}"
 
     def _on_limites_update(self, _cnpj=None):
         self._ui(self._refresh_all_limit_buttons)
@@ -3506,6 +3986,214 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             sf.refresh_bindings()
         self.after_idle(_sync_modal)
 
+    def _close_alerts_modal(self):
+        if self._alert_overlay is not None:
+            try:
+                self._alert_overlay.destroy()
+            except Exception:
+                pass
+            self._alert_overlay = None
+
+    def _update_alerts_footer(self):
+        if not hasattr(self, "_alert_footer_lbl") or not self._alert_footer_lbl.winfo_exists():
+            return
+        pending = sum(
+            1 for item in self._alert_items
+            if self._alert_decisions.get(item["index"]) is None
+        )
+        if pending:
+            self._alert_footer_lbl.configure(
+                text=f"{pending} nota(s) aguardando decisão",
+                fg=C["warn"])
+            self._alert_continue_btn.configure(state="disabled")
+        else:
+            accepted = sum(
+                1 for item in self._alert_items
+                if self._alert_decisions.get(item["index"]) == "accept"
+            )
+            rejected = len(self._alert_items) - accepted
+            self._alert_footer_lbl.configure(
+                text=(f"{accepted} aceita(s) · {rejected} rejeitada(s) — "
+                      "clique em Continuar para prosseguir"),
+                fg=C["ok"])
+            self._alert_continue_btn.configure(state="normal")
+
+    def _set_alert_decision(self, item, decision, card_widgets):
+        idx = item["index"]
+        self._alert_decisions[idx] = decision
+        badge = card_widgets["badge"]
+        card = card_widgets["card"]
+        if decision == "accept":
+            badge.configure(text="Aceita", fg=C["ok"])
+            card.configure(highlightbackground=C["ok"])
+        else:
+            badge.configure(text="Rejeitada", fg=C["err"])
+            card.configure(highlightbackground=C["err"])
+        self._update_alerts_footer()
+
+    def _cancel_alerts_review(self):
+        self._close_alerts_modal()
+        self._pending_ops = []
+        self._alert_items = []
+        self._alert_decisions = {}
+        self.controller.show_frame("OperacoesInvertido")
+
+    def _finish_alerts_review(self):
+        pending = any(
+            self._alert_decisions.get(item["index"]) is None
+            for item in self._alert_items
+        )
+        if pending:
+            return
+        filtered = _invertido_apply_alert_decisions(
+            self._pending_ops, self._alert_items, self._alert_decisions)
+        self._close_alerts_modal()
+        self._pending_ops = []
+        self._alert_items = []
+        self._alert_decisions = {}
+        self._render_results(filtered)
+
+    def _show_alerts_modal(self, ops, alerts):
+        self._close_alerts_modal()
+        self._pending_ops = ops
+        self._alert_items = alerts
+        self._alert_decisions = {}
+
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._alert_overlay = overlay
+
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=780, height=620)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=28, pady=22)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text="Alertas na análise", bg=C["surface"], fg=C["warn"],
+                 font=("Segoe UI", 13, "bold")).pack(side="left")
+        styled_button(top, "✕", self._cancel_alerts_review, small=True).pack(side="right")
+
+        tk.Label(
+            pad,
+            text=(f"{len(alerts)} nota(s) com pendências. Revise e decida se cada "
+                  "uma deve seguir na operação."),
+            bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
+            wraplength=700, justify="left",
+        ).pack(anchor="w", pady=(8, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(16, 0))
+
+        scroll_wrap = tk.Frame(pad, bg=C["surface"], height=430)
+        scroll_wrap.pack(fill="both", expand=True, pady=(12, 0))
+        scroll_wrap.pack_propagate(False)
+
+        sf = ScrollableFrame(scroll_wrap, bg=C["surface"])
+        sf.pack(fill="both", expand=True)
+        sf.link_wheel(scroll_wrap)
+        sf.link_wheel(pad)
+        sf.link_wheel(card)
+        list_outer = sf.inner
+        list_outer.configure(bg=C["surface"])
+
+        all_scroll_targets = [overlay, card, pad, scroll_wrap, sf, list_outer]
+
+        for item in alerts:
+            op = item["op"]
+            item_card = tk.Frame(list_outer, bg=C["surface2"],
+                                 highlightthickness=1, highlightbackground=C["hair"])
+            item_card.pack(fill="x", pady=(0, 10))
+            all_scroll_targets.append(item_card)
+
+            head = tk.Frame(item_card, bg=C["surface2"], padx=16, pady=10)
+            head.pack(fill="x")
+            all_scroll_targets.append(head)
+            tk.Label(head, text=op["nome_sacado"], bg=C["surface2"], fg=C["ink"],
+                     font=("Segoe UI", 9, "bold"), anchor="w").pack(side="left", fill="x", expand=True)
+            badge = tk.Label(head, text="Pendente", bg=C["surface2"], fg=C["warn"],
+                             font=("Segoe UI", 8, "bold"))
+            badge.pack(side="right")
+
+            body = tk.Frame(item_card, bg=C["surface2"], padx=16)
+            body.pack(fill="x", pady=(0, 10))
+            all_scroll_targets.append(body)
+
+            prazo_txt = f"{op['prazo']} dias" if op.get("prazo") else "—"
+            for label, value, accent in (
+                ("Nome Sacado", op.get("nome_sacado") or "—", False),
+                ("NF", op.get("nf") or "—", False),
+                ("Valor", op.get("valor") or "—", True),
+                ("Vencimento", op.get("data_vencimento") or "—", False),
+                ("Prazo", prazo_txt, False),
+            ):
+                row_f = tk.Frame(body, bg=C["surface2"])
+                row_f.pack(fill="x", pady=(0, 2))
+                all_scroll_targets.append(row_f)
+                tk.Label(row_f, text=label, bg=C["surface2"], fg=C["ink_faint"],
+                         font=("Segoe UI", 7, "bold"), width=12, anchor="w").pack(side="left")
+                fg = C["ok"] if accent else C["ink"]
+                tk.Label(row_f, text=value, bg=C["surface2"], fg=fg,
+                         font=("Segoe UI", 8, "bold" if accent else "normal"),
+                         anchor="w").pack(side="left", fill="x", expand=True)
+
+            motivo_f = tk.Frame(body, bg=C["surface2"])
+            motivo_f.pack(fill="x", pady=(6, 0))
+            all_scroll_targets.append(motivo_f)
+            tk.Label(motivo_f, text="Motivo", bg=C["surface2"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold"), width=12, anchor="w").pack(side="left", anchor="n")
+            tk.Label(
+                motivo_f,
+                text=" · ".join(item["motivos"]),
+                bg=C["surface2"], fg=C["warn"],
+                font=("Segoe UI", 8), wraplength=560, justify="left",
+            ).pack(side="left", fill="x", expand=True)
+
+            btn_row = tk.Frame(item_card, bg=C["surface2"], padx=16)
+            btn_row.pack(fill="x", pady=(6, 12))
+            all_scroll_targets.append(btn_row)
+            widgets = {"card": item_card, "badge": badge}
+            styled_button(
+                btn_row, "✓ Aceitar",
+                lambda it=item, w=widgets: self._set_alert_decision(it, "accept", w),
+                accent=True, small=True,
+            ).pack(side="left", padx=(0, 8))
+            styled_button(
+                btn_row, "✕ Rejeitar",
+                lambda it=item, w=widgets: self._set_alert_decision(it, "reject", w),
+                danger=True, small=True,
+            ).pack(side="left")
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(14, 0))
+        self._alert_footer_lbl = tk.Label(
+            foot, text=f"{len(alerts)} nota(s) aguardando decisão",
+            bg=C["surface"], fg=C["warn"], font=("Segoe UI", 9))
+        self._alert_footer_lbl.pack(side="left")
+        self._alert_continue_btn = styled_button(
+            foot, "Continuar →", self._finish_alerts_review, accent=True, small=True)
+        self._alert_continue_btn.configure(state="disabled")
+        self._alert_continue_btn.pack(side="right")
+
+        self._bind_modal_scroll(all_scroll_targets, sf)
+
+        def _sync_modal():
+            sf.update_idletasks()
+            sf._sync_scrollregion()
+            sf.refresh_bindings()
+        self.after_idle(_sync_modal)
+
+    def _on_parse_complete(self, ops):
+        self._stop_loading_anim()
+        self._loading_outer.pack_forget()
+        alerts = _invertido_collect_alerts(ops)
+        if alerts:
+            self._show_alerts_modal(ops, alerts)
+        else:
+            self._render_results(ops)
+
     def _close_detalhes(self):
         if self._detail_overlay is not None:
             try:
@@ -3559,7 +4247,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
     def _worker(self, path):
         try:
             ops = _parse_invertido_xlsx(path)
-            self._ui(lambda: self._render_results(ops))
+            self._ui(lambda o=ops: self._on_parse_complete(o))
         except Exception as e:
             self._ui(lambda m=str(e): self._show_error(f"Erro ao analisar: {m}"))
         finally:
@@ -4466,6 +5154,7 @@ class App(tk.Tk):
             (OperacoesInvertidoFrame,"OperacoesInvertido"),
             (AnalisarOperacoesFrame, "AnalisarOperacoes"),
             (LimitesInvertidoFrame,  "LimitesInvertido"),
+            (TaxasInvertidoFrame,    "TaxasInvertido"),
         ]:
             f = Cls(self._content, self)
             self.frames[name] = f
@@ -4527,7 +5216,8 @@ class App(tk.Tk):
         sidebar_name = name
         if name in ("BPM", "BPM_CONFIG"):
             sidebar_name = "BPM"
-        elif name in ("OperacoesInvertido", "LimitesInvertido", "AnalisarOperacoes"):
+        elif name in ("OperacoesInvertido", "LimitesInvertido", "AnalisarOperacoes",
+                      "TaxasInvertido"):
             sidebar_name = "OperacoesInvertido"
         self._sidebar.set_active(sidebar_name)
         self._titlebar.set_module(name)
