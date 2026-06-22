@@ -535,6 +535,114 @@ def to_universal_unc_path(path: str) -> str:
 def only_digits(s):
     return re.sub(r"\D","",s or "")
 
+def _bind_digits_only(entry, var, max_len, min_len=None, hint_lbl=None,
+                       valid_lengths=None, hint_text=None):
+    """Restringe um Entry a aceitar apenas dígitos, até max_len caracteres.
+    Se hint_lbl for informado, mostra um aviso minimalista ao perder o foco
+    quando o tamanho não corresponde ao exigido (min_len, ou a um dos
+    valid_lengths quando especificado — ex.: CPF/CNPJ: 11 ou 14)."""
+    def _check_len():
+        if hint_lbl is None:
+            return
+        digits = only_digits(var.get())
+        if not digits:
+            hint_lbl.configure(text=" ")
+            return
+        if valid_lengths:
+            ok = len(digits) in valid_lengths
+        elif min_len is not None and min_len == max_len:
+            ok = len(digits) == max_len
+        else:
+            ok = len(digits) >= (min_len or max_len)
+        hint_lbl.configure(text=(hint_text or "número irregular") if not ok else " ")
+
+    def _on_key(e):
+        if e.keysym in ("BackSpace","Delete","Tab","Return","Left","Right","Home","End"):
+            return
+        if e.state & 0x4:
+            return
+        if e.char and e.char.isdigit():
+            if len(only_digits(var.get())) >= max_len and not entry.selection_present():
+                return "break"
+            return
+        if e.char:
+            return "break"
+    def _on_paste(_e):
+        try:
+            clip = entry.clipboard_get()
+        except Exception:
+            return "break"
+        var.set(only_digits(clip)[:max_len])
+        return "break"
+    entry.bind("<KeyPress>", _on_key)
+    entry.bind("<<Paste>>", _on_paste)
+    entry.bind("<Control-v>", _on_paste)
+    if hint_lbl is not None:
+        entry.bind("<FocusOut>", lambda _e: _check_len())
+
+def _bind_conta_field(entry, var, hint_lbl):
+    """Campo de conta no formato 99999-9 (5 dígitos + dígito verificador).
+    O usuário só digita números; o hífen é inserido automaticamente, e um
+    aviso minimalista aparece enquanto faltar o dígito verificador."""
+    state = {"updating": False}
+
+    def _format(digits):
+        digits = digits[:6]
+        if len(digits) <= 5:
+            return digits
+        return f"{digits[:5]}-{digits[5:]}"
+
+    def _refresh_hint(digits):
+        if digits and len(digits) < 6:
+            hint_lbl.configure(text="falta o dígito (ex.: -8)")
+        else:
+            hint_lbl.configure(text=" ")
+
+    def _on_keyrelease(_e=None):
+        if state["updating"]:
+            return
+        digits = only_digits(var.get())[:6]
+        state["updating"] = True
+        var.set(_format(digits))
+        entry.icursor("end")
+        state["updating"] = False
+        hint_lbl.configure(text=" ")
+
+    def _on_focus_out(_e=None):
+        digits = only_digits(var.get())[:6]
+        _refresh_hint(digits)
+
+    def _on_key(e):
+        if e.keysym in ("BackSpace","Delete","Tab","Return","Left","Right","Home","End"):
+            entry.after_idle(_on_keyrelease)
+            return
+        if e.state & 0x4:
+            return
+        if e.char and e.char.isdigit():
+            if len(only_digits(var.get())) >= 6 and not entry.selection_present():
+                return "break"
+            entry.after_idle(_on_keyrelease)
+            return
+        if e.char:
+            return "break"
+
+    def _on_paste(_e):
+        try:
+            clip = entry.clipboard_get()
+        except Exception:
+            return "break"
+        digits = only_digits(clip)[:6]
+        state["updating"] = True
+        var.set(_format(digits))
+        state["updating"] = False
+        hint_lbl.configure(text=" ")
+        return "break"
+
+    entry.bind("<KeyPress>", _on_key)
+    entry.bind("<<Paste>>", _on_paste)
+    entry.bind("<Control-v>", _on_paste)
+    entry.bind("<FocusOut>", _on_focus_out)
+
 LIMITE_INVERTIDO_CNPJS = frozenset(
     only_digits(v["CNPJ"]) for v in BPM_CLIENT_DATA.values() if v.get("CNPJ")
 )
@@ -745,7 +853,9 @@ FRAME_LABELS = {
     "Home":              "Início",
     "Rotinas":           "Rotinas",
     "Share":             "Cadastro Share",
-    "BPM_CONFIG":        "Configurar BPM",
+    "BPM_CONFIG":        "Configurar BPM Invertido",
+    "BPM_CONFIG_NOVA":   "Configurar BPM — Nova Plataforma",
+    "BPM_HUB":           "BPM",
     "BPM":               "BPM — Operações",
     "OperacoesInvertido":"Operações Invertido",
     "LimitesInvertido":  "Limites Invertido",
@@ -1186,6 +1296,72 @@ def eyebrow_label(parent, text, bg=None):
                     font=("Segoe UI", 7, "bold"))
 
 
+def make_hub_option_card(parent, row, col, icon, title, sub, command, color,
+                          alert=False, alert_text="● Atenção"):
+    """Card de opção usado nas telas-hub (Operações Invertido, BPM, etc.),
+    em grid de 3 colunas com design minimalista consistente com o app."""
+    pad_x = {0: (0, 6), 1: (6, 6), 2: (6, 0)}.get(col, (6, 6))
+    pad_y = (0, 0) if row == 0 else (12, 0)
+    outer = tk.Frame(parent, bg=C["surface"],
+                     highlightthickness=1, highlightbackground=C["hair"],
+                     cursor="hand2")
+    outer.grid(row=row, column=col, sticky="nsew", padx=pad_x, pady=pad_y)
+
+    top_line = tk.Frame(outer, bg=C["hair"], height=2)
+    top_line.pack(fill="x")
+
+    body_f = tk.Frame(outer, bg=C["surface"], padx=22, pady=22)
+    body_f.pack(fill="both", expand=True)
+
+    icon_row = tk.Frame(body_f, bg=C["surface"])
+    icon_row.pack(fill="x", anchor="w")
+    icon_lbl = tk.Label(icon_row, text=icon, bg=C["surface"], fg=color,
+                        font=("Segoe UI", 22))
+    icon_lbl.pack(side="left")
+    alert_lbl = None
+    if alert:
+        alert_lbl = tk.Label(icon_row, text=alert_text, bg=C["surface"],
+                             fg=C["err"], font=("Segoe UI", 7, "bold"))
+        alert_lbl.pack(side="right", anchor="n", pady=(4, 0))
+    name_lbl = tk.Label(body_f, text=title, bg=C["surface"], fg=C["ink"],
+                        font=("Segoe UI", 12, "bold"), anchor="w")
+    name_lbl.pack(anchor="w", pady=(12, 4))
+    sub_lbl = tk.Label(body_f, text=sub, bg=C["surface"], fg=C["ink_muted"],
+                       font=("Segoe UI", 9), anchor="w", wraplength=200,
+                       justify="left")
+    sub_lbl.pack(anchor="w")
+    arrow_lbl = tk.Label(body_f, text="Abrir →", bg=C["surface"], fg=C["ink_faint"],
+                         font=("Segoe UI", 8, "bold"))
+    arrow_lbl.pack(anchor="w", pady=(18, 0))
+
+    widgets = [outer, top_line, body_f, icon_row, icon_lbl, name_lbl, sub_lbl, arrow_lbl]
+
+    def _enter(_e=None):
+        outer.configure(bg=C["surface2"], highlightbackground=color)
+        top_line.configure(bg=color)
+        for w in (body_f, icon_row, icon_lbl, name_lbl, sub_lbl):
+            w.configure(bg=C["surface2"])
+        if alert_lbl is not None:
+            alert_lbl.configure(bg=C["surface2"])
+        arrow_lbl.configure(bg=C["surface2"], fg=color)
+
+    def _leave(_e=None):
+        outer.configure(bg=C["surface"], highlightbackground=C["hair"])
+        top_line.configure(bg=C["hair"])
+        for w in (body_f, icon_row, icon_lbl, name_lbl, sub_lbl):
+            w.configure(bg=C["surface"])
+        if alert_lbl is not None:
+            alert_lbl.configure(bg=C["surface"])
+        arrow_lbl.configure(bg=C["surface"], fg=C["ink_faint"])
+
+    for w in widgets:
+        w.bind("<Button-1>", lambda _e: command())
+        w.bind("<Enter>", _enter)
+        w.bind("<Leave>", _leave)
+
+    return outer
+
+
 def section_divider(parent, text="", bg=None):
     bg = bg or C["bg"]
     row = tk.Frame(parent, bg=bg)
@@ -1506,7 +1682,7 @@ class Sidebar(tk.Frame):
 class HomeFrame(tk.Frame):
     MODULES = [
         {"name": "Cadastro Share",     "sub": "Extração e análise de PDF",          "icon": "⊕", "frame": "Share",            "color": "#5a9e72"},
-        {"name": "BPM",                "sub": "Abertura de solicitações",            "icon": "⚡", "frame": "BPM_CONFIG",       "color": "#EC7000"},
+        {"name": "BPM",                "sub": "Abertura de solicitações",            "icon": "⚡", "frame": "BPM_HUB",          "color": "#EC7000"},
         {"name": "Operações Invertido","sub": "Limites, LTC e análise de planilhas", "icon": "⬡", "frame": "OperacoesInvertido","color": "#c87941"},
         {"name": "Rotinas",            "sub": "Sequências configuráveis",            "icon": "◈", "frame": "Rotinas",          "color": "#8b72c9"},
     ]
@@ -1559,7 +1735,7 @@ class HomeFrame(tk.Frame):
         quick.pack(fill="x", padx=44, pady=(0, 40))
 
         links = [
-            ("Nova solicitação BPM",    "BPM_CONFIG"),
+            ("Nova solicitação BPM",    "BPM_HUB"),
             ("Operações Invertido",      "OperacoesInvertido"),
             ("Extrair dados de PDF",     "Share"),
             ("Gerenciar rotinas",        "Rotinas"),
@@ -2707,6 +2883,47 @@ class RotinasFrame(tk.Frame):
         dlg.grab_set()
 
 
+class BPMHubFrame(tk.Frame):
+    """Hub do BPM — escolha entre BPM Invertido (clientes/valores fixos da
+    mesa) e BPM Nova Plataforma (CNPJ/agência/conta/plataforma/valor
+    variáveis, informados pelo usuário)."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=44, pady=(36, 0))
+        eyebrow_label(hdr, "MESA DE OPERAÇÕES").pack(anchor="w")
+        tk.Label(hdr, text="BPM", bg=C["bg"], fg=C["ink"],
+                 font=("Segoe UI", 22, "bold")).pack(anchor="w", pady=(6, 0))
+        tk.Label(hdr, text="Escolha a plataforma para abrir a solicitação.",
+                 bg=C["bg"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", pady=(20, 0))
+
+        body = tk.Frame(self, bg=C["bg"])
+        body.pack(fill="both", expand=True, padx=44, pady=(32, 0))
+        for c in range(3):
+            body.columnconfigure(c, weight=1, uniform="bpmhub")
+
+        make_hub_option_card(
+            body, 0, 0, "⬡", "BPM Invertido",
+            "Clientes e valores de Operações Invertido já mapeados.",
+            lambda: self.controller.show_frame("BPM_CONFIG"), C["accent"])
+
+        make_hub_option_card(
+            body, 0, 1, "⚡", "BPM Nova Plataforma",
+            "Informe CNPJ, agência, conta, plataforma e valor da operação.",
+            lambda: self.controller.show_frame("BPM_CONFIG_NOVA"), "#EC7000")
+
+    def on_show(self):
+        pass
+
+
 class BPMConfigFrame(tk.Frame):
     CLIENTS = list(BPM_CLIENT_DATA.keys())
 
@@ -2716,6 +2933,10 @@ class BPMConfigFrame(tk.Frame):
         self._selected  = {}
         self._func_var  = tk.StringVar()
         self._senha_var = tk.StringVar()
+        self._func_var.trace_add(
+            "write", lambda *_: setattr(self.controller, "bpm_funcional", self._func_var.get()))
+        self._senha_var.trace_add(
+            "write", lambda *_: setattr(self.controller, "bpm_password", self._senha_var.get()))
         self._build()
 
     def _only_digits(self, s):
@@ -2730,7 +2951,7 @@ class BPMConfigFrame(tk.Frame):
     def _build(self):
         hdr = tk.Frame(self, bg=C["bg"])
         hdr.pack(fill="x", padx=32, pady=(24,0))
-        tk.Label(hdr, text="Configurar BPM", bg=C["bg"], fg=C["ink"],
+        tk.Label(hdr, text="Configurar BPM Invertido", bg=C["bg"], fg=C["ink"],
                  font=("Georgia",18,"bold")).pack(side="left")
         make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14,0))
 
@@ -2804,7 +3025,9 @@ class BPMConfigFrame(tk.Frame):
         foot = tk.Frame(body, bg=C["bg"])
         foot.pack(fill="x", padx=32, pady=16)
         styled_button(foot, "← Voltar",
-                      lambda: self.controller.show_frame("Home")).pack(side="left")
+                      lambda: self.controller.show_frame("BPM_HUB")).pack(side="left")
+        styled_button(foot, "Trocar p/ Nova Plataforma →",
+                      lambda: self.controller.show_frame("BPM_CONFIG_NOVA")).pack(side="left", padx=(8, 0))
         self._run_btn = styled_button(foot, "▶  Iniciar BPM",
                                       self._start_bpm, accent=True)
         self._run_btn.pack(side="right")
@@ -2888,7 +3111,287 @@ class BPMConfigFrame(tk.Frame):
         self.controller.bpm_funcional    = func
         self.controller.bpm_password     = senha
         self.controller.bpm_run_selection = selection
+        self.controller.bpm_run_mode      = "invertido"
         self.controller.show_frame("BPM")
+
+class BPMNovaConfigFrame(tk.Frame):
+    """Configuração de BPM para a Nova Plataforma — diferente do Invertido,
+    aqui CNPJ, agência, conta, plataforma e valor são todos informados
+    livremente pelo usuário, linha por linha."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._func_var  = tk.StringVar()
+        self._senha_var = tk.StringVar()
+        self._func_var.trace_add(
+            "write", lambda *_: setattr(self.controller, "bpm_funcional", self._func_var.get()))
+        self._senha_var.trace_add(
+            "write", lambda *_: setattr(self.controller, "bpm_password", self._senha_var.get()))
+        self._rows = []
+        self._build()
+
+    def on_show(self):
+        self._func_var.set(getattr(self.controller, "bpm_funcional", "") or "")
+        self._senha_var.set(getattr(self.controller, "bpm_password", "") or "")
+        if hasattr(self, "_sf"):
+            self._sf.refresh_bindings()
+        if not self._rows:
+            self._add_row()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        tk.Label(hdr, text="Configurar BPM — Nova Plataforma", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left")
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14, 0))
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        body = self._sf.inner
+        body.configure(bg=C["bg"])
+
+        sec = card_frame(body)
+        sec.pack(fill="x", padx=32, pady=(20, 0))
+        tk.Label(sec, text="Credenciais do Painel de Serviços", bg=C["surface"],
+                 fg=C["ink"], font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=18, pady=(14, 0))
+        tk.Label(sec, text="Funcional e senha para login no Painel BPM",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 8)).pack(
+                     anchor="w", padx=18, pady=(2, 10))
+        make_hairline(sec, bg=C["hair"]).pack(fill="x")
+
+        cred_form = tk.Frame(sec, bg=C["surface"], padx=18, pady=14)
+        cred_form.pack(fill="x")
+        cred_form.columnconfigure(0, weight=1)
+        cred_form.columnconfigure(1, weight=1)
+
+        fc = tk.Frame(cred_form, bg=C["surface"])
+        fc.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        tk.Label(fc, text="Funcional (somente números)", bg=C["surface"],
+                 fg=C["ink_muted"], font=("Segoe UI", 8)).pack(anchor="w")
+        self._ent_func = styled_entry(fc, textvariable=self._func_var)
+        self._ent_func.pack(fill="x", pady=(4, 0))
+
+        sc2 = tk.Frame(cred_form, bg=C["surface"])
+        sc2.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        tk.Label(sc2, text="Senha (até 6 dígitos)", bg=C["surface"],
+                 fg=C["ink_muted"], font=("Segoe UI", 8)).pack(anchor="w")
+        self._ent_senha = styled_entry(sc2, textvariable=self._senha_var, show="•")
+        self._ent_senha.pack(fill="x", pady=(4, 0))
+
+        def _key_func(e):
+            if e.keysym in ("BackSpace", "Delete", "Tab", "Return", "Left", "Right", "Home", "End"):
+                return
+            if e.state & 0x4:
+                return
+            if e.char and e.char.isdigit():
+                return
+            if e.char:
+                return "break"
+
+        def _key_senha(e):
+            if e.keysym in ("BackSpace", "Delete", "Tab", "Return", "Left", "Right", "Home", "End"):
+                return
+            if e.state & 0x4:
+                return
+            if not e.char:
+                return
+            if not e.char.isdigit():
+                return "break"
+            if len(self._ent_senha.get()) >= 6 and not self._ent_senha.selection_present():
+                return "break"
+
+        self._ent_func.bind("<KeyPress>", _key_func)
+        self._ent_senha.bind("<KeyPress>", _key_senha)
+
+        sec2 = card_frame(body)
+        sec2.pack(fill="x", padx=32, pady=(16, 0))
+        tk.Label(sec2, text="Operações", bg=C["surface"],
+                 fg=C["ink"], font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=18, pady=(14, 0))
+        tk.Label(sec2, text="Informe CNPJ, agência, conta, plataforma e valor de cada operação",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 8)).pack(
+                     anchor="w", padx=18, pady=(2, 10))
+        make_hairline(sec2, bg=C["hair"]).pack(fill="x")
+
+        self._rows_wrap = tk.Frame(sec2, bg=C["surface"], padx=18, pady=12)
+        self._rows_wrap.pack(fill="x")
+
+        add_row_f = tk.Frame(sec2, bg=C["surface"], padx=18, pady=10)
+        add_row_f.pack(fill="x")
+        styled_button(add_row_f, "+ Adicionar operação", self._add_row,
+                      small=True).pack(anchor="w")
+
+        make_hairline(body, bg=C["hair"]).pack(fill="x", padx=32, pady=(20, 0))
+
+        foot = tk.Frame(body, bg=C["bg"])
+        foot.pack(fill="x", padx=32, pady=16)
+        styled_button(foot, "← Voltar",
+                      lambda: self.controller.show_frame("BPM_HUB")).pack(side="left")
+        styled_button(foot, "Trocar p/ BPM Invertido →",
+                      lambda: self.controller.show_frame("BPM_CONFIG")).pack(side="left", padx=(8, 0))
+        self._run_btn = styled_button(foot, "▶  Iniciar BPM",
+                                      self._start_bpm, accent=True)
+        self._run_btn.pack(side="right")
+
+    def _add_row(self):
+        row_f = tk.Frame(self._rows_wrap, bg=C["surface"], pady=6)
+        row_f.pack(fill="x")
+        for c in range(5):
+            row_f.columnconfigure(c, weight=1, uniform="novarow")
+
+        def _field(col, label, max_len=None, min_len=None, valid_lengths=None,
+                   hint_text=None):
+            wrap = tk.Frame(row_f, bg=C["surface"])
+            wrap.grid(row=0, column=col, sticky="new", padx=(0 if col == 0 else 6, 0))
+            tk.Label(wrap, text=label, bg=C["surface"], fg=C["ink_muted"],
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w")
+            var = tk.StringVar()
+            ent = styled_entry(wrap, textvariable=var, width=14)
+            ent.pack(fill="x", pady=(3, 0))
+            hint = tk.Label(wrap, text=" ", bg=C["surface"], fg=C["warn"],
+                            font=("Segoe UI", 7), anchor="w", justify="left")
+            hint.pack(anchor="w", fill="x", pady=(2, 0))
+            if max_len is not None:
+                _bind_digits_only(ent, var, max_len, min_len=min_len, hint_lbl=hint,
+                                  valid_lengths=valid_lengths, hint_text=hint_text)
+            return var, ent, hint
+
+        cnpj_var, cnpj_ent, _ = _field(
+            0, "CNPJ", max_len=14, valid_lengths={11, 14},
+            hint_text="número irregular (CPF: 11 ou CNPJ: 14 dígitos)")
+        ag_var, ag_ent, _ = _field(
+            1, "AGÊNCIA", max_len=4, min_len=4, hint_text="agência deve ter 4 dígitos")
+        conta_var, conta_ent, conta_hint = _field(2, "CONTA")
+        plat_var, plat_ent, _ = _field(
+            3, "PLATAFORMA", max_len=4, min_len=4, hint_text="plataforma deve ter 4 dígitos")
+
+        _bind_conta_field(conta_ent, conta_var, conta_hint)
+
+        val_wrap = tk.Frame(row_f, bg=C["surface"])
+        val_wrap.grid(row=0, column=4, sticky="new", padx=(6, 0))
+        tk.Label(val_wrap, text="VALOR", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w")
+        val_inner = tk.Frame(val_wrap, bg=C["surface"])
+        val_inner.pack(fill="x", pady=(3, 0))
+        val_var = tk.StringVar(value="R$ 0,00")
+        val_digits = [""]
+        val_ent = styled_entry(val_inner, textvariable=val_var, width=12)
+        val_ent.pack(side="left", fill="x", expand=True)
+
+        def fmt_val():
+            if not val_digits[0]:
+                val_var.set("R$ 0,00")
+                return
+            d = Decimal(int(val_digits[0])) / Decimal("100")
+            val_var.set(_fmt_brl(d))
+
+        def on_key(e):
+            if e.keysym == "BackSpace":
+                val_digits[0] = val_digits[0][:-1]; fmt_val(); return "break"
+            if e.char and e.char.isdigit():
+                val_digits[0] += e.char; fmt_val(); return "break"
+            if e.keysym in {"Tab", "Left", "Right", "Home", "End"}:
+                return
+            return "break"
+
+        def on_paste(_):
+            try:
+                clip = row_f.clipboard_get()
+            except Exception:
+                return "break"
+            d = _parse_brl(clip)
+            if d is None:
+                return "break"
+            val_digits[0] = str(max(int((d * 100).quantize(Decimal("1"))), 0))
+            fmt_val(); return "break"
+
+        val_ent.bind("<KeyPress>", on_key)
+        val_ent.bind("<<Paste>>", on_paste)
+        val_ent.bind("<Control-v>", on_paste)
+
+        rm_btn = styled_button(val_inner, "✕", lambda: self._remove_row(entry),
+                               danger=True, small=True)
+        rm_btn.pack(side="left", padx=(6, 0))
+
+        make_hairline(row_f, bg=C["hair"]).grid(row=1, column=0, columnspan=5,
+                                                sticky="ew", pady=(8, 0))
+
+        entry = {
+            "frame": row_f, "cnpj": cnpj_var, "agencia": ag_var,
+            "conta": conta_var, "plataforma": plat_var,
+            "val_var": val_var, "val_digits": val_digits,
+        }
+        self._rows.append(entry)
+        return entry
+
+    def _remove_row(self, entry):
+        if len(self._rows) <= 1:
+            messagebox.showinfo("Operações", "É necessário ao menos uma operação.")
+            return
+        entry["frame"].destroy()
+        self._rows.remove(entry)
+
+    def _start_bpm(self):
+        func = only_digits(self._func_var.get())
+        senha = only_digits(self._senha_var.get())
+        if not func:
+            messagebox.showwarning("Funcional obrigatório", "Informe o funcional (somente números).")
+            return
+        if not (1 <= len(senha) <= 6):
+            messagebox.showwarning("Senha inválida", "Senha deve ter 1 a 6 dígitos.")
+            return
+
+        selection = []
+        for entry in self._rows:
+            cnpj = only_digits(entry["cnpj"].get())
+            agencia = only_digits(entry["agencia"].get())
+            conta = entry["conta"].get().strip()
+            plataforma = entry["plataforma"].get().strip()
+            raw_val = entry["val_var"].get()
+            d = _parse_brl(raw_val)
+            if not cnpj or not agencia or not conta or not plataforma:
+                messagebox.showwarning(
+                    "Dados incompletos",
+                    "Preencha CNPJ, agência, conta e plataforma de todas as operações.")
+                return
+            if len(cnpj) not in (11, 14):
+                messagebox.showwarning(
+                    "CNPJ/CPF irregular",
+                    "Informe um CPF (11 dígitos) ou CNPJ (14 dígitos) válido.")
+                return
+            if len(agencia) != 4:
+                messagebox.showwarning(
+                    "Agência irregular", "A agência deve ter exatamente 4 dígitos.")
+                return
+            if len(plataforma) != 4:
+                messagebox.showwarning(
+                    "Plataforma irregular", "A plataforma deve ter exatamente 4 dígitos.")
+                return
+            if "-" not in conta or len(only_digits(conta)) < 6:
+                messagebox.showwarning(
+                    "Conta incompleta",
+                    "Informe a conta com o dígito verificador (ex.: 99451-8).")
+                return
+            if d is None or d == Decimal("0.00"):
+                messagebox.showwarning("Valor inválido", "Informe um valor válido para cada operação.")
+                return
+            selection.append({
+                "cliente": f"CNPJ {cnpj}",
+                "valor": _fmt_brl_from_raw(raw_val),
+                "CNPJ": cnpj, "AG": agencia, "CONTA": conta, "PLATAFORMA": plataforma,
+            })
+
+        if not selection:
+            messagebox.showwarning("Seleção vazia", "Adicione ao menos uma operação.")
+            return
+
+        self.controller.bpm_funcional    = func
+        self.controller.bpm_password     = senha
+        self.controller.bpm_run_selection = selection
+        self.controller.bpm_run_mode      = "nova_plataforma"
+        self.controller.show_frame("BPM")
+
 
 class ShareFrame(tk.Frame):
     def __init__(self, parent, controller):
@@ -3178,67 +3681,9 @@ class OperacoesInvertidoFrame(tk.Frame):
 
     # ── Cards de opção ───────────────────────────────────────────────────────
     def _make_option_card(self, parent, row, col, icon, title, sub, command, color,
-                           alert=False):
-        pad_x = {0: (0, 6), 1: (6, 6), 2: (6, 0)}.get(col, (6, 6))
-        pad_y = (0, 0) if row == 0 else (12, 0)
-        outer = tk.Frame(parent, bg=C["surface"],
-                         highlightthickness=1, highlightbackground=C["hair"],
-                         cursor="hand2")
-        outer.grid(row=row, column=col, sticky="nsew", padx=pad_x, pady=pad_y)
-
-        top_line = tk.Frame(outer, bg=C["hair"], height=2)
-        top_line.pack(fill="x")
-
-        body_f = tk.Frame(outer, bg=C["surface"], padx=22, pady=22)
-        body_f.pack(fill="both", expand=True)
-
-        icon_row = tk.Frame(body_f, bg=C["surface"])
-        icon_row.pack(fill="x", anchor="w")
-        icon_lbl = tk.Label(icon_row, text=icon, bg=C["surface"], fg=color,
-                            font=("Segoe UI", 22))
-        icon_lbl.pack(side="left")
-        alert_lbl = None
-        if alert:
-            alert_lbl = tk.Label(icon_row, text="● Taxas vencidas", bg=C["surface"],
-                                 fg=C["err"], font=("Segoe UI", 7, "bold"))
-            alert_lbl.pack(side="right", anchor="n", pady=(4, 0))
-        name_lbl = tk.Label(body_f, text=title, bg=C["surface"], fg=C["ink"],
-                            font=("Segoe UI", 12, "bold"), anchor="w")
-        name_lbl.pack(anchor="w", pady=(12, 4))
-        sub_lbl = tk.Label(body_f, text=sub, bg=C["surface"], fg=C["ink_muted"],
-                           font=("Segoe UI", 9), anchor="w", wraplength=200,
-                           justify="left")
-        sub_lbl.pack(anchor="w")
-        arrow_lbl = tk.Label(body_f, text="Abrir →", bg=C["surface"], fg=C["ink_faint"],
-                             font=("Segoe UI", 8, "bold"))
-        arrow_lbl.pack(anchor="w", pady=(18, 0))
-
-        widgets = [outer, top_line, body_f, icon_row, icon_lbl, name_lbl, sub_lbl, arrow_lbl]
-
-        def _enter(_e=None):
-            outer.configure(bg=C["surface2"], highlightbackground=color)
-            top_line.configure(bg=color)
-            for w in (body_f, icon_row, icon_lbl, name_lbl, sub_lbl):
-                w.configure(bg=C["surface2"])
-            if alert_lbl is not None:
-                alert_lbl.configure(bg=C["surface2"])
-            arrow_lbl.configure(bg=C["surface2"], fg=color)
-
-        def _leave(_e=None):
-            outer.configure(bg=C["surface"], highlightbackground=C["hair"])
-            top_line.configure(bg=C["hair"])
-            for w in (body_f, icon_row, icon_lbl, name_lbl, sub_lbl):
-                w.configure(bg=C["surface"])
-            if alert_lbl is not None:
-                alert_lbl.configure(bg=C["surface"])
-            arrow_lbl.configure(bg=C["surface"], fg=C["ink_faint"])
-
-        for w in widgets:
-            w.bind("<Button-1>", lambda _e: command())
-            w.bind("<Enter>", _enter)
-            w.bind("<Leave>", _leave)
-
-        return outer
+                           alert=False, alert_text="● Taxas vencidas"):
+        return make_hub_option_card(parent, row, col, icon, title, sub, command, color,
+                                    alert=alert, alert_text=alert_text)
 
     # ── Histórico Operações (placeholder) ───────────────────────────────────
     def _open_historico_placeholder(self):
@@ -4940,6 +5385,7 @@ class BPMFrame(tk.Frame, ThreadSafeUIMixin):
         self._cancel_requested = False
         self._browser = None
         self._started = False
+        self._mode = "invertido"
         self._init_ui_queue()
         self._build()
 
@@ -5011,6 +5457,7 @@ class BPMFrame(tk.Frame, ThreadSafeUIMixin):
         if self._started: return
         self._started = True
         self._selected = sel
+        self._mode = getattr(self.controller, "bpm_run_mode", "invertido")
         self._setup_cards()
         self._start_worker()
 
@@ -5023,7 +5470,8 @@ class BPMFrame(tk.Frame, ThreadSafeUIMixin):
             except: pass
         self._reset()
         self._started = False
-        self.controller.show_frame("BPM_CONFIG")
+        dest = "BPM_CONFIG_NOVA" if self._mode == "nova_plataforma" else "BPM_CONFIG"
+        self.controller.show_frame(dest)
 
     def _reset(self):
         self._cards = []
@@ -5268,14 +5716,21 @@ class BPMFrame(tk.Frame, ThreadSafeUIMixin):
                     if self._cancel_requested: raise BPMUserCancelled()
                     client_name = item.get("cliente","")
                     raw_amount  = item.get("valor","")
-                    info = BPM_CLIENT_DATA.get(client_name)
-                    if not info:
-                        self._log_line(f"[{client_name}] Sem mapeamento interno.", "err"); continue
+                    if self._mode == "nova_plataforma":
+                        info = {"CNPJ": item.get("CNPJ",""), "AG": item.get("AG",""),
+                                 "CONTA": item.get("CONTA",""), "PLATAFORMA": item.get("PLATAFORMA","")}
+                        if not all(info.values()):
+                            self._log_line(f"[{client_name}] Dados incompletos.", "err"); continue
+                    else:
+                        info = BPM_CLIENT_DATA.get(client_name)
+                        if not info:
+                            self._log_line(f"[{client_name}] Sem mapeamento interno.", "err"); continue
                     amount_web = _fmt_brl_plain_web(raw_amount)
                     if not amount_web:
                         self._log_line(f"[{client_name}] Valor inválido: {raw_amount}", "err"); continue
 
                     self._log_line(f"━━ {client_name} ━━", "heading")
+                    self._log_line("  Razão social: Indefinido", "step")
                     tentativa = 0
                     while True:
                         if self._cancel_requested: raise BPMUserCancelled()
@@ -5426,7 +5881,9 @@ class App(tk.Tk):
             (HomeFrame,              "Home"),
             (RotinasFrame,           "Rotinas"),
             (ShareFrame,             "Share"),
+            (BPMHubFrame,            "BPM_HUB"),
             (BPMConfigFrame,         "BPM_CONFIG"),
+            (BPMNovaConfigFrame,     "BPM_CONFIG_NOVA"),
             (BPMFrame,               "BPM"),
             (OperacoesInvertidoFrame,"OperacoesInvertido"),
             (AnalisarOperacoesFrame, "AnalisarOperacoes"),
@@ -5486,12 +5943,12 @@ class App(tk.Tk):
 
     def show_frame(self, name):
         if name == "BPM" and not getattr(self,"bpm_run_selection",[]):
-            name = "BPM_CONFIG"
+            name = "BPM_HUB"
         f = self.frames.get(name)
         if f is None: return
         self._active_frame = name
         sidebar_name = name
-        if name in ("BPM", "BPM_CONFIG"):
+        if name in ("BPM", "BPM_CONFIG", "BPM_CONFIG_NOVA", "BPM_HUB"):
             sidebar_name = "BPM"
         elif name in ("OperacoesInvertido", "LimitesInvertido", "AnalisarOperacoes",
                       "TaxasInvertido"):
