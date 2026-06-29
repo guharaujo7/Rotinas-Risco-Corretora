@@ -400,6 +400,35 @@ def _invertido_apply_alert_decisions(ops: list, alerts: list, decisions: dict) -
 LIMITE_SOBRA_MIN = 100_000
 
 
+def _parse_data_curta(s):
+    """Converte 'dd/mm/aaaa' (ou variações) em date. Retorna None se inválido."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            continue
+    return None
+
+
+def calcular_valor_liquido(valor_face: Decimal, taxa_pct_str: str, dias_prazo: int) -> Decimal:
+    """Calcula o valor líquido de uma antecipação por desconto comercial
+    simples: VL = VF x (1 - taxa x prazo/30), com taxa mensal em % (ex.:
+    '1,3950') e prazo em dias corridos a partir de hoje até o vencimento.
+    Prazo negativo (nota já vencida) é tratado como zero (sem desconto)."""
+    if valor_face is None or not taxa_pct_str:
+        return None
+    try:
+        taxa = Decimal(taxa_pct_str.replace(",", ".")) / Decimal("100")
+    except Exception:
+        return None
+    prazo = max(dias_prazo, 0)
+    fator = Decimal("1") - (taxa * Decimal(prazo) / Decimal("30"))
+    return (valor_face * fator).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 def _evaluate_limite_operacao(montante: Decimal, limite_data: dict | None):
     if not limite_data:
         return "nao_validado", "Limites não validados"
@@ -502,35 +531,6 @@ def app_base_dir():
 
 def resource_path(p):
     return os.path.join(getattr(sys,"_MEIPASS",app_base_dir()), p)
-
-def to_universal_unc_path(path: str) -> str:
-    """Converte um caminho com letra de unidade mapeada (ex.: Z:\\pasta\\arquivo)
-    no caminho UNC universal (\\\\servidor\\compartilhamento\\pasta\\arquivo),
-    que funciona igual para qualquer pessoa, independente de qual letra cada
-    um mapeou para aquele mesmo local de rede. Se o caminho já for UNC, ou se
-    não for possível resolver (drive local, sem rede), retorna o caminho
-    original (absoluto) sem alterações.
-    """
-    if not path:
-        return path
-    path = os.path.abspath(path)
-    if path.startswith("\\\\") or path.startswith("//"):
-        return path
-    try:
-        buf_len = ctypes.c_ulong(1024)
-        buf = ctypes.create_unicode_buffer(buf_len.value)
-        # UNIVERSAL_NAME_INFO_LEVEL = 1
-        ret = ctypes.windll.mpr.WNetGetUniversalNameW(
-            ctypes.c_wchar_p(path), 1, ctypes.byref(buf), ctypes.byref(buf_len))
-        if ret == 0:
-            # struct UNIVERSAL_NAME_INFO { LPWSTR lpUniversalName; }
-            ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_wchar_p))
-            universal = ptr.contents.value
-            if universal:
-                return universal
-    except Exception:
-        pass
-    return path
 
 def only_digits(s):
     return re.sub(r"\D","",s or "")
@@ -1937,6 +1937,12 @@ def _rotinas_data_path():
     return os.path.join(app_base_dir(), "rotinas_data.json")
 
 
+SHARED_TAXAS_PATH = (
+    r"\\BBAPROD3\fo\Diretoria de Produtos Ativos\Ativos em Reais\Risco Sacado"
+    r"\Comum\AppMiddle\bancodedados\dados.json"
+)
+
+
 class RotinasData:
     _instance = None
 
@@ -2089,7 +2095,13 @@ def _mes_atual_key():
 
 
 class TaxasData:
+    """Camada de dados de Taxas (Depara) — usa EXCLUSIVAMENTE o arquivo de
+    rede compartilhado. Se a rede estiver indisponível, não há fallback
+    local: os dados ficam temporariamente inacessíveis e uma rotina em
+    background tenta reconectar a cada 30s, silenciosamente."""
+
     _instance = None
+    RETRY_SECONDS = 30
 
     @classmethod
     def get(cls):
@@ -2099,27 +2111,73 @@ class TaxasData:
 
     def __init__(self):
         self._taxas = {}
-        self._load()
+        self._available = False
+        self._on_reconnect_callbacks = []
+        self._retry_timer = None
+        self._try_load()
+        if not self._available:
+            self._schedule_retry()
 
-    def _path(self):
-        return _rotinas_data_path()
+    # ── Conectividade ────────────────────────────────────────────────────
+    def is_available(self):
+        return self._available
 
-    def _load(self):
-        path = self._path()
-        if not os.path.isfile(path):
+    def on_reconnect(self, callback):
+        """Registra um callback (sem argumentos) chamado quando a conexão
+        com o arquivo de rede for restabelecida."""
+        self._on_reconnect_callbacks.append(callback)
+
+    def _schedule_retry(self):
+        if self._retry_timer is not None:
+            return
+        self._retry_timer = threading.Timer(self.RETRY_SECONDS, self._retry_tick)
+        self._retry_timer.daemon = True
+        self._retry_timer.start()
+
+    def _retry_tick(self):
+        self._retry_timer = None
+        was_available = self._available
+        self._try_load()
+        if self._available and not was_available:
+            for cb in list(self._on_reconnect_callbacks):
+                try:
+                    cb()
+                except Exception:
+                    pass
+        if not self._available:
+            self._schedule_retry()
+
+    def _network_reachable(self):
+        try:
+            return os.path.isdir(os.path.dirname(SHARED_TAXAS_PATH))
+        except Exception:
+            return False
+
+    def _try_load(self):
+        if not self._network_reachable():
+            self._available = False
             return
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = _json_mod.load(f)
-            self._taxas = data.get("taxas", {})
+            if os.path.isfile(SHARED_TAXAS_PATH):
+                with open(SHARED_TAXAS_PATH, "r", encoding="utf-8") as f:
+                    data = _json_mod.load(f)
+                self._taxas = data.get("taxas", {})
+            self._available = True
         except Exception:
-            pass
+            self._available = False
 
+    def _load(self):
+        self._try_load()
+
+    # ── Persistência ─────────────────────────────────────────────────────
     def save(self):
-        path = self._path()
+        if not self._network_reachable():
+            self._available = False
+            self._schedule_retry()
+            return False
         try:
-            if os.path.isfile(path):
-                with open(path, "r", encoding="utf-8") as f:
+            if os.path.isfile(SHARED_TAXAS_PATH):
+                with open(SHARED_TAXAS_PATH, "r", encoding="utf-8") as f:
                     data = _json_mod.load(f)
             else:
                 data = {}
@@ -2127,10 +2185,14 @@ class TaxasData:
             data = {}
         data["taxas"] = self._taxas
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(SHARED_TAXAS_PATH, "w", encoding="utf-8") as f:
                 _json_mod.dump(data, f, ensure_ascii=False, indent=2)
+            self._available = True
+            return True
         except Exception:
-            pass
+            self._available = False
+            self._schedule_retry()
+            return False
 
     def get_taxa(self, cnpj):
         return self._taxas.get(cnpj)
@@ -2140,7 +2202,7 @@ class TaxasData:
             "taxa": valor_str,
             "validade_mes": _mes_atual_key(),
         }
-        self.save()
+        return self.save()
 
     def is_vigente(self, cnpj):
         info = self._taxas.get(cnpj)
@@ -3626,14 +3688,6 @@ class OperacoesInvertidoFrame(tk.Frame):
 
         make_hairline(self, bg=C["hair"]).pack(fill="x", pady=(20, 0))
 
-        debug_row = tk.Frame(self, bg=C["bg"])
-        debug_row.pack(fill="x", padx=44, pady=(14, 0))
-        styled_button(
-            debug_row, "🔧 Converter caminho de rede (temporário)",
-            self._open_unc_path_tool, small=True).pack(anchor="w")
-
-        make_hairline(self, bg=C["hair"]).pack(fill="x", pady=(14, 0))
-
         body = tk.Frame(self, bg=C["bg"])
         body.pack(fill="both", expand=True, padx=44, pady=(32, 0))
         for c in range(3):
@@ -3691,85 +3745,6 @@ class OperacoesInvertidoFrame(tk.Frame):
             "Histórico Operações",
             "Histórico Operações estará disponível em breve.",
             parent=self.controller)
-
-    # ── Ferramenta temporária: conversão de caminho de rede p/ UNC ──────────
-    def _open_unc_path_tool(self):
-        escolha = messagebox.askyesnocancel(
-            "Converter caminho de rede",
-            "Selecionar um ARQUIVO (Sim) ou uma PASTA (Não)?\n"
-            "(Cancelar para fechar)",
-            parent=self.controller)
-        if escolha is None:
-            return
-        if escolha:
-            caminho = filedialog.askopenfilename(
-                title="Selecione o arquivo na pasta de rede", parent=self.controller)
-        else:
-            caminho = filedialog.askdirectory(
-                title="Selecione a pasta de rede", parent=self.controller)
-        if not caminho:
-            return
-
-        universal = to_universal_unc_path(caminho)
-        self._show_unc_result_dialog(caminho, universal)
-
-    def _show_unc_result_dialog(self, original, universal):
-        dlg = tk.Toplevel(self)
-        dlg.title("Caminho universal (UNC)")
-        dlg.configure(bg=C["surface"])
-        dlg.geometry("560x300")
-        dlg.resizable(False, False)
-        dlg.grab_set()
-        dlg.transient(self.controller)
-
-        pad = tk.Frame(dlg, bg=C["surface"], padx=24, pady=20)
-        pad.pack(fill="both", expand=True)
-
-        tk.Label(pad, text="Caminho universal (UNC)", bg=C["surface"], fg=C["ink"],
-                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
-        tk.Label(
-            pad,
-            text=("Use este caminho no rotinas_data.json (ou em qualquer outra "
-                  "configuração) para que funcione igual em qualquer computador, "
-                  "independente da letra de unidade mapeada por cada pessoa."),
-            bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 8),
-            wraplength=510, justify="left",
-        ).pack(anchor="w", pady=(8, 0))
-
-        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 12))
-
-        tk.Label(pad, text="ORIGINAL (com letra de unidade)", bg=C["surface"],
-                 fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(anchor="w")
-        orig_entry = styled_entry(pad, width=64)
-        orig_entry.insert(0, original)
-        orig_entry.configure(state="readonly")
-        orig_entry.pack(anchor="w", fill="x", pady=(4, 12))
-
-        tk.Label(pad, text="UNIVERSAL (UNC)", bg=C["surface"],
-                 fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(anchor="w")
-        uni_entry = styled_entry(pad, width=64)
-        uni_entry.insert(0, universal)
-        uni_entry.configure(state="readonly")
-        uni_entry.pack(anchor="w", fill="x", pady=(4, 0))
-
-        if universal == original:
-            tk.Label(
-                pad,
-                text=("⚠ Não foi possível identificar um servidor de rede por trás "
-                      "deste caminho (pode já ser local, ou já estar em formato UNC)."),
-                bg=C["surface"], fg=C["warn"], font=("Segoe UI", 8),
-                wraplength=510, justify="left",
-            ).pack(anchor="w", pady=(10, 0))
-
-        def _copiar():
-            dlg.clipboard_clear()
-            dlg.clipboard_append(universal)
-
-        btn_row = tk.Frame(pad, bg=C["surface"])
-        btn_row.pack(fill="x", pady=(18, 0))
-        styled_button(btn_row, "Copiar caminho universal", _copiar,
-                      accent=True, small=True).pack(side="left")
-        styled_button(btn_row, "Fechar", dlg.destroy, small=True).pack(side="right")
 
     # ── Overlay: Analisar Operações ─────────────────────────────────────────
     def _open_analisar_overlay(self):
@@ -3912,6 +3887,25 @@ class TaxasInvertidoFrame(tk.Frame):
         self._data = TaxasData.get()
         self._cards = {}
         self._build()
+        self._data.on_reconnect(self._on_data_reconnect)
+
+    def _on_data_reconnect(self):
+        # Chamado pela thread de retry; agenda a atualização na thread da UI.
+        try:
+            self.after(0, self._refresh_network_state)
+        except Exception:
+            pass
+
+    def _refresh_network_state(self):
+        if not self.winfo_exists():
+            return
+        disponivel = self._data.is_available()
+        if disponivel:
+            self._net_banner.pack_forget()
+        else:
+            self._net_banner.pack(fill="x", padx=0, pady=(0, 0), after=self._hairline_top)
+        if hasattr(self, "_grid"):
+            self._setup_cards()
 
     def _build(self):
         hdr = tk.Frame(self, bg=C["bg"])
@@ -3930,7 +3924,18 @@ class TaxasInvertidoFrame(tk.Frame):
                                       font=("Segoe UI", 8))
         self._validade_lbl.pack(anchor="w", pady=(2, 0))
 
-        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16, 0))
+        self._hairline_top = make_hairline(self, bg=C["hair"])
+        self._hairline_top.pack(fill="x", padx=0, pady=(16, 0))
+
+        self._net_banner = tk.Frame(self, bg=C["err_dim"])
+        tk.Label(
+            self._net_banner,
+            text="⚠ Sem conexão com a rede — não é possível ler ou salvar as taxas "
+                 "agora. Tentando reconectar automaticamente…",
+            bg=C["err_dim"], fg=C["err"], font=("Segoe UI", 8, "bold"),
+            anchor="w", justify="left", wraplength=900,
+        ).pack(side="left", fill="x", expand=True, padx=18, pady=8)
+        # _net_banner exibido condicionalmente em _refresh_network_state()
 
         self._sf = ScrollableFrame(self, bg=C["bg"])
         self._sf.pack(fill="both", expand=True)
@@ -3947,7 +3952,7 @@ class TaxasInvertidoFrame(tk.Frame):
         self._sf.refresh_bindings()
         self._validade_lbl.configure(
             text=f"Mês de referência: {self._mes_atual_label()}")
-        self._setup_cards()
+        self._refresh_network_state()
 
     @staticmethod
     def _mes_atual_label():
@@ -3967,8 +3972,9 @@ class TaxasInvertidoFrame(tk.Frame):
 
     def _make_card(self, nome, row, col):
         cnpj = only_digits(BPM_CLIENT_DATA[nome].get("CNPJ", ""))
-        info = self._data.get_taxa(cnpj)
-        vigente = self._data.is_vigente(cnpj)
+        disponivel = self._data.is_available()
+        info = self._data.get_taxa(cnpj) if disponivel else None
+        vigente = self._data.is_vigente(cnpj) if disponivel else False
 
         bg = C["surface"]
         outer = tk.Frame(self._grid, bg=C["bg"])
@@ -4002,7 +4008,9 @@ class TaxasInvertidoFrame(tk.Frame):
 
         status_row = tk.Frame(body, bg=bg)
         status_row.pack(fill="x", pady=(6, 0))
-        if vigente:
+        if not disponivel:
+            status_text, status_color = "Indisponível (sem rede)", C["ink_faint"]
+        elif vigente:
             status_text, status_color = "Vigente", C["ok"]
         elif info:
             status_text, status_color = "Vencida — renovar", C["err"]
@@ -4014,10 +4022,13 @@ class TaxasInvertidoFrame(tk.Frame):
 
         btn_row = tk.Frame(body, bg=bg)
         btn_row.pack(fill="x", pady=(12, 0))
-        styled_button(
+        edit_btn = styled_button(
             btn_row, "Editar" if info else "Definir taxa",
             lambda n=nome, c=cnpj: self._open_edit_dialog(n, c),
-            accent=not vigente, small=True).pack(side="left")
+            accent=not vigente, small=True)
+        edit_btn.pack(side="left")
+        if not disponivel:
+            edit_btn.configure(state="disabled")
 
         self._cards[cnpj] = {
             "outer": outer, "taxa_lbl": taxa_lbl, "status_lbl": status_lbl,
@@ -4025,6 +4036,8 @@ class TaxasInvertidoFrame(tk.Frame):
         }
 
     def _open_edit_dialog(self, nome, cnpj):
+        if not self._data.is_available():
+            return
         info = self._data.get_taxa(cnpj)
         dlg = tk.Toplevel(self)
         dlg.title(f"Taxa — {nome}")
@@ -4075,9 +4088,13 @@ class TaxasInvertidoFrame(tk.Frame):
                     text="Formato inválido. Use vírgula, ex.: 1,3950")
                 return
             txt = _normalizar(txt)
-            self._data.set_taxa(cnpj, txt)
+            ok = self._data.set_taxa(cnpj, txt)
+            if not ok:
+                err_lbl.configure(
+                    text="Sem conexão com a rede. Não foi possível salvar agora.")
+                return
             dlg.destroy()
-            self._setup_cards()
+            self._refresh_network_state()
 
         btn_row = tk.Frame(pad, bg=C["surface"])
         btn_row.pack(fill="x", pady=(18, 0))
@@ -4270,10 +4287,15 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         info = tk.Frame(body, bg=bg)
         info.pack(pady=(10, 0), fill="x")
-        for label, value, accent in (
+        liquido, completo = self._calc_valor_liquido_group(group)
+        linhas = [
             ("Notas", str(group["count"]), False),
             ("Montante", group["valor_total"], True),
-        ):
+        ]
+        if liquido is not None:
+            liq_txt = _fmt_brl(liquido) + ("" if completo else " *")
+            linhas.append(("Líquido", liq_txt, True))
+        for label, value, accent in linhas:
             row_f = tk.Frame(info, bg=bg)
             row_f.pack(fill="x", pady=(0, 3))
             tk.Label(row_f, text=label, bg=bg, fg=C["ink_faint"],
@@ -4308,6 +4330,36 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
     def _group_limite_key(self, group):
         return group.get("doc_sacado") or _normalize_sacado_key(group["nome_sacado"])
+
+    def _calc_valor_liquido_group(self, group):
+        """Recalcula o valor líquido do grupo nota a nota (cada nota pode
+        ter vencimento/prazo diferente), usando a taxa vigente do cliente
+        no Depara. Retorna (valor_liquido: Decimal|None, completo: bool).
+        completo=False indica que ao menos uma nota não pôde ser calculada
+        (sem taxa vigente ou sem data de vencimento válida)."""
+        cnpj = group.get("doc_sacado") or ""
+        taxa_info = TaxasData.get().get_taxa(cnpj) if cnpj else None
+        vigente = TaxasData.get().is_vigente(cnpj) if cnpj else False
+        if not taxa_info or not vigente:
+            return None, False
+        taxa_str = taxa_info.get("taxa")
+        hoje = date.today()
+        total_liq = Decimal("0")
+        completo = True
+        for op in group.get("notas", []):
+            venc = _parse_data_curta(op.get("data_vencimento"))
+            if venc is None:
+                completo = False
+                continue
+            prazo = (venc - hoje).days
+            vl = calcular_valor_liquido(op.get("valor_raw", Decimal("0")), taxa_str, prazo)
+            if vl is None:
+                completo = False
+                continue
+            total_liq += vl
+        if not group.get("notas"):
+            completo = False
+        return total_liq, completo
 
     def _get_limite_data(self, group):
         cnpj = group.get("doc_sacado") or ""
@@ -4554,6 +4606,13 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         return [op for op in self._all_ops if _op_key(op) == key]
 
+    def _detail_doc_sacado(self):
+        for op in self._detail_ops_do_cliente():
+            doc = only_digits(op.get("doc_sacado") or "")
+            if doc:
+                return doc
+        return ""
+
     def _render_detalhes_list(self):
         list_outer = self._detail_list_outer
         sf = self._detail_sf
@@ -4567,9 +4626,14 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         incluidas = [op for op in todas if op["uid"] not in self._excluded_uids]
         excluidas = [op for op in todas if op["uid"] in self._excluded_uids]
         total = sum((op.get("valor_raw", Decimal("0")) for op in incluidas), Decimal("0"))
-        self._detail_sub_lbl.configure(
-            text=f"{len(incluidas)} nota(s) no montante · {_fmt_brl(total)}"
-                 + (f" · {len(excluidas)} excluída(s)" if excluidas else ""))
+        liquido, completo = self._calc_valor_liquido_group(
+            {"doc_sacado": self._detail_doc_sacado(), "notas": incluidas})
+        resumo = f"{len(incluidas)} nota(s) no montante · {_fmt_brl(total)}"
+        if liquido is not None:
+            resumo += f" · Líquido {_fmt_brl(liquido)}" + ("" if completo else " *")
+        if excluidas:
+            resumo += f" · {len(excluidas)} excluída(s)"
+        self._detail_sub_lbl.configure(text=resumo)
 
         def _nota_card(op, included):
             item = tk.Frame(list_outer, bg=C["surface2"],
