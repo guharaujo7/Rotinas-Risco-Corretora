@@ -4821,6 +4821,9 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                                self.controller.show_frame("OperacoesInvertido"))).pack(side="left")
         tk.Label(hdr, text="Analisar Operações", bg=C["bg"], fg=C["ink"],
                  font=("Georgia", 18, "bold")).pack(side="left", padx=(14, 0))
+        styled_button(hdr, "Enviar todos e-mails →",
+                      self._enviar_todos_emails_risco_sacado,
+                      accent=True, small=True).pack(side="right")
 
         sub = tk.Frame(self, bg=C["bg"])
         sub.pack(fill="x", padx=32)
@@ -5308,24 +5311,31 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                 return doc
         return ""
 
-    def _enviar_email_risco_sacado(self):
-        doc_sacado = self._detail_doc_sacado()
-        doc_cedente = self._detail_doc_cedente()
-        todas = self._detail_ops_do_cliente()
+    def _ops_do_grupo(self, group):
+        """Todas as ops da planilha (incluídas ou não) para um grupo/sacado."""
+        key = self._group_limite_key(group)
+
+        def _op_key(op):
+            doc = only_digits(op.get("doc_sacado") or "")
+            return doc or _normalize_sacado_key(op.get("nome_sacado") or "")
+
+        return [op for op in self._all_ops if _op_key(op) == key]
+
+    def _build_email_for_group(self, group):
+        """Monta assunto+HTML do e-mail para um grupo/sacado, ou retorna o
+        motivo pelo qual não foi possível montar (taxa vencida/ausente ou
+        nenhuma nota incluída no montante)."""
+        doc_sacado = group.get("doc_sacado") or ""
+        doc_cedente = group.get("doc_cedente") or ""
+        todas = self._ops_do_grupo(group)
         incluidas = [op for op in todas if op["uid"] not in self._excluded_uids]
         if not incluidas:
-            messagebox.showwarning(
-                "Sem notas", "Não há notas incluídas no montante para este sacado.")
-            return
+            return {"ok": False, "reason": "sem notas incluídas no montante"}
 
         taxa_info = TaxasData.get().get_taxa(doc_sacado) if doc_sacado else None
         vigente = TaxasData.get().is_vigente(doc_sacado) if doc_sacado else False
         if not taxa_info or not vigente:
-            messagebox.showwarning(
-                "Taxa não vigente",
-                "Não há taxa vigente cadastrada em Taxas (Depara) para este cliente. "
-                "Atualize a taxa antes de enviar o e-mail.")
-            return
+            return {"ok": False, "reason": "taxa não vigente no Depara"}
         taxa_str = taxa_info.get("taxa")
 
         hoje = date.today()
@@ -5341,7 +5351,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                 "valor_liquido": vl,
             })
 
-        nome_sacado = self._detail_nome
+        nome_sacado = group["nome_sacado"]
         subject = f"RISCO SACADO INVERTIDO - {nome_sacado.upper()}"
         html = build_risco_sacado_email_html(
             sacado_nome=nome_sacado.upper(),
@@ -5349,11 +5359,50 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             cedente_cnpj=doc_cedente,
             notas=notas_calc,
             taxa_str=taxa_str)
+        return {"ok": True, "subject": subject, "html": html}
 
+    def _enviar_email_risco_sacado(self):
+        group = self._find_group(self._detail_nome)
+        if group is None:
+            return
+        result = self._build_email_for_group(group)
+        if not result["ok"]:
+            messagebox.showwarning(
+                "Não foi possível enviar",
+                f"{group['nome_sacado']}: {result['reason']}.")
+            return
         try:
-            enviar_email_outlook_risco_sacado(subject, html)
+            enviar_email_outlook_risco_sacado(result["subject"], result["html"])
         except Exception as e:
             messagebox.showerror("Erro ao abrir e-mail", str(e))
+
+    def _enviar_todos_emails_risco_sacado(self):
+        if not self._groups:
+            messagebox.showinfo(
+                "Nenhuma operação", "Não há sacados analisados nesta planilha.")
+            return
+        if not messagebox.askyesno(
+                "Enviar todos os e-mails",
+                f"Serão abertos {len(self._groups)} e-mail(s), um por vez, para "
+                "revisão e envio manual no Outlook. Deseja continuar?"):
+            return
+
+        enviados, pulados = [], []
+        for group in self._groups:
+            result = self._build_email_for_group(group)
+            if not result["ok"]:
+                pulados.append(f"{group['nome_sacado']} — {result['reason']}")
+                continue
+            try:
+                enviar_email_outlook_risco_sacado(result["subject"], result["html"])
+                enviados.append(group["nome_sacado"])
+            except Exception as e:
+                pulados.append(f"{group['nome_sacado']} — erro: {e}")
+
+        msg = f"{len(enviados)} de {len(self._groups)} e-mail(s) aberto(s) com sucesso."
+        if pulados:
+            msg += "\n\nNão enviados:\n" + "\n".join(f"• {p}" for p in pulados)
+        messagebox.showinfo("Envio concluído", msg)
 
     def _render_detalhes_list(self):
         list_outer = self._detail_list_outer
