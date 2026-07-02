@@ -1,8 +1,17 @@
-import os, sys, re, random, struct, tkinter as tk, threading, time, tempfile, shutil, webbrowser, ctypes, json as _json_mod, uuid as _uuid_mod, queue
+import os, sys, re, random, struct, tkinter as tk, threading, time, tempfile, shutil, webbrowser, ctypes, json as _json_mod, uuid as _uuid_mod, queue, base64, sqlite3
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from tkinter import ttk, filedialog, messagebox, font as tkfont
 from datetime import datetime, date
-from PyPDF2 import PdfReader
+
+try:
+    import pdfplumber
+except ImportError:
+    pdfplumber = None
+
+try:
+    from PyPDF2 import PdfReader
+except ImportError:
+    PdfReader = None
 
 try:
     import win32com.client as win32
@@ -29,6 +38,198 @@ try:
 except Exception:
     openpyxl = None
     OPENPYXL_OK = False
+
+RISCO_SACADO_LOGO_B64 = (
+    "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"
+)
 
 C = {
     "bg":          "#191919",
@@ -168,6 +369,8 @@ def _find_invertido_header(ws) -> tuple:
             for j, cell in enumerate(cells):
                 if "doc sacado" in cell or cell == "doc sacado":
                     col_map["doc_sacado"] = j
+                elif "doc cedente" in cell or cell == "doc cedente":
+                    col_map["doc_cedente"] = j
                 elif "nome sacado" in cell or cell == "nome sacado":
                     col_map["nome"] = j
                 elif cell in ("número", "numero", "nº", "nf"):
@@ -183,13 +386,14 @@ def _find_invertido_header(ws) -> tuple:
             if "nome" not in col_map:
                 col_map["nome"] = 1
             col_map.setdefault("doc_sacado", 0)
+            col_map.setdefault("doc_cedente", 2)
             col_map.setdefault("nf", 4)
             col_map.setdefault("valor", 5)
             col_map.setdefault("inclusao", 6)
             col_map.setdefault("vencimento", 7)
             col_map.setdefault("prazo", 8)
             return i, col_map
-    return 2, {"doc_sacado": 0, "nome": 1, "nf": 4, "valor": 5, "inclusao": 6, "vencimento": 7, "prazo": 8}
+    return 2, {"doc_sacado": 0, "doc_cedente": 2, "nome": 1, "nf": 4, "valor": 5, "inclusao": 6, "vencimento": 7, "prazo": 8}
 
 
 def _parse_invertido_xlsx(path: str) -> list:
@@ -221,6 +425,7 @@ def _parse_invertido_xlsx(path: str) -> list:
             rows.append({
                 "uid":         len(rows),
                 "doc_sacado":  only_digits(str(_cell("doc_sacado") or "")),
+                "doc_cedente": only_digits(str(_cell("doc_cedente") or "")),
                 "nome_sacado": nome,
                 "nf":          str(_cell("nf") or "").strip(),
                 "valor_raw":   _valor_to_decimal(_cell("valor")),
@@ -242,11 +447,14 @@ def _group_invertido_ops(ops: list) -> list:
             groups[key] = {
                 "nome_sacado": op["nome_sacado"].strip(),
                 "doc_sacado":  only_digits(op.get("doc_sacado") or ""),
+                "doc_cedente": only_digits(op.get("doc_cedente") or ""),
                 "notas": [],
                 "total": Decimal("0"),
             }
         if not groups[key]["doc_sacado"] and op.get("doc_sacado"):
             groups[key]["doc_sacado"] = only_digits(op["doc_sacado"])
+        if not groups[key]["doc_cedente"] and op.get("doc_cedente"):
+            groups[key]["doc_cedente"] = only_digits(op["doc_cedente"])
         groups[key]["notas"].append(op)
         groups[key]["total"] += op.get("valor_raw", Decimal("0"))
     result = []
@@ -413,6 +621,152 @@ def _parse_data_curta(s):
     return None
 
 
+def _fmt_cnpj(digits: str) -> str:
+    d = only_digits(digits or "")
+    if len(d) != 14:
+        return digits or ""
+    return f"{d[0:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}"
+
+
+RISCO_SACADO_CEDENTE_NOME = "VIBRA ENERGIA S.A"
+
+
+def _get_risco_sacado_logo_path() -> str:
+    path = os.path.join(tempfile.gettempdir(), "risco_sacado_logo.png")
+    if not os.path.isfile(path):
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(RISCO_SACADO_LOGO_B64))
+    return path
+
+
+def build_risco_sacado_email_html(sacado_nome: str, sacado_cnpj: str,
+                                   cedente_cnpj: str, notas: list,
+                                   taxa_str: str) -> str:
+    """Monta o HTML do e-mail 'RISCO SACADO INVERTIDO' no mesmo layout do
+    modelo padrão da mesa, com uma linha por nota e subtotal ao final.
+    Cada item de `notas` deve conter: nf, data_vencimento, valor_raw,
+    valor_liquido (Decimal ou None)."""
+    cedente_nome = RISCO_SACADO_CEDENTE_NOME
+    cedente_cnpj_fmt = _fmt_cnpj(cedente_cnpj)
+    sacado_cnpj_fmt = _fmt_cnpj(sacado_cnpj)
+
+    total_face = Decimal("0")
+    total_liq = Decimal("0")
+    linhas_html = []
+    for op in notas:
+        vf = op.get("valor_raw") or Decimal("0")
+        vl = op.get("valor_liquido")
+        total_face += vf
+        if vl is not None:
+            total_liq += vl
+        linhas_html.append(f"""
+<tr>
+  <td style="{_TD_STYLE}">{cedente_nome}</td>
+  <td style="{_TD_STYLE}">{cedente_cnpj_fmt}</td>
+  <td style="{_TD_STYLE}">{sacado_nome}</td>
+  <td style="{_TD_STYLE}">{sacado_cnpj_fmt}</td>
+  <td style="{_TD_STYLE}">{op.get('nf') or '—'}</td>
+  <td style="{_TD_STYLE}">{op.get('data_vencimento') or '—'}</td>
+  <td style="{_TD_STYLE}">{_fmt_brl(vf)}</td>
+  <td style="{_TD_STYLE}">{_fmt_brl(vl) if vl is not None else '—'}</td>
+  <td style="{_TD_STYLE}">{taxa_str or '—'}</td>
+</tr>""")
+
+    subtotal_html = f"""
+<tr style="background:#F0F0F0">
+  <td style="{_TD_STYLE}"><b>Subtotal</b></td>
+  <td style="{_TD_STYLE}"></td>
+  <td style="{_TD_STYLE}"></td>
+  <td style="{_TD_STYLE}"></td>
+  <td style="{_TD_STYLE}"></td>
+  <td style="{_TD_STYLE}"></td>
+  <td style="{_TD_STYLE}"><b>{_fmt_brl(total_face)}</b></td>
+  <td style="{_TD_STYLE}"><b>{_fmt_brl(total_liq)}</b></td>
+  <td style="{_TD_STYLE}"></td>
+</tr>"""
+
+    return f"""<html><head><meta charset="utf-8"></head>
+<body style="font-family:'Itau Display',Calibri,sans-serif;color:#333333">
+<table cellspacing="3" cellpadding="0" style="max-width:768pt">
+<tr>
+  <td rowspan="3" style="width:100px;padding:0"><img src="cid:risco_sacado_logo" width="110" height="100" alt="Icone de titulos"></td>
+  <td></td>
+</tr>
+<tr><td><span style="font-size:22.5pt;font-family:'Itau Display',serif;color:#EC7000;font-weight:bold">Notas para antecipação - Risco Sacado Invertido</span></td></tr>
+<tr><td><span style="font-size:16.5pt;font-family:'Itau Display',serif;color:#9A9A9A;font-weight:bold">Risco Sacado</span></td></tr>
+</table>
+<p>&nbsp;</p>
+<p>Seguem as notas que foram disponibilizadas nesta data para antecipação.</p>
+<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:collapse">
+<thead>
+<tr>
+  <td style="{_TH_STYLE}">RAZAO SOCIAL CEDENTE</td>
+  <td style="{_TH_STYLE}">CNPJ CEDENTE</td>
+  <td style="{_TH_STYLE}">RAZAO SOCIAL SACADO</td>
+  <td style="{_TH_STYLE}">CNPJ SACADO</td>
+  <td style="{_TH_STYLE}">NRO NF/FATURA</td>
+  <td style="{_TH_STYLE}">VENCIMENTO</td>
+  <td style="{_TH_STYLE}">VALOR NF/FATURA</td>
+  <td style="{_TH_STYLE}">VALOR LÍQUIDO</td>
+  <td style="{_TH_STYLE}">TX (% AM)</td>
+</tr>
+</thead>
+<tbody>
+{''.join(linhas_html)}
+{subtotal_html}
+</tbody>
+</table>
+<p>&nbsp;</p>
+<p>&quot;Operação é paga ao Fornecedor na conta indicada.</p>
+<p>Lembrando que operações antecipadas/pagas não são passíveis de cancelamento. No bankline terá acesso as notas antecipadas através da Rota - Mais Serviços - Consulta de Notas Negociadas</p>
+<p>&nbsp;</p>
+<p><span style="font-size:16.5pt;font-family:'Itau Display',serif;color:#9A9A9A;font-weight:bold">Bons Negócios,</span></p>
+<p><span style="font-size:16.5pt;font-family:'Itau Display',serif;color:#EC7000;font-weight:bold">Isso é Risco Sacado</span></p>
+<p style="font-family:Calibri;font-size:9pt;color:#000000;margin-top:20px">Corporativo | Interno</p>
+</body></html>"""
+
+
+_TH_STYLE = ("background:#7EB3F0;padding:4pt;font-family:'Itau Display',serif;"
+             "font-size:7.5pt;font-weight:bold;color:#1B120A;text-align:center")
+_TD_STYLE = ("border:1pt solid #FAF7F5;padding:4pt;font-family:'Itau Display',serif;"
+             "font-size:7.5pt;color:#333333;text-align:center")
+
+
+def enviar_email_outlook_risco_sacado(subject: str, html_body: str):
+    """Abre um popup do Outlook (sem enviar automaticamente) já preenchido
+    com título, corpo e imagem embutida, para revisão e envio manual."""
+    if not WIN32_OK:
+        raise RuntimeError(
+            "Integração com Outlook (win32com) não está disponível neste ambiente.")
+    did_init = False
+    if PYTHONCOM_OK:
+        try:
+            pythoncom.CoInitialize()
+            did_init = True
+        except Exception:
+            did_init = False
+    try:
+        outlook = win32.Dispatch("Outlook.Application")
+        mail = outlook.CreateItem(0)  # olMailItem
+        mail.Subject = subject
+        img_path = _get_risco_sacado_logo_path()
+        attachment = mail.Attachments.Add(img_path)
+        try:
+            attachment.PropertyAccessor.SetProperty(
+                "http://schemas.microsoft.com/mapi/proptag/0x3712001E",
+                "risco_sacado_logo")
+        except Exception:
+            pass
+        mail.HTMLBody = html_body
+        mail.Display(False)
+    finally:
+        if did_init:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+
 def calcular_valor_liquido(valor_face: Decimal, taxa_pct_str: str, dias_prazo: int) -> Decimal:
     """Calcula o valor líquido de uma antecipação por desconto comercial
     simples: VL = VF x (1 - taxa x prazo/30), com taxa mensal em % (ex.:
@@ -456,8 +810,6 @@ def _fmt_limite_int(val) -> str:
 BPM_CLIENT_DATA = {
     "Transdourada":             {"CNPJ":"01259730000174","PLATAFORMA":"2939","AG":"1643","CONTA":"99451-8"},
     "RPB":                      {"CNPJ":"07075892000139","PLATAFORMA":"8973","AG":"6627","CONTA":"06471-7"},
-    "Posto Arinos":             {"CNPJ":"05798923000154","PLATAFORMA":"8250","AG":"1364","CONTA":"98355-9"},
-    "Brasnorte":                {"CNPJ":"00514301000133","PLATAFORMA":"8250","AG":"1364","CONTA":"98654-5"},
     "Mirian Varzea":            {"CNPJ":"16519674000137","PLATAFORMA":"8250","AG":"1689","CONTA":"05136-3"},
     "Mirian Cuiaba":            {"CNPJ":"41240105000103","PLATAFORMA":"8250","AG":"1689","CONTA":"58145-0"},
     "Petrocal":                 {"CNPJ":"12781233000158","PLATAFORMA":"7948","AG":"8251","CONTA":"44190-6"},
@@ -473,34 +825,60 @@ BPM_CLIENT_DATA = {
 LIMITE_CLIENT_URLS = {
     "Transdourada":  "https://digital.itau/CF_Digital/IntegracaoQK/IntegracaoQK/redir.aspx?usuario=987400146&senha=1R10K6&tppes=J&subgrupo=01259730000174&plataforma=2939&ambiente=PRD#/omni/",
     "RPB":           "https://digital.itau/CF_Digital/IntegracaoQK/IntegracaoQK/redir.aspx?usuario=987400146&senha=1D1AK3&tppes=J&subgrupo=26727190000137&plataforma=8973&ambiente=PRD#/omni/",
-    "Posto Arinos":  "https://digital.itau/CF_Digital/IntegracaoQK/IntegracaoQK/redir.aspx?usuario=987400146&senha=1H1UK3&tppes=J&subgrupo=00514301000133&plataforma=8250&ambiente=PRD",
     "Mirian Varzea": "https://digital.itau/CF_Digital/IntegracaoQK/IntegracaoQK/redir.aspx?usuario=987400146&senha=1H1UK3&tppes=J&subgrupo=16519674000137&plataforma=8250&ambiente=PRD",
     "Petrocal":      "https://digital.itau/CF_Digital/IntegracaoQK/IntegracaoQK/redir.aspx?usuario=987400146&senha=1H1UK3&tppes=J&subgrupo=12781233000158&plataforma=7948&ambiente=PRD",
     "Posto Sapucaia":"https://digital.itau/CF_Digital/IntegracaoQK/IntegracaoQK/redir.aspx?usuario=987400146&senha=1H1UK3&tppes=J&subgrupo=32179707000101&plataforma=0352&ambiente=PRD#/omni/",
 }
 
 LIMITE_SHARED_RESULTS = {
-    "Posto Arinos":   ["Brasnorte"],
     "Mirian Varzea":  ["Mirian Cuiaba"],
     "Petrocal":       ["PetroMix","PetroVel"],
     "Posto Sapucaia": ["Auto Posto M Timbozao","Posto Gasol Timbo III","Posto Timbozao Itaperuna","Posto Pioneiro"],
 }
 
-MAPPED_CLIENTS = {"Transdourada","RPB","Posto Arinos","Mirian Varzea","Petrocal","Posto Sapucaia"}
+MAPPED_CLIENTS = {"Transdourada","RPB","Mirian Varzea","Petrocal","Posto Sapucaia"}
 MIRROR_CLIENTS = {
-    "Brasnorte":"Posto Arinos","Mirian Cuiaba":"Mirian Varzea",
+    "Mirian Cuiaba":"Mirian Varzea",
     "PetroMix":"Petrocal","PetroVel":"Petrocal",
     "Auto Posto M Timbozao":"Posto Sapucaia","Posto Gasol Timbo III":"Posto Sapucaia",
     "Posto Timbozao Itaperuna":"Posto Sapucaia","Posto Pioneiro":"Posto Sapucaia",
 }
 
+# Trader responsável por cliente — usado apenas no histórico de operações do
+# Risco Sacado Invertido (filtro/gráfico "por trader"). Mapeamento próprio,
+# separado da tabela de trader por região numérica do Share/BPM geral.
+INVERTIDO_TRADER_POR_CLIENTE = {
+    "Transdourada":             "Debora",
+    "RPB":                      "Matheus",
+    "Mirian Varzea":            "Giovana",
+    "Mirian Cuiaba":            "Giovana",
+    "Petrocal":                 "Matheus",
+    "PetroMix":                 "Matheus",
+    "PetroVel":                 "Matheus",
+    "Posto Sapucaia":           "Thiago",
+    "Auto Posto M Timbozao":    "Thiago",
+    "Posto Gasol Timbo III":    "Thiago",
+    "Posto Timbozao Itaperuna": "Thiago",
+    "Posto Pioneiro":           "Thiago",
+}
+
+
+def get_trader_por_cliente(nome_sacado: str) -> str:
+    """Retorna o trader responsável pelo cliente (Risco Sacado Invertido),
+    ou string vazia se não houver mapeamento."""
+    key = _normalize_sacado_key(nome_sacado or "")
+    for nome, trader in INVERTIDO_TRADER_POR_CLIENTE.items():
+        if _normalize_sacado_key(nome) == key:
+            return trader
+    return ""
+
 REGIAO_TRADER_ESPEC = {
-    "21":("Debora","Vinicios Luz"),"22":("Thiago","Paula Costa"),
-    "23":("Thiago","Paula Costa"),"24":("Gabriel","Luiz Gustavo Sarmento"),
-    "25":("Giovanna","Lucas Capeli"),"26":("Gabriel","Vinicios Luz"),
-    "28":("Thiago","Paula Costa"),"29":("Debora","Renata Leviski"),
-    "30":("Adriana","Luiz Gustavo Sarmento"),"32":("Debora","Renata Leviski"),
-    "33":("Giovanna","Lucas Capeli"),
+    "21":("Matheus","Lucas"),"22":("Debora","Renata"),
+    "23":("Thiago","Paula"),"24":("Thiago","Luiz Gustavo"),
+    "25":("Giovana","Lucas"),"26":("Gabriel","Guga"),
+    "28":("Rafael","Paula"),"30":("Adriana/Rafael","Luiz Gustavo"),
+    "32":("Debora","Renata"),"33":("Giovana","Lucas"),
+    "01":("Matheus/Gabriel",""),"02":("Gabriel/Gabriel",""),
 }
 
 RE_SPACES        = re.compile(r"\s+")
@@ -650,7 +1028,138 @@ LIMITE_INVERTIDO_CNPJS = frozenset(
 def normalize_text_variants(t):
     return RE_SPACES.sub(" ",t).strip(), re.sub(r"\s+","",t or "")
 
+def _plain_label_value_map(pdf_path):
+    """Extração geométrica genérica para PDFs em formato de tabela (páginas
+    do Salesforce exportadas): os campos aparecem em duas colunas fixas
+    (esquerda/direita), com uma linha de rótulos seguida da linha de
+    valores logo abaixo, ambos alinhados pela mesma posição X inicial da
+    coluna. Detecta as duas posições X mais comuns onde rótulos começam
+    (colunas esquerda e direita) e usa essas posições como "trilhos" para
+    juntar cada rótulo com seu valor na linha seguinte, evitando pegar
+    texto de colunas vizinhas (ex.: barra lateral direita com links).
+    Retorna {} se pdfplumber não estiver disponível ou nada for reconhecido."""
+    if pdfplumber is None or not pdf_path:
+        return {}
+    out = {}
+    # Rótulos conhecidos do formato "Operação MN / Risco Sacado" do
+    # Salesforce. Usados para localizar as linhas de rótulo com confiança,
+    # em vez de tentar adivinhar heuristicamente qualquer linha.
+    known_labels = [
+        "Razão Social", "CNPJ", "Conta Corrente do Cliente",
+        "Número da Solicitação", "Evento", "Plataforma",
+        "Região da Plataforma", "Região", "Dac Plataforma", "Código do Produto",
+        "Número do Contrato", "Data da Devolução", "Data de Início",
+        "Data de Vencimento", "Valor da Operação", "Carência",
+        "Prazo", "Tipo de Prazo", "Taxa/Spread", "Tipo de Taxa",
+        "Data Valor", "Planilha Flex", "Duplo Sim", "SubCarteira",
+        "Produto", "Prazo Minimo NF", "Prazo Maximo NF",
+        "Tarifa Titulo", "Valor Tarifa", "Spread Minimo", "Spread Rebate",
+        "Meio de Transmissão", "Operador Master", "Forma Liquidação",
+        "Modalidade", "Valor Tarifa Convênio", "Ganho Financeiro",
+        "Percentual Rebate", "Nome Contato Técnico",
+        "Telefone Contato Técnico", "Email Contato Técnico",
+    ]
+    label_re = re.compile(
+        "|".join(re.escape(l) for l in sorted(known_labels, key=len, reverse=True)),
+        re.IGNORECASE)
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for pg in pdf.pages:
+                try:
+                    words = pg.extract_words()
+                except Exception:
+                    continue
+                if not words:
+                    continue
+                rows = _word_rows_from_pdf_page(words)
+                for i, row in enumerate(rows):
+                    line = " ".join(w["text"] for w in row)
+                    # Só considera linhas que batem >=1 rótulo conhecido no
+                    # começo de algum "segmento" — isto é, colunas cujo
+                    # primeiro token corresponde ao início de um rótulo.
+                    matches = list(label_re.finditer(line))
+                    if not matches:
+                        continue
+                    # Mapeia cada match de rótulo para a posição X inicial
+                    # da palavra correspondente na linha (usa a primeira
+                    # palavra do match).
+                    segs = []
+                    for m in matches:
+                        char_pos = 0
+                        x0 = None
+                        for w in row:
+                            wl = len(w["text"])
+                            if char_pos <= m.start() < char_pos + wl + 1:
+                                x0 = w["x0"]; break
+                            char_pos += wl + 1
+                        if x0 is None:
+                            continue
+                        segs.append((m.group(0), x0))
+                    segs.sort(key=lambda s: s[1])
+                    if not segs:
+                        continue
+                    x_min = segs[0][1]
+                    x_max = segs[-1][1]
+                    base_top = row[0]["top"]
+                    # Procura a próxima linha (dentro de uma janela vertical
+                    # razoável) que tenha ao menos uma palavra dentro do
+                    # intervalo X coberto pelos rótulos desta linha — pula
+                    # linhas "estranhas" que só têm conteúdo de outra coluna
+                    # (ex.: texto da barra lateral direita).
+                    vrow = None
+                    for cand_row in rows[i + 1:]:
+                        if cand_row[0]["top"] - base_top > 30:
+                            break
+                        if any(x_min - 8 <= w["x0"] <= x_max + 200 for w in cand_row):
+                            vrow = cand_row
+                            break
+                    if vrow is None:
+                        continue
+                    for k, (label_txt, x0) in enumerate(segs):
+                        x1 = segs[k + 1][1] if k + 1 < len(segs) else float("inf")
+                        cand = [w for w in vrow if x0 - 8 <= w["x0"] < x1 - 2]
+                        if not cand:
+                            continue
+                        val = " ".join(w["text"] for w in sorted(cand, key=lambda w: w["x0"]))
+                        key = label_txt.strip().lower()
+                        if key and key not in out:
+                            out[key] = val.strip()
+    except Exception:
+        return out
+    return out
+
+
+def _plain_map_lookup(pmap, *label_variants):
+    """Procura o valor de um rótulo no mapa posicional, tolerando pequenas
+    variações de grafia (acentuação, maiúsculas)."""
+    for variant in label_variants:
+        v = pmap.get(variant.lower())
+        if v:
+            return v
+    return None
+
+
 def extract_text_from_pdf(p):
+    # pdfplumber é usado como extrator principal: o PyPDF2 tem um bug
+    # conhecido de espaçamento em PDFs com posicionamento de caractere fino
+    # (comum em páginas do Salesforce exportadas), quebrando palavras no
+    # meio (ex.: "RECON PR OMOC OES EVENT OS EIRELI"). O pdfplumber usa as
+    # posições reais dos caracteres e não sofre desse problema.
+    if pdfplumber is not None:
+        try:
+            lo, pl = [], []
+            with pdfplumber.open(p) as pdf:
+                for pg in pdf.pages:
+                    try: lo.append(pg.extract_text(layout=True) or "")
+                    except Exception: lo.append("")
+                    try: pl.append(pg.extract_text() or "")
+                    except Exception: pl.append(lo[-1])
+            return "\n".join(lo), "\n".join(pl)
+        except Exception:
+            pass
+    # Fallback: PyPDF2 (apenas se pdfplumber não estiver instalado/falhar).
+    if PdfReader is None:
+        return "", ""
     r = PdfReader(p, strict=False)
     lo, pl = [], []
     for pg in r.pages:
@@ -709,8 +1218,73 @@ def _razao_stop(ln):
     return bool(re.match(r"^\s*(?:cnpj|plataforma|modalidade|regi[aã]o|conta\s+corrente|valor\s+da\s+opera|spread|prazo|liquida)\b",s)) \
            or (len(only_digits(s))>=14 and len(s)<40)
 
-def extract_razao_social(t, lines, tn, tc, t_plain=None):
-    for blk in ([t]+([t_plain] if t_plain else [])):
+def _word_rows_from_pdf_page(words, y_tol=3):
+    """Agrupa palavras (dicts do pdfplumber com 'top'/'x0') em linhas
+    visuais, tolerando pequena variação vertical entre glifos da mesma
+    linha, e ordena cada linha por posição horizontal."""
+    rows = []
+    for w in sorted(words, key=lambda w: (w["top"], w["x0"])):
+        placed = False
+        for row in rows:
+            if abs(row[0]["top"] - w["top"]) <= y_tol:
+                row.append(w); placed = True; break
+        if not placed:
+            rows.append([w])
+    for row in rows:
+        row.sort(key=lambda w: w["x0"])
+    rows.sort(key=lambda row: row[0]["top"])
+    return rows
+
+def extract_razao_social_by_columns(pdf_path):
+    """Extração geométrica para PDFs em formato de tabela (ex.: páginas
+    exportadas do Salesforce), onde os rótulos ficam todos numa linha e os
+    valores na linha logo abaixo, alinhados por coluna (posição X). Localiza
+    a linha que contém 'Razão Social' seguido de 'CNPJ' (assinatura única
+    desse formato) e lê o valor correspondente na linha de dados abaixo,
+    delimitado pela coluna do CNPJ. Retorna None se o padrão não for
+    encontrado (PDF em outro formato) — quem chama cai no método por regex."""
+    if pdfplumber is None or not pdf_path:
+        return None
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for pg in pdf.pages:
+                try:
+                    words = pg.extract_words()
+                except Exception:
+                    continue
+                if not words:
+                    continue
+                rows = _word_rows_from_pdf_page(words)
+                for i, row in enumerate(rows):
+                    texts = [w["text"] for w in row]
+                    for j in range(len(texts) - 1):
+                        if not (texts[j].lower().startswith("raz")
+                                and texts[j+1].lower().startswith("social")):
+                            continue
+                        label_x0 = row[j]["x0"]
+                        stop_x0 = None
+                        for k in range(j+2, len(texts)):
+                            if texts[k].strip(":").lower() == "cnpj":
+                                stop_x0 = row[k]["x0"]; break
+                        if stop_x0 is None:
+                            continue
+                        base_top = row[0]["top"]
+                        for vrow in rows[i+1:i+4]:
+                            if vrow[0]["top"] - base_top > 25:
+                                break
+                            cand = [w for w in vrow if label_x0-5 <= w["x0"] < stop_x0-2]
+                            if cand:
+                                val = " ".join(w["text"] for w in sorted(cand, key=lambda w: w["x0"]))
+                                return sanitize_razao(val)
+    except Exception:
+        return None
+    return None
+
+def extract_razao_social(t, lines, tn, tc, t_plain=None, pdf_path=None):
+    by_cols = extract_razao_social_by_columns(pdf_path)
+    if by_cols and len(by_cols) >= 2:
+        return by_cols
+    for blk in ([t_plain] if t_plain else []) + [t]:
         if not blk: continue
         m = re.search(r"raz[aã]o\s+social\s*[:\s]*",blk,re.I)
         if m:
@@ -724,7 +1298,11 @@ def extract_razao_social(t, lines, tn, tc, t_plain=None):
             if len(chunk) >= 2: return sanitize_razao(chunk)
     return None
 
-def extract_cnpj(t, tn, tc):
+def extract_cnpj(t, tn, tc, pmap=None):
+    if pmap:
+        v = _plain_map_lookup(pmap, "cnpj")
+        if v and only_digits(v):
+            return only_digits(v)
     m = RE_CNPJ_LABEL.search(t)
     if m: return m.group(1).strip()
     m = RE_CNPJ.search(t)
@@ -733,7 +1311,17 @@ def extract_cnpj(t, tn, tc):
     if m: return m.group(1)
     return None
 
-def extract_conta_corrente(lines, tn, tc):
+def extract_conta_corrente(lines, tn, tc, pmap=None):
+    if pmap:
+        v = _plain_map_lookup(pmap, "conta corrente do cliente", "conta corrente")
+        if v:
+            # remove ruído de link tipo "(/light…" que pode ter colado
+            v = re.sub(r"\(/[^\)]*$", "", v).strip()
+            m = RE_CONTA_AG_CC.search(v)
+            if m:
+                return f"{m.group(1)} / {m.group(2)}"
+            if v and not _razao_stop(v):
+                return v
     for hay in (tn, tc):
         if not hay: continue
         m = RE_CONTA_AG_CC.search(hay)
@@ -749,35 +1337,106 @@ def extract_conta_corrente(lines, tn, tc):
             if nxt and not _razao_stop(nxt): return nxt
     return None
 
-def extract_plataforma(t, tn, tc):
+def extract_plataforma(t, tn, tc, pmap=None):
+    if pmap:
+        v = _plain_map_lookup(pmap, "plataforma")
+        d = only_digits(v or "")
+        if len(d) == 4:
+            return d
     m = RE_PLATAFORMA.search(tn) or RE_PLATAFORMA.search(t)
     return m.group(1) if m else None
 
-def extract_regiao(t, tn, tc):
+def extract_regiao(t, tn, tc, pmap=None):
+    if pmap:
+        v = _plain_map_lookup(pmap, "região da plataforma", "regiao da plataforma", "região")
+        d = only_digits(v or "")
+        if 1 <= len(d) <= 2:
+            return d.zfill(2)
     m = RE_REGIAO_PLAT.search(tn) or RE_REGIAO_PLAT.search(t)
     if m: return m.group(1)
     m = RE_REGIAO.search(tn) or RE_REGIAO.search(t)
     return m.group(1) if m else None
 
-def extract_valor(t, tn, tc):
+def _reconstruct_interleaved_currency(raw):
+    """Alguns exports do Salesforce sobrepõem dois campos de texto na mesma
+    posição da página (ex.: 'Valor da Operação' e 'Omni-Channel (offline)'),
+    resultando numa string com os caracteres intercalados, tipo
+    'OmnRi$-C 1h.a0n0n0e.0l 0(o0f,f0li0ne)'. Isolando apenas os dígitos e
+    separadores decimais dessa string, o valor numérico original é
+    recuperado de forma confiável."""
+    if not raw:
+        return None
+    kept = re.findall(r"[\d.,]", raw)
+    if not kept:
+        return None
+    digits_str = "".join(kept)
+    if not re.search(r"\d", digits_str):
+        return None
+    # Exige ao menos um separador de milhar/decimal para reduzir falsos
+    # positivos em strings puramente numéricas legítimas.
+    if "," not in digits_str and "." not in digits_str:
+        return None
+    return f"R$ {digits_str}"
+
+def extract_valor(t, tn, tc, pmap=None):
+    if pmap:
+        v = _plain_map_lookup(pmap, "valor da operação", "valor da operacao")
+        if v:
+            # Detecta corrupção por sobreposição de texto: quando letras e
+            # dígitos aparecem intercalados na mesma palavra (padrão típico
+            # desse bug do Salesforce), um valor monetário legítimo nunca
+            # teria letras misturadas character a character nos dígitos.
+            has_letters = bool(re.search(r"[A-Za-z]", v))
+            clean_match = re.fullmatch(r"\s*R?\$?\s*[\d\.,]+\s*", v)
+            if not has_letters or clean_match:
+                m = re.search(r"R?\$?\s*[\d\.,]+", v)
+                if m and re.search(r"\d", m.group(0)):
+                    cand = m.group(0).strip()
+                    if not cand.startswith("R$"):
+                        cand = "R$ " + cand.lstrip("R$").strip()
+                    return cand
+            # Campo corrompido por sobreposição de texto (ex.: intercalado
+            # com "Omni-Channel (offline)") — tenta reconstruir.
+            rec = _reconstruct_interleaved_currency(v)
+            if rec:
+                return rec
     for pat in [RE_VALOR_1, RE_VALOR_2, RE_VALOR_3]:
         m = pat.search(tn)
         if m: return (m.group(1) if pat is RE_VALOR_1 else m.group(0)).strip()
     return None
 
-def extract_spread(t, tn, tc):
+def extract_spread(t, tn, tc, pmap=None):
+    if pmap:
+        v = _plain_map_lookup(pmap, "taxa/spread", "spread")
+        if v:
+            m = re.search(r"[\d\.,]+", v)
+            if m: return m.group(0).strip()
     m = RE_SPREAD_1.search(tn) or RE_SPREAD_2.search(tn)
     return m.group(1).strip() if m else None
 
-def extract_prazo_min(t, tn, tc):
+def extract_prazo_min(t, tn, tc, pmap=None):
+    if pmap:
+        v = _plain_map_lookup(pmap, "prazo minimo nf", "prazo mínimo nf")
+        if v:
+            m = re.search(r"\d+", v)
+            if m: return m.group(0)
     m = RE_PRAZO_MIN_1.search(tn)
     return m.group(1) if m else None
 
-def extract_prazo_max(t, tn, tc):
+def extract_prazo_max(t, tn, tc, pmap=None):
+    if pmap:
+        v = _plain_map_lookup(pmap, "prazo maximo nf", "prazo máximo nf")
+        if v:
+            m = re.search(r"\d+", v)
+            if m: return m.group(0)
     m = RE_PRAZO_MAX_1.search(tn)
     return m.group(1) if m else None
 
-def extract_modalidade(t, tn, tc):
+def extract_modalidade(t, tn, tc, pmap=None):
+    if pmap:
+        v = _plain_map_lookup(pmap, "modalidade")
+        if v:
+            return normalize_modalidade(v.strip())
     for hay in (tn, t, tc):
         if not hay: continue
         m = RE_MODALIDADE_1.search(hay)
@@ -785,6 +1444,7 @@ def extract_modalidade(t, tn, tc):
     return None
 
 class BPMUserCancelled(Exception): pass
+
 
 
 class ThreadSafeUIMixin:
@@ -1679,6 +2339,28 @@ class Sidebar(tk.Frame):
             w["text"].configure(bg=row_bg, fg=text_fg)
             w["bar"].configure(bg=bar_bg)
 
+def get_market_status(now=None):
+    """Retorna (aberto: bool, texto: str) com base na tabela de horários de
+    antecipação. Fora do horário comercial ou em finais de semana, o
+    mercado é considerado fechado."""
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False, "Mercado fechado"
+    t = now.hour * 60 + now.minute
+    ranges = [
+        (7*60,        8*60+50,  "Pagamento a partir das 09h00"),
+        (8*60+51,     9*60+35,  "Pagamento a partir das 09h40"),
+        (9*60+36,     10*60+5,  "Pagamento a partir das 10h10"),
+        (10*60+6,     10*60+20, "Pagamento a partir das 10h30"),
+        (10*60+21,    16*60+35, "Pagamento entre 30 e 40' de intervalo"),
+        (16*60+36,    17*60,    "Pagamento a partir das 17h10"),
+    ]
+    for start, end, label in ranges:
+        if start <= t <= end:
+            return True, label
+    return False, "Mercado fechado"
+
+
 class HomeFrame(tk.Frame):
     MODULES = [
         {"name": "Cadastro Share",     "sub": "Extração e análise de PDF",          "icon": "⊕", "frame": "Share",            "color": "#5a9e72"},
@@ -1714,6 +2396,16 @@ class HomeFrame(tk.Frame):
                  bg=C["bg"], fg=C["ink_muted"],
                  font=("Segoe UI", 10)).pack(anchor="w", pady=(4, 0))
 
+        self._market_row = tk.Frame(greet, bg=C["bg"])
+        self._market_row.pack(anchor="w", pady=(10, 0))
+        self._market_dot = tk.Canvas(self._market_row, width=9, height=9,
+                                     bg=C["bg"], highlightthickness=0, bd=0)
+        self._market_dot.pack(side="left", padx=(0, 7))
+        self._market_lbl = tk.Label(self._market_row, bg=C["bg"],
+                                    font=("Segoe UI", 9, "bold"))
+        self._market_lbl.pack(side="left")
+        self._paint_market_status()
+
         make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=44, pady=(28, 26))
 
         eyebrow_label(inner, "MÓDULOS").pack(anchor="w", padx=44, pady=(0, 14))
@@ -1728,40 +2420,6 @@ class HomeFrame(tk.Frame):
             self._make_module_card(grid, mod, r, c)
 
         make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=44, pady=(30, 24))
-
-        eyebrow_label(inner, "ATALHOS RÁPIDOS").pack(anchor="w", padx=44, pady=(0, 10))
-
-        quick = tk.Frame(inner, bg=C["bg"])
-        quick.pack(fill="x", padx=44, pady=(0, 40))
-
-        links = [
-            ("Nova solicitação BPM",    "BPM_HUB"),
-            ("Operações Invertido",      "OperacoesInvertido"),
-            ("Extrair dados de PDF",     "Share"),
-            ("Gerenciar rotinas",        "Rotinas"),
-        ]
-        for label, frame in links:
-            row_f = tk.Frame(quick, bg=C["bg"])
-            row_f.pack(fill="x", pady=1)
-
-            arrow = tk.Label(row_f, text="→", bg=C["bg"], fg=C["ink_faint"],
-                             font=("Segoe UI", 9))
-            arrow.pack(side="left", padx=(0, 6))
-
-            btn = tk.Button(row_f, text=label,
-                            command=lambda f=frame: self.controller.show_frame(f),
-                            bg=C["bg"], fg=C["ink_muted"],
-                            activebackground=C["bg"], activeforeground=C["ink"],
-                            font=("Segoe UI", 9),
-                            relief="flat", bd=0, anchor="w", padx=0, pady=4,
-                            cursor="hand2")
-            btn.pack(side="left")
-            btn.bind("<Enter>", lambda e, b=btn, a=arrow: (
-                b.configure(fg=C["accent"]), a.configure(fg=C["accent"])))
-            btn.bind("<Leave>", lambda e, b=btn, a=arrow: (
-                b.configure(fg=C["ink_muted"]), a.configure(fg=C["ink_faint"])))
-
-        make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=44, pady=(28, 22))
         eyebrow_label(inner, "ROTINAS DE HOJE").pack(anchor="w", padx=44, pady=(0, 8))
 
         self._rot_container = tk.Frame(inner, bg=C["bg"])
@@ -1770,6 +2428,29 @@ class HomeFrame(tk.Frame):
 
     def on_show(self):
         self.refresh_rotinas()
+        if not getattr(self, "_market_loop_started", False):
+            self._market_loop_started = True
+            self._refresh_market_status()
+        else:
+            self._paint_market_status()
+
+    def _refresh_market_status(self):
+        self._paint_market_status()
+        self.after(30_000, self._refresh_market_status)
+
+    def _paint_market_status(self):
+        aberto, texto = get_market_status()
+        color = C["ok"] if aberto else C["err"]
+        glow  = C["ok_dim"] if aberto else C["err_dim"]
+
+        dot = self._market_dot
+        dot.delete("all")
+        dot.create_oval(0, 0, 9, 9, fill=glow, outline="")
+        dot.create_oval(2, 2, 7, 7, fill=color, outline="")
+
+        self._market_lbl.configure(
+            text=(texto if aberto else "Mercado fechado"),
+            fg=(C["ok"] if aberto else C["ink_muted"]))
 
     def refresh_rotinas(self):
         if not hasattr(self, "_rot_container"):
@@ -2228,6 +2909,426 @@ class TaxasData:
 
     def vencidas(self, cnpjs):
         return [c for c in cnpjs if c and not self.is_vigente(c)]
+
+
+# ─── Histórico de Operações (Risco Sacado Invertido) ───────────────────────
+# Armazenado em SQLite, na MESMA pasta de rede do dados.json (Depara).
+# Append-only: nenhum registro já gravado é sobrescrito ou apagado. Se a
+# rede cair no momento da gravação, o registro fica numa fila local
+# temporária e é reenviado automaticamente quando a conexão voltar (mesmo
+# padrão de resiliência do TaxasData, com retry silencioso a cada 30s).
+
+HISTORICO_DB_PATH = os.path.join(
+    os.path.dirname(SHARED_TAXAS_PATH), "historico_operacoes.db")
+HISTORICO_SCHEMA_VERSION = 1
+HISTORICO_PENDING_LOCAL_PATH = os.path.join(
+    tempfile.gettempdir(), "historico_pendente_local.jsonl")
+
+
+def _current_username() -> str:
+    try:
+        return os.environ.get("USERNAME") or os.environ.get("USER") or ""
+    except Exception:
+        return ""
+
+
+class HistoricoOperacoesData:
+    _instance = None
+    RETRY_SECONDS = 30
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._available = False
+        self._on_reconnect_callbacks = []
+        self._retry_timer = None
+        self._ensure_schema()
+        if self._available:
+            self._flush_pending_local()
+        else:
+            self._schedule_retry()
+
+    # ── Conectividade (mesmo padrão do TaxasData) ─────────────────────────
+    def is_available(self):
+        return self._available
+
+    def on_reconnect(self, callback):
+        self._on_reconnect_callbacks.append(callback)
+
+    def _schedule_retry(self):
+        if self._retry_timer is not None:
+            return
+        self._retry_timer = threading.Timer(self.RETRY_SECONDS, self._retry_tick)
+        self._retry_timer.daemon = True
+        self._retry_timer.start()
+
+    def _retry_tick(self):
+        self._retry_timer = None
+        was_available = self._available
+        self._ensure_schema()
+        if self._available and not was_available:
+            self._flush_pending_local()
+            for cb in list(self._on_reconnect_callbacks):
+                try:
+                    cb()
+                except Exception:
+                    pass
+        if not self._available:
+            self._schedule_retry()
+
+    def _network_reachable(self):
+        try:
+            return os.path.isdir(os.path.dirname(HISTORICO_DB_PATH))
+        except Exception:
+            return False
+
+    def _connect(self):
+        conn = sqlite3.connect(HISTORICO_DB_PATH, timeout=8)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def _ensure_schema(self):
+        if not self._network_reachable():
+            self._available = False
+            return
+        try:
+            conn = self._connect()
+            conn.execute("""CREATE TABLE IF NOT EXISTS schema_info (
+                                key TEXT PRIMARY KEY, value TEXT)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS operacoes (
+                                id              TEXT PRIMARY KEY,
+                                cliente         TEXT NOT NULL,
+                                cnpj_sacado     TEXT,
+                                cnpj_cedente    TEXT,
+                                data_hora       TEXT NOT NULL,
+                                data_dia        TEXT NOT NULL,
+                                usuario         TEXT,
+                                modo            TEXT,
+                                trader          TEXT,
+                                status          TEXT NOT NULL,
+                                montante_total  TEXT NOT NULL,
+                                liquido_total   TEXT NOT NULL,
+                                taxa            TEXT,
+                                arquivo_origem  TEXT
+                            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS notas (
+                                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                                operacao_id     TEXT NOT NULL,
+                                nf              TEXT,
+                                valor           TEXT,
+                                data_vencimento TEXT,
+                                prazo_dias      INTEGER,
+                                valor_liquido   TEXT,
+                                incluida        INTEGER NOT NULL DEFAULT 1
+                            )""")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_op_cnpj ON operacoes(cnpj_sacado)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_op_dia ON operacoes(data_dia)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notas_op ON notas(operacao_id)")
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_info(key, value) VALUES ('version', ?)",
+                (str(HISTORICO_SCHEMA_VERSION),))
+            conn.commit()
+            conn.close()
+            self._available = True
+        except Exception:
+            self._available = False
+
+    # ── Leitura ─────────────────────────────────────────────────────────
+    def ja_confirmado_hoje(self, cnpj_sacado: str):
+        """Retorna o registro de confirmação de hoje para este CNPJ sacado
+        (dict com id/cliente/montante_total/liquido_total/taxa/data_hora),
+        ou None se não houver. Considera tanto o banco quanto a fila local
+        ainda não sincronizada, pra não perder a checagem de idempotência
+        quando a rede está fora."""
+        if not cnpj_sacado:
+            return None
+        hoje = date.today().isoformat()
+        candidatos = []
+
+        if self._network_reachable():
+            try:
+                conn = self._connect()
+                cur = conn.execute(
+                    """SELECT id, cliente, montante_total, liquido_total, taxa, data_hora
+                       FROM operacoes
+                       WHERE cnpj_sacado = ? AND data_dia = ? AND status = 'confirmado'
+                       ORDER BY data_hora DESC LIMIT 1""",
+                    (cnpj_sacado, hoje))
+                row = cur.fetchone()
+                conn.close()
+                if row is not None:
+                    candidatos.append({"id": row[0], "cliente": row[1],
+                                        "montante_total": row[2], "liquido_total": row[3],
+                                        "taxa": row[4], "data_hora": row[5]})
+            except Exception:
+                pass
+
+        if os.path.isfile(HISTORICO_PENDING_LOCAL_PATH):
+            try:
+                with open(HISTORICO_PENDING_LOCAL_PATH, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            p = _json_mod.loads(line)
+                        except Exception:
+                            continue
+                        if (p.get("cnpj_sacado") == cnpj_sacado and
+                                p.get("data_dia") == hoje and
+                                p.get("status") == "confirmado"):
+                            candidatos.append({
+                                "id": p["id"], "cliente": p["cliente"],
+                                "montante_total": p["montante_total"],
+                                "liquido_total": p["liquido_total"],
+                                "taxa": p["taxa"], "data_hora": p["data_hora"]})
+            except Exception:
+                pass
+
+        if not candidatos:
+            return None
+        candidatos.sort(key=lambda c: c["data_hora"], reverse=True)
+        return candidatos[0]
+
+    # ── Escrita ─────────────────────────────────────────────────────────
+    def registrar_operacao(self, *, cliente, cnpj_sacado, cnpj_cedente, usuario,
+                            modo, trader, montante_total, liquido_total, taxa,
+                            arquivo_origem, notas):
+        """Grava uma operação confirmada + notas (append-only). Se a rede
+        estiver indisponível, guarda numa fila local e sincroniza depois.
+        Retorna (ok: bool, op_id: str) — ok=False indica que ficou apenas
+        na fila local aguardando reconexão, não que a confirmação falhou."""
+        op_id = str(_uuid_mod.uuid4())
+        now = datetime.now()
+        payload = {
+            "id": op_id, "cliente": cliente, "cnpj_sacado": cnpj_sacado,
+            "cnpj_cedente": cnpj_cedente,
+            "data_hora": now.isoformat(timespec="seconds"),
+            "data_dia": now.date().isoformat(), "usuario": usuario, "modo": modo,
+            "trader": trader, "status": "confirmado",
+            "montante_total": str(montante_total), "liquido_total": str(liquido_total),
+            "taxa": taxa, "arquivo_origem": arquivo_origem,
+            "notas": [{"nf": n.get("nf"), "valor": str(n.get("valor")),
+                       "data_vencimento": n.get("data_vencimento"),
+                       "prazo_dias": n.get("prazo_dias"),
+                       "valor_liquido": (str(n.get("valor_liquido"))
+                                         if n.get("valor_liquido") is not None else None),
+                       "incluida": bool(n.get("incluida", True))}
+                      for n in notas],
+        }
+        ok = self._write_payload(payload)
+        if not ok:
+            self._queue_local(payload)
+            self._schedule_retry()
+        return ok, op_id
+
+    def _write_payload(self, payload) -> bool:
+        if not self._network_reachable():
+            self._available = False
+            return False
+        try:
+            conn = self._connect()
+            conn.execute(
+                """INSERT OR IGNORE INTO operacoes
+                   (id, cliente, cnpj_sacado, cnpj_cedente, data_hora, data_dia,
+                    usuario, modo, trader, status, montante_total, liquido_total,
+                    taxa, arquivo_origem)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (payload["id"], payload["cliente"], payload["cnpj_sacado"],
+                 payload["cnpj_cedente"], payload["data_hora"], payload["data_dia"],
+                 payload["usuario"], payload["modo"], payload["trader"],
+                 payload["status"], payload["montante_total"],
+                 payload["liquido_total"], payload["taxa"], payload["arquivo_origem"]))
+            conn.executemany(
+                """INSERT INTO notas
+                   (operacao_id, nf, valor, data_vencimento, prazo_dias,
+                    valor_liquido, incluida)
+                   VALUES (?,?,?,?,?,?,?)""",
+                [(payload["id"], n.get("nf"), n.get("valor"), n.get("data_vencimento"),
+                  n.get("prazo_dias"), n.get("valor_liquido"),
+                  1 if n.get("incluida", True) else 0)
+                 for n in payload["notas"]])
+            conn.commit()
+            conn.close()
+            self._available = True
+            return True
+        except Exception:
+            self._available = False
+            return False
+
+    # ── Leitura para a tela de Histórico ───────────────────────────────────
+    def listar_operacoes(self, *, cliente=None, trader=None, status=None,
+                          data_de=None, data_ate=None, busca=None):
+        """Retorna lista de operações (dict, sem notas) que atendem aos
+        filtros. Cada filtro é opcional; None/"" significa "sem filtro".
+        - cliente: lista de nomes de cliente (match exato, case-insensitive)
+        - trader: nome do trader (match exato)
+        - status: 'confirmado' | 'falhou' | 'cancelado' etc.
+        - data_de / data_ate: 'YYYY-MM-DD' (inclusive)
+        - busca: texto livre — casa contra NF ou CNPJ (via subquery em notas)
+        Ordenado por data_hora decrescente (mais recente primeiro).
+        Inclui também registros ainda na fila local (não sincronizados)."""
+        rows = []
+        if self._network_reachable():
+            try:
+                conn = self._connect()
+                clauses, params = [], []
+                if data_de:
+                    clauses.append("data_dia >= ?"); params.append(data_de)
+                if data_ate:
+                    clauses.append("data_dia <= ?"); params.append(data_ate)
+                if status:
+                    clauses.append("status = ?"); params.append(status)
+                if trader:
+                    clauses.append("trader = ?"); params.append(trader)
+                if cliente:
+                    ph = ",".join(["?"] * len(cliente))
+                    clauses.append(f"cliente IN ({ph})")
+                    params.extend(cliente)
+                if busca:
+                    b = f"%{busca.strip()}%"
+                    clauses.append(
+                        "(cnpj_sacado LIKE ? OR id IN "
+                        "(SELECT operacao_id FROM notas WHERE nf LIKE ?))")
+                    params.extend([b, b])
+                where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+                cur = conn.execute(
+                    f"""SELECT id, cliente, cnpj_sacado, cnpj_cedente, data_hora,
+                               data_dia, usuario, modo, trader, status,
+                               montante_total, liquido_total, taxa, arquivo_origem
+                        FROM operacoes {where}
+                        ORDER BY data_hora DESC""", params)
+                cols = ["id", "cliente", "cnpj_sacado", "cnpj_cedente", "data_hora",
+                        "data_dia", "usuario", "modo", "trader", "status",
+                        "montante_total", "liquido_total", "taxa", "arquivo_origem"]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+                conn.close()
+            except Exception:
+                rows = []
+
+        # Inclui pendentes locais (ainda não sincronizados) que casem com o filtro.
+        pendentes = self._read_pending_local()
+        ids_existentes = {r["id"] for r in rows}
+        for p in pendentes:
+            if p.get("id") in ids_existentes:
+                continue
+            if data_de and p.get("data_dia", "") < data_de:
+                continue
+            if data_ate and p.get("data_dia", "") > data_ate:
+                continue
+            if status and p.get("status") != status:
+                continue
+            if trader and p.get("trader") != trader:
+                continue
+            if cliente and p.get("cliente") not in cliente:
+                continue
+            if busca:
+                b = busca.strip().lower()
+                nfs = [str(n.get("nf", "")).lower() for n in p.get("notas", [])]
+                if b not in (p.get("cnpj_sacado") or "").lower() and not any(b in nf for nf in nfs):
+                    continue
+            rows.append({k: p.get(k) for k in
+                         ["id", "cliente", "cnpj_sacado", "cnpj_cedente", "data_hora",
+                          "data_dia", "usuario", "modo", "trader", "status",
+                          "montante_total", "liquido_total", "taxa", "arquivo_origem"]})
+        rows.sort(key=lambda r: r.get("data_hora") or "", reverse=True)
+        return rows
+
+    def notas_da_operacao(self, operacao_id: str):
+        """Retorna a lista de notas (dict) de uma operação, nota a nota.
+        Também busca na fila local, caso a operação ainda não tenha
+        sincronizado com o banco de rede."""
+        if self._network_reachable():
+            try:
+                conn = self._connect()
+                cur = conn.execute(
+                    """SELECT nf, valor, data_vencimento, prazo_dias, valor_liquido, incluida
+                       FROM notas WHERE operacao_id = ? ORDER BY nf""", (operacao_id,))
+                cols = ["nf", "valor", "data_vencimento", "prazo_dias", "valor_liquido", "incluida"]
+                out = [dict(zip(cols, r)) for r in cur.fetchall()]
+                conn.close()
+                if out:
+                    return out
+            except Exception:
+                pass
+        for p in self._read_pending_local():
+            if p.get("id") == operacao_id:
+                return p.get("notas", [])
+        return []
+
+    def clientes_distintos(self):
+        """Lista de nomes de cliente que já aparecem no histórico (banco +
+        pendentes locais), para popular o filtro de cliente."""
+        nomes = set()
+        if self._network_reachable():
+            try:
+                conn = self._connect()
+                cur = conn.execute("SELECT DISTINCT cliente FROM operacoes")
+                nomes.update(r[0] for r in cur.fetchall() if r[0])
+                conn.close()
+            except Exception:
+                pass
+        for p in self._read_pending_local():
+            if p.get("cliente"):
+                nomes.add(p["cliente"])
+        return sorted(nomes)
+
+    def _read_pending_local(self):
+        if not os.path.isfile(HISTORICO_PENDING_LOCAL_PATH):
+            return []
+        out = []
+        try:
+            with open(HISTORICO_PENDING_LOCAL_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(_json_mod.loads(line))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return out
+
+    def _queue_local(self, payload):
+        try:
+            with open(HISTORICO_PENDING_LOCAL_PATH, "a", encoding="utf-8") as f:
+                f.write(_json_mod.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _flush_pending_local(self):
+        if not os.path.isfile(HISTORICO_PENDING_LOCAL_PATH):
+            return
+        try:
+            with open(HISTORICO_PENDING_LOCAL_PATH, "r", encoding="utf-8") as f:
+                lines = [l for l in f.read().splitlines() if l.strip()]
+        except Exception:
+            return
+        remaining = []
+        for line in lines:
+            try:
+                payload = _json_mod.loads(line)
+            except Exception:
+                continue
+            if not self._write_payload(payload):
+                remaining.append(line)
+        try:
+            if remaining:
+                with open(HISTORICO_PENDING_LOCAL_PATH, "w", encoding="utf-8") as f:
+                    f.write("\n".join(remaining) + "\n")
+            else:
+                os.remove(HISTORICO_PENDING_LOCAL_PATH)
+        except Exception:
+            pass
 
 
 # ─── RotinasFrame ────────────────────────────────────────────────────────────
@@ -3022,6 +4123,7 @@ class BPMConfigFrame(tk.Frame):
         self._senha_var.set(getattr(self.controller, "bpm_password", "") or "")
         if hasattr(self, "_sf"):
             self._sf.refresh_bindings()
+        self._refresh_confirmacoes()
 
     def _build(self):
         hdr = tk.Frame(self, bg=C["bg"])
@@ -3112,6 +4214,9 @@ class BPMConfigFrame(tk.Frame):
         row.pack(fill="x")
         row.columnconfigure(1, weight=1)
 
+        cnpj_cli = only_digits(BPM_CLIENT_DATA.get(cli, {}).get("CNPJ", ""))
+        confirmado_holder = [None]
+
         selected = tk.BooleanVar(value=False)
         val_var  = tk.StringVar(value="R$ 0,00")
         val_digits = [""]
@@ -3121,9 +4226,14 @@ class BPMConfigFrame(tk.Frame):
                             fg=C["ink_muted"], font=("Segoe UI",9))
         cb.grid(row=0, column=0, sticky="w")
 
-        name_lbl = tk.Label(row, text=cli, bg=C["surface"], fg=C["ink_muted"],
+        name_wrap = tk.Frame(row, bg=C["surface"])
+        name_wrap.grid(row=0, column=1, sticky="w", padx=(4,8))
+        name_lbl = tk.Label(name_wrap, text=cli, bg=C["surface"], fg=C["ink_muted"],
                             font=("Segoe UI",9))
-        name_lbl.grid(row=0, column=1, sticky="w", padx=(4,8))
+        name_lbl.pack(side="left")
+        badge_lbl = tk.Label(name_wrap, text="", bg=C["surface"], fg=C["ok"],
+                             font=("Segoe UI", 8))
+        badge_lbl.pack(side="left")
 
         ent = styled_entry(row, textvariable=val_var, width=14)
         ent.grid(row=0, column=2, sticky="e")
@@ -3152,6 +4262,11 @@ class BPMConfigFrame(tk.Frame):
             if selected.get():
                 ent.configure(state="normal", bg=C["bg"], fg=C["ink"])
                 self._selected[cli] = val_var
+                conf = confirmado_holder[0]
+                if conf and not val_digits[0]:
+                    d = Decimal(conf["montante_total"]).quantize(Decimal("0.01"))
+                    val_digits[0] = str(int((d * 100).quantize(Decimal("1"))))
+                    fmt_val()
             else:
                 ent.configure(state="disabled", disabledbackground=C["bg"], disabledforeground=C["ink_faint"])
                 self._selected.pop(cli, None)
@@ -3160,7 +4275,30 @@ class BPMConfigFrame(tk.Frame):
         ent.bind("<KeyPress>", on_key)
         ent.bind("<<Paste>>", on_paste)
         ent.bind("<Control-v>", on_paste)
-        self._client_rows[cli] = {"selected": selected, "val_var": val_var, "val_digits": val_digits, "entry": ent}
+        self._client_rows[cli] = {
+            "selected": selected, "val_var": val_var, "val_digits": val_digits,
+            "entry": ent, "cnpj": cnpj_cli, "confirmado_holder": confirmado_holder,
+            "badge_lbl": badge_lbl,
+        }
+
+    def _refresh_confirmacoes(self):
+        """Atualiza os badges '● Montante disponível' com base no que foi
+        confirmado hoje em Analisar Operações (não mexe na seleção atual
+        do usuário)."""
+        if not hasattr(self, "_client_rows"):
+            return
+        hist = HistoricoOperacoesData.get()
+        for cli, row in self._client_rows.items():
+            cnpj = row.get("cnpj")
+            conf = hist.ja_confirmado_hoje(cnpj) if cnpj else None
+            row["confirmado_holder"][0] = conf
+            if conf:
+                montante_fmt = _fmt_brl(Decimal(conf["montante_total"]))
+                row["badge_lbl"].configure(text=f"   ● Disponível — {montante_fmt}")
+            else:
+                row["badge_lbl"].configure(text="")
+
+
 
     def _start_bpm(self):
         func = self._only_digits(self._func_var.get())
@@ -3572,7 +4710,6 @@ class ShareFrame(tk.Frame):
         foot = tk.Frame(body, bg=C["bg"])
         foot.pack(fill="x", padx=32, pady=(12,30))
         styled_button(foot,"📋  Copiar Resumo", self._copy_resumo, accent=True).pack(side="left")
-        styled_button(foot,"💾  Salvar .txt",   self._save_resumo).pack(side="left", padx=(6,0))
 
     def on_show(self):
         if hasattr(self, "_sf"):
@@ -3585,15 +4722,6 @@ class ShareFrame(tk.Frame):
     def _copy_resumo(self):
         v = self.txt_resumo.get("1.0","end-1c")
         self.clipboard_clear(); self.clipboard_append(v)
-
-    def _save_resumo(self):
-        c = self.txt_resumo.get("1.0","end-1c").strip()
-        if not c: messagebox.showinfo("Vazio","Nada para salvar."); return
-        p = filedialog.asksaveasfilename(defaultextension=".txt",
-                                        filetypes=[("Texto","*.txt")], title="Salvar Resumo")
-        if p:
-            try: open(p,"w",encoding="utf-8").write(c)
-            except Exception as e: messagebox.showerror("Erro",str(e))
 
     def _update_trader_espec(self):
         reg = self.vars["regiao"].get().strip()
@@ -3612,16 +4740,17 @@ class ShareFrame(tk.Frame):
                 messagebox.showwarning("PDF sem texto","Não foi possível extrair texto."); return
             lines = t.splitlines()
             tn, tc = normalize_text_variants(t)
-            raz  = extract_razao_social(t,lines,tn,tc,t_plain=tp) or ""
-            cn   = extract_cnpj(t,tn,tc) or ""
-            conta= extract_conta_corrente(lines,tn,tc) or ""
-            plat = extract_plataforma(t,tn,tc) or ""
-            reg  = extract_regiao(t,tn,tc) or ""
-            val  = extract_valor(t,tn,tc) or ""
-            sp   = extract_spread(t,tn,tc) or ""
-            pmin = extract_prazo_min(t,tn,tc) or ""
-            pmax = extract_prazo_max(t,tn,tc) or ""
-            mod  = extract_modalidade(t,tn,tc) or ""
+            pmap = _plain_label_value_map(p)
+            raz  = extract_razao_social(t,lines,tn,tc,t_plain=tp,pdf_path=p) or ""
+            cn   = extract_cnpj(t,tn,tc,pmap) or ""
+            conta= extract_conta_corrente(lines,tn,tc,pmap) or ""
+            plat = extract_plataforma(t,tn,tc,pmap) or ""
+            reg  = extract_regiao(t,tn,tc,pmap) or ""
+            val  = extract_valor(t,tn,tc,pmap) or ""
+            sp   = extract_spread(t,tn,tc,pmap) or ""
+            pmin = extract_prazo_min(t,tn,tc,pmap) or ""
+            pmax = extract_prazo_max(t,tn,tc,pmap) or ""
+            mod  = extract_modalidade(t,tn,tc,pmap) or ""
             liq  = "Débito em CC" if not RE_LIQ_CRED.search(t) else "Crédito em CC"
             prem = "com prêmio" if RE_PREMIO.search(t) else "sem prêmio"
             self.vars["razao_social"].set(raz)
@@ -3720,7 +4849,7 @@ class OperacoesInvertidoFrame(tk.Frame):
         self._make_option_card(
             body, 0, 2, "▦", "Histórico Operações",
             "Consulta o histórico de operações já realizadas.",
-            self._open_historico_placeholder, "#8b72c9")
+            lambda: self.controller.show_frame("HistoricoOperacoes"), "#8b72c9")
 
         self._taxas_card = None
         self._refresh_taxas_card()
@@ -3751,13 +4880,6 @@ class OperacoesInvertidoFrame(tk.Frame):
                            alert=False, alert_text="● Taxas vencidas"):
         return make_hub_option_card(parent, row, col, icon, title, sub, command, color,
                                     alert=alert, alert_text=alert_text)
-
-    # ── Histórico Operações (placeholder) ───────────────────────────────────
-    def _open_historico_placeholder(self):
-        messagebox.showinfo(
-            "Histórico Operações",
-            "Histórico Operações estará disponível em breve.",
-            parent=self.controller)
 
     # ── Overlay: Analisar Operações ─────────────────────────────────────────
     def _open_analisar_overlay(self):
@@ -3818,6 +4940,11 @@ class OperacoesInvertidoFrame(tk.Frame):
             foot, "Selecionar arquivo .xlsx…",
             self._overlay_action_click, accent=True)
         self._overlay_action_btn.pack(side="left")
+        self._overlay_remove_btn = styled_button(
+            foot, "Remover arquivo",
+            self._remove_xlsx, danger=True, small=True)
+        if has_file:
+            self._overlay_remove_btn.pack(side="left", padx=(8, 0))
         self._overlay_ready = bool(self._xlsx_path)
         if self._overlay_ready:
             self._set_overlay_analyze_state(animate=False)
@@ -3829,6 +4956,24 @@ class OperacoesInvertidoFrame(tk.Frame):
             self._start_analyze()
         else:
             self._pick_xlsx()
+
+    def _remove_xlsx(self):
+        self._xlsx_path = None
+        self._overlay_ready = False
+        if getattr(self.controller, "invertido_xlsx_path", None):
+            self.controller.invertido_xlsx_path = None
+        if hasattr(self, "_overlay_file_lbl") and self._overlay_file_lbl.winfo_exists():
+            self._overlay_file_lbl.configure(text="Nenhum arquivo selecionado", fg=C["ink_muted"])
+            self._overlay_icon_lbl.configure(text="▤", fg=C["ink_faint"])
+        if hasattr(self, "_overlay_remove_btn") and self._overlay_remove_btn.winfo_exists():
+            self._overlay_remove_btn.pack_forget()
+        btn = getattr(self, "_overlay_action_btn", None)
+        if btn is not None and btn.winfo_exists():
+            btn.configure(text="Selecionar arquivo .xlsx…",
+                          bg=C["accent_dim"], fg=C["accent"],
+                          command=self._overlay_action_click)
+            btn.bind("<Enter>", lambda _: btn.configure(bg=C["accent"], fg=C["bg"]))
+            btn.bind("<Leave>", lambda _: btn.configure(bg=C["accent_dim"], fg=C["accent"]))
 
     def _set_overlay_analyze_state(self, animate=True):
         btn = getattr(self, "_overlay_action_btn", None)
@@ -3879,6 +5024,8 @@ class OperacoesInvertidoFrame(tk.Frame):
         if hasattr(self, "_overlay_file_lbl") and self._overlay_file_lbl.winfo_exists():
             self._overlay_file_lbl.configure(text=os.path.basename(p), fg=C["ink"])
             self._overlay_icon_lbl.configure(text="✓", fg=C["ok"])
+        if hasattr(self, "_overlay_remove_btn") and self._overlay_remove_btn.winfo_exists():
+            self._overlay_remove_btn.pack(side="left", padx=(8, 0))
         self._set_overlay_analyze_state(animate=True)
 
     def _close_analisar_overlay(self):
@@ -4117,6 +5264,694 @@ class TaxasInvertidoFrame(tk.Frame):
         entry.bind("<Return>", lambda _e: _salvar())
 
 
+PERIODO_ATALHOS = [
+    ("7 dias",   7),
+    ("1 mês",    30),
+    ("3 meses",  90),
+    ("6 meses",  182),
+    ("12 meses", 365),
+]
+
+STATUS_LABELS = {
+    "confirmado": "Enviado",
+    "falhou":     "Falhou",
+    "cancelado":  "Cancelado",
+}
+STATUS_COLORS = {
+    "confirmado": "ok",
+    "falhou":     "err",
+    "cancelado":  "warn",
+}
+
+
+def _hist_fmt_dia(data_dia: str) -> str:
+    try:
+        return datetime.strptime(data_dia, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        return data_dia or ""
+
+
+def _hist_fmt_hora(data_hora: str) -> str:
+    try:
+        return datetime.fromisoformat(data_hora).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return data_hora or ""
+
+
+class MiniBarChart(tk.Canvas):
+    """Gráfico de barras minimalista (Canvas puro), no estilo visual do app.
+    Aceita uma ou duas séries sobrepostas (para Montante x Líquido)."""
+
+    def __init__(self, parent, height=150, **kwargs):
+        super().__init__(parent, height=height, bg=C["surface"],
+                         highlightthickness=0, bd=0, **kwargs)
+        self._labels = []
+        self._series = []
+        self._colors = []
+        self._legend = []
+        self.bind("<Configure>", lambda _e: self._redraw())
+
+    def set_data(self, labels, series, colors, legend=None):
+        """series: lista de listas de floats (mesma cardinalidade de labels)."""
+        self._labels = labels
+        self._series = series
+        self._colors = colors
+        self._legend = legend or []
+        self._redraw()
+
+    def _redraw(self, _e=None):
+        self.delete("all")
+        w = max(self.winfo_width(), 1)
+        h = max(self.winfo_height(), 1)
+        if not self._labels or not self._series or not self._series[0]:
+            self.create_text(w / 2, h / 2, text="Sem dados no período",
+                             fill=C["ink_faint"], font=("Segoe UI", 9))
+            return
+        n = len(self._labels)
+        top_pad, bottom_pad = 14, 22
+        chart_h = max(h - top_pad - bottom_pad, 10)
+        vmax = max((max(s) for s in self._series if s), default=0) or 1
+        left_pad = 8
+        avail_w = w - left_pad * 2
+        group_w = avail_w / max(n, 1)
+        n_series = len(self._series)
+        bar_w = max((group_w * 0.6) / max(n_series, 1), 2)
+
+        # legenda
+        if self._legend:
+            lx = w - 10
+            for i, (txt, color) in enumerate(reversed(list(zip(self._legend, self._colors)))):
+                lx -= (len(txt) * 6 + 26)
+            lx = 10
+            for txt, color in zip(self._legend, self._colors):
+                self.create_oval(lx, 2, lx + 8, 10, fill=color, outline="")
+                self.create_text(lx + 12, 6, text=txt, fill=C["ink_muted"],
+                                 font=("Segoe UI", 7), anchor="w")
+                lx += len(txt) * 6 + 26
+
+        for i, label in enumerate(self._labels):
+            gx0 = left_pad + i * group_w
+            for si, serie in enumerate(self._series):
+                val = serie[i] if i < len(serie) else 0
+                bar_h = (val / vmax) * chart_h
+                bx0 = gx0 + si * bar_w + (group_w - n_series * bar_w) / 2
+                y1 = top_pad + chart_h
+                y0 = y1 - bar_h
+                color = self._colors[si % len(self._colors)]
+                self.create_rectangle(bx0, y0, bx0 + bar_w - 2, y1,
+                                      fill=color, outline="")
+            # rótulo do eixo x — só mostra a cada N para não poluir
+            step = max(1, n // 8)
+            if i % step == 0 or i == n - 1:
+                self.create_text(gx0 + group_w / 2, top_pad + chart_h + 11,
+                                 text=label, fill=C["ink_faint"],
+                                 font=("Segoe UI", 7), anchor="n")
+
+
+class HorizontalRankChart(tk.Canvas):
+    """Ranking em barras horizontais — para 'quem mais antecipou'."""
+
+    def __init__(self, parent, height=150, **kwargs):
+        super().__init__(parent, height=height, bg=C["surface"],
+                         highlightthickness=0, bd=0, **kwargs)
+        self._items = []
+        self.bind("<Configure>", lambda _e: self._redraw())
+
+    def set_data(self, items):
+        """items: lista de (label, valor) já ordenada desc, máx ~8."""
+        self._items = items[:8]
+        self._redraw()
+
+    def _redraw(self, _e=None):
+        self.delete("all")
+        w = max(self.winfo_width(), 1)
+        h = max(self.winfo_height(), 1)
+        if not self._items:
+            self.create_text(w / 2, h / 2, text="Sem dados no período",
+                             fill=C["ink_faint"], font=("Segoe UI", 9))
+            return
+        n = len(self._items)
+        row_h = h / n
+        vmax = max(v for _l, v in self._items) or 1
+        label_w = 118
+        bar_area = w - label_w - 70
+        for i, (label, val) in enumerate(self._items):
+            y0 = i * row_h
+            yc = y0 + row_h / 2
+            disp = label if len(label) <= 18 else label[:17] + "…"
+            self.create_text(label_w - 8, yc, text=disp, fill=C["ink_muted"],
+                             font=("Segoe UI", 8), anchor="e")
+            bar_w = (val / vmax) * bar_area
+            self.create_rectangle(label_w, yc - row_h * 0.28,
+                                  label_w + bar_w, yc + row_h * 0.28,
+                                  fill=C["accent"], outline="")
+            self.create_text(label_w + bar_w + 6, yc, text=_fmt_brl(Decimal(str(val))),
+                             fill=C["ink_faint"], font=("Segoe UI", 7), anchor="w")
+
+
+class HistoricoOperacoesFrame(tk.Frame):
+    """Histórico de Operações — consulta somente-leitura ao banco SQLite
+    gravado pela confirmação em Analisar Operações. Filtros por cliente,
+    trader, período e status; resumo agregado; gráficos; e tabela com
+    drill-down (expande pra ver nota a nota)."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._data = HistoricoOperacoesData.get()
+        self._rows = []
+        self._expanded_ids = set()
+        self._filtro_clientes = set()
+        self._filtro_trader = None
+        self._filtro_status = None
+        self._filtro_periodo_dias = None
+        self._filtro_de = None
+        self._filtro_ate = None
+        self._busca_var = tk.StringVar()
+        self._build()
+
+    def on_show(self):
+        self._refresh_network_state()
+        self._reload()
+
+    # ── Estrutura geral ────────────────────────────────────────────────
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        styled_button(hdr, "← Voltar",
+                      lambda: self.controller.show_frame("OperacoesInvertido")).pack(side="left")
+        tk.Label(hdr, text="Histórico de Operações", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left", padx=(14, 0))
+        styled_button(hdr, "Exportar ⬇", self._exportar_excel,
+                      accent=True).pack(side="right")
+
+        sub = tk.Frame(self, bg=C["bg"])
+        sub.pack(fill="x", padx=32)
+        tk.Label(sub, text="Consulta somente-leitura das operações já confirmadas. "
+                            "Cada linha é um grupo (cliente/data) — clique para "
+                            "ver nota a nota.",
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
+
+        self._hairline_top = make_hairline(self, bg=C["hair"])
+        self._hairline_top.pack(fill="x", padx=0, pady=(16, 0))
+
+        self._net_banner = tk.Frame(self, bg=C["err_dim"])
+        tk.Label(
+            self._net_banner,
+            text="⚠ Sem conexão com a rede — exibindo apenas registros locais "
+                 "ainda não sincronizados. Tentando reconectar automaticamente…",
+            bg=C["err_dim"], fg=C["err"], font=("Segoe UI", 8, "bold"),
+            anchor="w", justify="left", wraplength=900,
+        ).pack(side="left", fill="x", expand=True, padx=18, pady=8)
+
+        self._build_filtros()
+
+        self._scroll = ScrollableFrame(self, bg=C["bg"])
+        self._scroll.pack(fill="both", expand=True, padx=32, pady=(16, 20))
+        self._content = self._scroll.inner
+
+        self._data.on_reconnect(self._on_data_reconnect)
+
+    def _on_data_reconnect(self):
+        try:
+            self.after(0, lambda: (self._refresh_network_state(), self._reload()))
+        except Exception:
+            pass
+
+    def _refresh_network_state(self):
+        if not self.winfo_exists():
+            return
+        if self._data.is_available():
+            self._net_banner.pack_forget()
+        else:
+            self._net_banner.pack(fill="x", padx=0, pady=(0, 0), after=self._hairline_top)
+
+    # ── Filtros ─────────────────────────────────────────────────────────
+    def _build_filtros(self):
+        bar = tk.Frame(self, bg=C["bg"])
+        bar.pack(fill="x", padx=32, pady=(16, 0))
+
+        self._cliente_btn = styled_button(bar, "Cliente ▾", self._abrir_filtro_cliente, small=True)
+        self._cliente_btn.pack(side="left")
+        self._trader_btn = styled_button(bar, "Trader ▾", self._abrir_filtro_trader, small=True)
+        self._trader_btn.pack(side="left", padx=(6, 0))
+        self._status_btn = styled_button(bar, "Status ▾", self._abrir_filtro_status, small=True)
+        self._status_btn.pack(side="left", padx=(6, 0))
+
+        busca_wrap = tk.Frame(bar, bg=C["bg"])
+        busca_wrap.pack(side="left", padx=(10, 0))
+        entry = styled_entry(busca_wrap, textvariable=self._busca_var, width=22)
+        entry.pack(side="left")
+        entry.insert(0, "")
+        entry.bind("<Return>", lambda _e: self._reload())
+        placeholder = tk.Label(busca_wrap, text="  🔍 NF ou CNPJ", bg=C["bg"],
+                               fg=C["ink_faint"], font=("Segoe UI", 8))
+        placeholder.pack(side="left")
+        styled_button(bar, "Buscar", self._reload, small=True).pack(side="left", padx=(6, 0))
+
+        chips_row = tk.Frame(self, bg=C["bg"])
+        chips_row.pack(fill="x", padx=32, pady=(8, 0))
+        self._chip_btns = {}
+        for label, dias in PERIODO_ATALHOS:
+            b = styled_button(chips_row, label, lambda d=dias: self._set_periodo_atalho(d),
+                              small=True)
+            b.pack(side="left", padx=(0, 6))
+            self._chip_btns[dias] = b
+        self._chip_todos = styled_button(chips_row, "Tudo",
+                                          lambda: self._set_periodo_atalho(None), small=True)
+        self._chip_todos.pack(side="left", padx=(0, 6))
+        self._filtro_periodo_dias = "todos"
+        self._active_chip_dias = None
+        self._filtro_ativo_lbl = tk.Label(chips_row, text="", bg=C["bg"], fg=C["ink_faint"],
+                                          font=("Segoe UI", 8))
+        self._filtro_ativo_lbl.pack(side="left", padx=(10, 0))
+
+    def _set_periodo_atalho(self, dias):
+        self._active_chip_dias = dias
+        for d, btn in self._chip_btns.items():
+            btn.configure(bg=(C["accent_dim"] if d == dias else C["surface2"]),
+                         fg=(C["accent"] if d == dias else C["ink_muted"]))
+        self._chip_todos.configure(bg=(C["accent_dim"] if dias is None else C["surface2"]),
+                                   fg=(C["accent"] if dias is None else C["ink_muted"]))
+        if dias is None:
+            self._filtro_de = None
+            self._filtro_ate = None
+        else:
+            self._filtro_ate = date.today().isoformat()
+            self._filtro_de = (date.today() - __import__("datetime").timedelta(days=dias)).isoformat()
+        self._reload()
+
+    def _abrir_filtro_cliente(self):
+        nomes = self._data.clientes_distintos()
+        if not nomes:
+            nomes = list(BPM_CLIENT_DATA.keys())
+        self._abrir_menu_multiselect(self._cliente_btn, "Cliente", nomes,
+                                      self._filtro_clientes, self._aplicar_filtro_cliente)
+
+    def _aplicar_filtro_cliente(self, selecionados):
+        self._filtro_clientes = set(selecionados)
+        self._cliente_btn.configure(
+            text=f"Cliente ({len(selecionados)}) ▾" if selecionados else "Cliente ▾")
+        self._reload()
+
+    def _abrir_filtro_trader(self):
+        traders = sorted(set(INVERTIDO_TRADER_POR_CLIENTE.values()))
+        atual = {self._filtro_trader} if self._filtro_trader else set()
+        self._abrir_menu_multiselect(self._trader_btn, "Trader", traders, atual,
+                                      lambda sel: self._aplicar_filtro_trader(
+                                          next(iter(sel), None)), single=True)
+
+    def _aplicar_filtro_trader(self, trader):
+        self._filtro_trader = trader
+        self._trader_btn.configure(text=f"Trader: {trader} ▾" if trader else "Trader ▾")
+        self._reload()
+
+    def _abrir_filtro_status(self):
+        opts = list(STATUS_LABELS.values())
+        atual_label = STATUS_LABELS.get(self._filtro_status)
+        atual = {atual_label} if atual_label else set()
+        rev = {v: k for k, v in STATUS_LABELS.items()}
+        self._abrir_menu_multiselect(self._status_btn, "Status", opts, atual,
+                                      lambda sel: self._aplicar_filtro_status(
+                                          rev.get(next(iter(sel), None))), single=True)
+
+    def _aplicar_filtro_status(self, status):
+        self._filtro_status = status
+        self._status_btn.configure(
+            text=f"Status: {STATUS_LABELS.get(status)} ▾" if status else "Status ▾")
+        self._reload()
+
+    def _abrir_menu_multiselect(self, anchor_btn, title, options, current_set,
+                                 on_apply, single=False):
+        try:
+            if getattr(self, "_menu_popup", None) is not None:
+                self._menu_popup.destroy()
+        except Exception:
+            pass
+        popup = tk.Toplevel(self)
+        popup.overrideredirect(True)
+        popup.configure(bg=C["surface"])
+        x = anchor_btn.winfo_rootx()
+        y = anchor_btn.winfo_rooty() + anchor_btn.winfo_height() + 2
+        popup.geometry(f"+{x}+{y}")
+        self._menu_popup = popup
+
+        frame = tk.Frame(popup, bg=C["surface"], highlightthickness=1,
+                         highlightbackground=C["hair"])
+        frame.pack()
+        tk.Label(frame, text=title, bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
+
+        selected = set(current_set)
+        vars_map = {}
+        row_labels = {}
+
+        def _toggle(o, v):
+            if single:
+                for k, vv in vars_map.items():
+                    if k != o:
+                        vv.set(False)
+                        row_labels[k].configure(fg=C["ink_muted"])
+            row_labels[o].configure(fg=(C["accent"] if v.get() else C["ink_muted"]))
+
+        for opt in options:
+            v = tk.BooleanVar(value=(opt in selected))
+            vars_map[opt] = v
+
+            row = tk.Frame(frame, bg=C["surface"])
+            row.pack(fill="x", padx=10, pady=1)
+            chk = tk.Checkbutton(row, variable=v, command=lambda o=opt, v=v: _toggle(o, v),
+                                 bg=C["surface"], activebackground=C["surface"],
+                                 selectcolor=C["surface2"], bd=0,
+                                 highlightthickness=0)
+            chk.pack(side="left")
+            lbl = tk.Label(row, text=opt, bg=C["surface"],
+                           fg=(C["accent"] if opt in selected else C["ink_muted"]),
+                           font=("Segoe UI", 9), cursor="hand2")
+            lbl.pack(side="left", padx=(2, 12))
+            row_labels[opt] = lbl
+            lbl.bind("<Button-1>", lambda _e, o=opt, v=v: (v.set(not v.get()), _toggle(o, v)))
+
+        btns = tk.Frame(frame, bg=C["surface"])
+        btns.pack(fill="x", padx=10, pady=(6, 8))
+
+        def _limpar():
+            for v in vars_map.values():
+                v.set(False)
+            for lbl in row_labels.values():
+                lbl.configure(fg=C["ink_muted"])
+
+        def _ok():
+            sel = {opt for opt, v in vars_map.items() if v.get()}
+            popup.destroy()
+            self._menu_popup = None
+            on_apply(sel)
+
+        styled_button(btns, "Limpar", _limpar, small=True).pack(side="left")
+        styled_button(btns, "Aplicar", _ok, accent=True, small=True).pack(side="right")
+
+        def _on_focus_out(_e=None):
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+            self._menu_popup = None
+
+        popup.bind("<FocusOut>", _on_focus_out)
+        popup.focus_set()
+
+    # ── Carregamento e agregação ───────────────────────────────────────
+    def _reload(self):
+        self._refresh_network_state()
+        try:
+            self._rows = self._data.listar_operacoes(
+                cliente=(list(self._filtro_clientes) if self._filtro_clientes else None),
+                trader=self._filtro_trader, status=self._filtro_status,
+                data_de=self._filtro_de, data_ate=self._filtro_ate,
+                busca=self._busca_var.get().strip() or None)
+        except Exception:
+            self._rows = []
+        self._expanded_ids.clear()
+        self._render()
+
+    def _render(self):
+        for w in self._content.winfo_children():
+            w.destroy()
+
+        self._render_resumo(self._content)
+        self._render_graficos(self._content)
+        self._render_tabela(self._content)
+
+    def _render_resumo(self, parent):
+        montante_total = sum((_valor_to_decimal(r["montante_total"]) for r in self._rows),
+                             Decimal("0"))
+        liquido_total = sum((_valor_to_decimal(r["liquido_total"]) for r in self._rows),
+                            Decimal("0"))
+        n_ops = len(self._rows)
+
+        row = tk.Frame(parent, bg=C["bg"])
+        row.pack(fill="x", pady=(0, 16))
+        for c in range(3):
+            row.columnconfigure(c, weight=1, uniform="resumo")
+
+        cards = [
+            ("Montante total", _fmt_brl(montante_total), C["accent"]),
+            ("Líquido total",  _fmt_brl(liquido_total),  C["ok"]),
+            ("Nº de operações", str(n_ops), C["ink"]),
+        ]
+        for i, (label, val, color) in enumerate(cards):
+            card = card_frame(row)
+            card.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 8, 0))
+            pad = tk.Frame(card, bg=C["surface"], padx=16, pady=12)
+            pad.pack(fill="both", expand=True)
+            tk.Label(pad, text=label, bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 8)).pack(anchor="w")
+            tk.Label(pad, text=val, bg=C["surface"], fg=color,
+                     font=("Segoe UI", 17, "bold")).pack(anchor="w", pady=(2, 0))
+
+    def _render_graficos(self, parent):
+        row = tk.Frame(parent, bg=C["bg"])
+        row.pack(fill="x", pady=(0, 16))
+        row.columnconfigure(0, weight=2, uniform="g")
+        row.columnconfigure(1, weight=1, uniform="g")
+
+        # Montante x Líquido ao longo do tempo (por dia)
+        por_dia = {}
+        for r in self._rows:
+            d = r["data_dia"]
+            por_dia.setdefault(d, [Decimal("0"), Decimal("0")])
+            por_dia[d][0] += _valor_to_decimal(r["montante_total"])
+            por_dia[d][1] += _valor_to_decimal(r["liquido_total"])
+        dias_ord = sorted(por_dia.keys())
+        labels = [_hist_fmt_dia(d)[:5] for d in dias_ord]
+        serie_montante = [float(por_dia[d][0]) for d in dias_ord]
+        serie_liquido = [float(por_dia[d][1]) for d in dias_ord]
+
+        card1 = card_frame(row)
+        card1.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        p1 = tk.Frame(card1, bg=C["surface"], padx=14, pady=10)
+        p1.pack(fill="both", expand=True)
+        tk.Label(p1, text="Montante × Líquido ao longo do tempo", bg=C["surface"],
+                 fg=C["ink_muted"], font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        chart1 = MiniBarChart(p1, height=140)
+        chart1.pack(fill="x", pady=(6, 0))
+        chart1.set_data(labels, [serie_montante, serie_liquido],
+                        [C["accent"], C["ok"]], legend=["Montante", "Líquido"])
+
+        # Ranking de clientes por montante
+        por_cliente = {}
+        for r in self._rows:
+            por_cliente.setdefault(r["cliente"], Decimal("0"))
+            por_cliente[r["cliente"]] += _valor_to_decimal(r["montante_total"])
+        ranking = sorted(por_cliente.items(), key=lambda kv: kv[1], reverse=True)
+        ranking = [(k, float(v)) for k, v in ranking]
+
+        card2 = card_frame(row)
+        card2.grid(row=0, column=1, sticky="nsew")
+        p2 = tk.Frame(card2, bg=C["surface"], padx=14, pady=10)
+        p2.pack(fill="both", expand=True)
+        tk.Label(p2, text="Ranking de clientes", bg=C["surface"],
+                 fg=C["ink_muted"], font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        chart2 = HorizontalRankChart(p2, height=140)
+        chart2.pack(fill="x", pady=(6, 0))
+        chart2.set_data(ranking)
+
+    def _render_tabela(self, parent):
+        card = card_frame(parent)
+        card.pack(fill="both", expand=True)
+        pad = tk.Frame(card, bg=C["surface"], padx=4, pady=4)
+        pad.pack(fill="both", expand=True)
+
+        hdr = tk.Frame(pad, bg=C["surface2"])
+        hdr.pack(fill="x")
+        cols = [("Cliente", 3), ("Data", 1), ("Trader", 1), ("Modo", 1),
+                ("Montante", 2), ("Líquido", 2), ("Status", 1), ("", 1)]
+        for i, (txt, wgt) in enumerate(cols):
+            hdr.columnconfigure(i, weight=wgt, uniform="tbl")
+            tk.Label(hdr, text=txt, bg=C["surface2"], fg=C["ink_faint"],
+                     font=("Segoe UI", 8, "bold"), anchor="w").grid(
+                     row=0, column=i, sticky="ew", padx=8, pady=6)
+
+        if not self._rows:
+            tk.Label(pad, text="Nenhuma operação encontrada para os filtros atuais.",
+                     bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 9)).pack(
+                     anchor="w", padx=8, pady=20)
+            return
+
+        for r in self._rows:
+            self._render_linha_operacao(pad, r, cols)
+
+    def _render_linha_operacao(self, parent, r, cols):
+        op_id = r["id"]
+        expanded = op_id in self._expanded_ids
+        wrap = tk.Frame(parent, bg=C["bg"])
+        wrap.pack(fill="x")
+        make_hairline(wrap, bg=C["hair"]).pack(fill="x")
+
+        line = tk.Frame(wrap, bg=C["surface"], cursor="hand2")
+        line.pack(fill="x")
+        for i, (_txt, wgt) in enumerate(cols):
+            line.columnconfigure(i, weight=wgt, uniform="tbl")
+
+        trader = r.get("trader") or "—"
+        status_key = r.get("status") or "confirmado"
+        status_label = STATUS_LABELS.get(status_key, status_key)
+        status_color = C[STATUS_COLORS.get(status_key, "ink_muted")]
+        arrow = "▾" if expanded else "▸"
+
+        vals = [
+            f"{arrow} {r['cliente']}", _hist_fmt_dia(r["data_dia"]), trader,
+            r.get("modo") or "—",
+            _fmt_brl(_valor_to_decimal(r["montante_total"])),
+            _fmt_brl(_valor_to_decimal(r["liquido_total"])),
+        ]
+        for i, v in enumerate(vals):
+            tk.Label(line, text=v, bg=C["surface"], fg=C["ink"],
+                     font=("Segoe UI", 9), anchor="w").grid(
+                     row=0, column=i, sticky="ew", padx=8, pady=8)
+        tk.Label(line, text=status_label, bg=C["surface"], fg=status_color,
+                 font=("Segoe UI", 8, "bold"), anchor="w").grid(
+                 row=0, column=6, sticky="ew", padx=8, pady=8)
+        tk.Label(line, text="", bg=C["surface"]).grid(row=0, column=7, sticky="ew")
+
+        def _toggle(_e=None, opid=op_id):
+            if opid in self._expanded_ids:
+                self._expanded_ids.discard(opid)
+            else:
+                self._expanded_ids.add(opid)
+            self._render()
+
+        for w in [line] + list(line.winfo_children()):
+            w.bind("<Button-1>", _toggle)
+
+        if expanded:
+            self._render_notas(wrap, r)
+
+    def _render_notas(self, parent, r):
+        try:
+            notas = self._data.notas_da_operacao(r["id"])
+        except Exception:
+            notas = []
+        box = tk.Frame(parent, bg=C["surface2"])
+        box.pack(fill="x", padx=(24, 8), pady=(0, 6))
+
+        meta = tk.Frame(box, bg=C["surface2"])
+        meta.pack(fill="x", padx=10, pady=(8, 4))
+        cnpj = _fmt_cnpj(only_digits(r.get("cnpj_sacado", "")))
+        taxa = r.get("taxa") or "—"
+        origem = r.get("arquivo_origem") or "—"
+        usuario = r.get("usuario") or "—"
+        confirmado_em = _hist_fmt_hora(r.get("data_hora", ""))
+        tk.Label(meta, text=f"CNPJ: {cnpj}   ·   Taxa vigente: {taxa}%   ·   "
+                             f"Confirmado por {usuario} em {confirmado_em}",
+                 bg=C["surface2"], fg=C["ink_faint"], font=("Segoe UI", 8)).pack(anchor="w")
+        tk.Label(meta, text=f"Planilha de origem: {origem}",
+                 bg=C["surface2"], fg=C["ink_faint"], font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
+        if not notas:
+            tk.Label(box, text="Sem notas registradas.", bg=C["surface2"],
+                     fg=C["ink_faint"], font=("Segoe UI", 8)).pack(anchor="w", padx=10, pady=(0, 8))
+            return
+
+        thdr = tk.Frame(box, bg=C["surface2"])
+        thdr.pack(fill="x", padx=10, pady=(4, 2))
+        ncols = [("NF", 2), ("Valor", 2), ("Vencimento", 2), ("Prazo", 1),
+                 ("Líquido", 2), ("Incluída", 1)]
+        for i, (txt, wgt) in enumerate(ncols):
+            thdr.columnconfigure(i, weight=wgt, uniform="notas")
+            tk.Label(thdr, text=txt, bg=C["surface2"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold"), anchor="w").grid(row=0, column=i, sticky="ew")
+
+        for n in notas:
+            nrow = tk.Frame(box, bg=C["surface2"])
+            nrow.pack(fill="x", padx=10)
+            for i, (_t, wgt) in enumerate(ncols):
+                nrow.columnconfigure(i, weight=wgt, uniform="notas")
+            incluida = n.get("incluida", 1)
+            incl_txt = "Sim" if incluida else "Não (excluída na triagem)"
+            incl_color = C["ink_muted"] if incluida else C["err"]
+            vals = [
+                n.get("nf") or "—",
+                _fmt_brl_from_raw(n.get("valor") or "0"),
+                _fmt_date_short(n.get("data_vencimento")),
+                (str(n.get("prazo_dias")) + " d") if n.get("prazo_dias") is not None else "—",
+                _fmt_brl_from_raw(n.get("valor_liquido") or "0") if n.get("valor_liquido") else "—",
+            ]
+            for i, v in enumerate(vals):
+                tk.Label(nrow, text=v, bg=C["surface2"], fg=C["ink_muted"],
+                         font=("Segoe UI", 8), anchor="w").grid(row=0, column=i, sticky="ew", pady=2)
+            tk.Label(nrow, text=incl_txt, bg=C["surface2"], fg=incl_color,
+                     font=("Segoe UI", 8), anchor="w").grid(row=0, column=5, sticky="ew", pady=2)
+        tk.Frame(box, bg=C["surface2"], height=6).pack(fill="x")
+
+    # ── Exportação ──────────────────────────────────────────────────────
+    def _exportar_excel(self):
+        if not OPENPYXL_OK:
+            messagebox.showwarning(
+                "Exportar", "A biblioteca openpyxl não está disponível nesta instalação.",
+                parent=self.controller)
+            return
+        if not self._rows:
+            messagebox.showinfo(
+                "Exportar", "Não há operações para exportar com os filtros atuais.",
+                parent=self.controller)
+            return
+        path = filedialog.asksaveasfilename(
+            title="Exportar Histórico de Operações", defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=f"historico_operacoes_{date.today().isoformat()}.xlsx")
+        if not path:
+            return
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Operações"
+            headers = ["Cliente", "CNPJ", "Data", "Trader", "Modo", "Status",
+                       "Montante total", "Líquido total", "Taxa (%)", "Usuário",
+                       "Confirmado em", "Arquivo origem"]
+            ws.append(headers)
+            for r in self._rows:
+                ws.append([
+                    r["cliente"], _fmt_cnpj(only_digits(r.get("cnpj_sacado", ""))),
+                    _hist_fmt_dia(r["data_dia"]), r.get("trader") or "",
+                    r.get("modo") or "", STATUS_LABELS.get(r.get("status"), r.get("status")),
+                    float(_valor_to_decimal(r["montante_total"])),
+                    float(_valor_to_decimal(r["liquido_total"])),
+                    r.get("taxa") or "", r.get("usuario") or "",
+                    _hist_fmt_hora(r.get("data_hora", "")), r.get("arquivo_origem") or "",
+                ])
+            for col in "ABCDEFGHIJKL":
+                ws.column_dimensions[col].width = 18
+
+            ws2 = wb.create_sheet("Notas")
+            ws2.append(["Cliente", "Data", "NF", "Valor", "Vencimento",
+                       "Prazo (dias)", "Valor líquido", "Incluída"])
+            for r in self._rows:
+                try:
+                    notas = self._data.notas_da_operacao(r["id"])
+                except Exception:
+                    notas = []
+                for n in notas:
+                    ws2.append([
+                        r["cliente"], _hist_fmt_dia(r["data_dia"]), n.get("nf") or "",
+                        float(_valor_to_decimal(n.get("valor") or "0")),
+                        _fmt_date_short(n.get("data_vencimento")),
+                        n.get("prazo_dias"),
+                        float(_valor_to_decimal(n.get("valor_liquido") or "0"))
+                            if n.get("valor_liquido") else "",
+                        "Sim" if n.get("incluida", 1) else "Não",
+                    ])
+            for col in "ABCDEFGH":
+                ws2.column_dimensions[col].width = 16
+
+            wb.save(path)
+            messagebox.showinfo("Exportar", f"Exportado com sucesso:\n{path}",
+                                parent=self.controller)
+        except Exception as e:
+            messagebox.showerror("Exportar", f"Falha ao exportar: {e}",
+                                 parent=self.controller)
+
+
 class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
     """Exibe as operações importadas de uma planilha .xlsx, agrupadas por sacado."""
 
@@ -4148,6 +5983,9 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                                self.controller.show_frame("OperacoesInvertido"))).pack(side="left")
         tk.Label(hdr, text="Analisar Operações", bg=C["bg"], fg=C["ink"],
                  font=("Georgia", 18, "bold")).pack(side="left", padx=(14, 0))
+        styled_button(hdr, "Enviar todos e-mails →",
+                      self._enviar_todos_emails_risco_sacado,
+                      accent=True, small=True).pack(side="right")
 
         sub = tk.Frame(self, bg=C["bg"])
         sub.pack(fill="x", padx=32)
@@ -4572,9 +6410,13 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         top = tk.Frame(pad, bg=C["surface"])
         top.pack(fill="x")
         tk.Label(top, text=group["nome_sacado"], bg=C["surface"], fg=C["ink"],
-                 font=("Segoe UI", 13, "bold"), wraplength=480,
+                 font=("Segoe UI", 13, "bold"), wraplength=380,
                  justify="left").pack(side="left", fill="x", expand=True)
         styled_button(top, "✕", self._close_detalhes, small=True).pack(side="right")
+        styled_button(top, "Enviar e-mail →", self._enviar_email_risco_sacado,
+                      accent=True, small=True).pack(side="right", padx=(0, 8))
+        styled_button(top, "Confirmar ✓", self._confirmar_operacao_detalhes,
+                      small=True).pack(side="right", padx=(0, 8))
 
         self._detail_sub_lbl = tk.Label(
             pad, text="", bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9))
@@ -4625,6 +6467,193 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             if doc:
                 return doc
         return ""
+
+    def _detail_doc_cedente(self):
+        for op in self._detail_ops_do_cliente():
+            doc = only_digits(op.get("doc_cedente") or "")
+            if doc:
+                return doc
+        return ""
+
+    def _ops_do_grupo(self, group):
+        """Todas as ops da planilha (incluídas ou não) para um grupo/sacado."""
+        key = self._group_limite_key(group)
+
+        def _op_key(op):
+            doc = only_digits(op.get("doc_sacado") or "")
+            return doc or _normalize_sacado_key(op.get("nome_sacado") or "")
+
+        return [op for op in self._all_ops if _op_key(op) == key]
+
+    def _compute_historico_payload(self, group):
+        """Calcula os dados completos do grupo/sacado (todas as notas, cada
+        uma marcada como incluída/excluída, valor líquido nota a nota, taxa
+        vigente e totais) — base compartilhada pelo e-mail e pela
+        confirmação/histórico. Retorna {"ok": False, "reason": ...} quando
+        não há taxa vigente ou nenhuma nota incluída no montante."""
+        doc_sacado = group.get("doc_sacado") or ""
+        doc_cedente = group.get("doc_cedente") or ""
+        todas = self._ops_do_grupo(group)
+        if not todas:
+            return {"ok": False, "reason": "sem notas para este sacado"}
+
+        taxa_info = TaxasData.get().get_taxa(doc_sacado) if doc_sacado else None
+        vigente = TaxasData.get().is_vigente(doc_sacado) if doc_sacado else False
+        if not taxa_info or not vigente:
+            return {"ok": False, "reason": "taxa não vigente no Depara"}
+        taxa_str = taxa_info.get("taxa")
+
+        hoje = date.today()
+        notas = []
+        montante_total = Decimal("0")
+        liquido_total = Decimal("0")
+        tem_incluida = False
+        for op in todas:
+            incluida = op["uid"] not in self._excluded_uids
+            venc = _parse_data_curta(op.get("data_vencimento"))
+            prazo = (venc - hoje).days if venc else 0
+            vl = calcular_valor_liquido(op.get("valor_raw", Decimal("0")), taxa_str, prazo)
+            if incluida:
+                tem_incluida = True
+                montante_total += op.get("valor_raw", Decimal("0"))
+                if vl is not None:
+                    liquido_total += vl
+            notas.append({
+                "nf": op.get("nf"),
+                "valor": op.get("valor_raw", Decimal("0")),
+                "data_vencimento": op.get("data_vencimento"),
+                "prazo_dias": prazo,
+                "valor_liquido": vl,
+                "incluida": incluida,
+            })
+
+        if not tem_incluida:
+            return {"ok": False, "reason": "sem notas incluídas no montante"}
+
+        return {"ok": True, "doc_sacado": doc_sacado, "doc_cedente": doc_cedente,
+                "taxa_str": taxa_str, "montante_total": montante_total,
+                "liquido_total": liquido_total, "notas": notas}
+
+    def _build_email_for_group(self, group):
+        """Monta assunto+HTML do e-mail para um grupo/sacado, ou retorna o
+        motivo pelo qual não foi possível montar (taxa vencida/ausente ou
+        nenhuma nota incluída no montante)."""
+        payload = self._compute_historico_payload(group)
+        if not payload["ok"]:
+            return payload
+
+        incluidas = [n for n in payload["notas"] if n["incluida"]]
+        nome_sacado = group["nome_sacado"]
+        subject = f"RISCO SACADO INVERTIDO - {nome_sacado.upper()}"
+        html = build_risco_sacado_email_html(
+            sacado_nome=nome_sacado.upper(),
+            sacado_cnpj=payload["doc_sacado"],
+            cedente_cnpj=payload["doc_cedente"],
+            notas=[{"nf": n["nf"], "data_vencimento": n["data_vencimento"],
+                    "valor_raw": n["valor"], "valor_liquido": n["valor_liquido"]}
+                   for n in incluidas],
+            taxa_str=payload["taxa_str"])
+        return {"ok": True, "subject": subject, "html": html}
+
+    def _confirmar_operacao(self, group):
+        """Grava no histórico (SQLite) a confirmação do montante de um
+        sacado — no máximo uma confirmação por cliente por dia."""
+        doc_sacado = group.get("doc_sacado") or ""
+        hist = HistoricoOperacoesData.get()
+        ja = hist.ja_confirmado_hoje(doc_sacado) if doc_sacado else None
+        if ja:
+            messagebox.showinfo(
+                "Já confirmado hoje",
+                f"{group['nome_sacado']} já foi confirmado hoje às "
+                f"{ja['data_hora'][11:16]} — montante {_fmt_brl(Decimal(ja['montante_total']))}.\n"
+                "Apenas uma confirmação por cliente por dia.")
+            return
+
+        payload = self._compute_historico_payload(group)
+        if not payload["ok"]:
+            messagebox.showwarning(
+                "Não foi possível confirmar",
+                f"{group['nome_sacado']}: {payload['reason']}.")
+            return
+
+        trader = get_trader_por_cliente(group["nome_sacado"])
+        arquivo = os.path.basename(
+            getattr(self.controller, "invertido_xlsx_path", "") or "")
+        ok, _op_id = hist.registrar_operacao(
+            cliente=group["nome_sacado"],
+            cnpj_sacado=payload["doc_sacado"],
+            cnpj_cedente=payload["doc_cedente"],
+            usuario=_current_username(),
+            modo="invertido",
+            trader=trader,
+            montante_total=payload["montante_total"],
+            liquido_total=payload["liquido_total"],
+            taxa=payload["taxa_str"],
+            arquivo_origem=arquivo,
+            notas=payload["notas"])
+
+        montante_fmt = _fmt_brl(payload["montante_total"])
+        liquido_fmt = _fmt_brl(payload["liquido_total"])
+        if ok:
+            messagebox.showinfo(
+                "Confirmado",
+                f"{group['nome_sacado']} confirmado — montante {montante_fmt}, "
+                f"líquido {liquido_fmt}.")
+        else:
+            messagebox.showinfo(
+                "Confirmado (pendente de sincronização)",
+                f"{group['nome_sacado']} confirmado localmente — montante {montante_fmt}, "
+                f"líquido {liquido_fmt}.\nA rede está indisponível no momento; o registro "
+                "será sincronizado automaticamente ao reconectar.")
+
+    def _confirmar_operacao_detalhes(self):
+        group = self._find_group(self._detail_nome)
+        if group is None:
+            return
+        self._confirmar_operacao(group)
+
+    def _enviar_email_risco_sacado(self):
+        group = self._find_group(self._detail_nome)
+        if group is None:
+            return
+        result = self._build_email_for_group(group)
+        if not result["ok"]:
+            messagebox.showwarning(
+                "Não foi possível enviar",
+                f"{group['nome_sacado']}: {result['reason']}.")
+            return
+        try:
+            enviar_email_outlook_risco_sacado(result["subject"], result["html"])
+        except Exception as e:
+            messagebox.showerror("Erro ao abrir e-mail", str(e))
+
+    def _enviar_todos_emails_risco_sacado(self):
+        if not self._groups:
+            messagebox.showinfo(
+                "Nenhuma operação", "Não há sacados analisados nesta planilha.")
+            return
+        if not messagebox.askyesno(
+                "Enviar todos os e-mails",
+                f"Serão abertos {len(self._groups)} e-mail(s), um por vez, para "
+                "revisão e envio manual no Outlook. Deseja continuar?"):
+            return
+
+        enviados, pulados = [], []
+        for group in self._groups:
+            result = self._build_email_for_group(group)
+            if not result["ok"]:
+                pulados.append(f"{group['nome_sacado']} — {result['reason']}")
+                continue
+            try:
+                enviar_email_outlook_risco_sacado(result["subject"], result["html"])
+                enviados.append(group["nome_sacado"])
+            except Exception as e:
+                pulados.append(f"{group['nome_sacado']} — erro: {e}")
+
+        msg = f"{len(enviados)} de {len(self._groups)} e-mail(s) aberto(s) com sucesso."
+        if pulados:
+            msg += "\n\nNão enviados:\n" + "\n".join(f"• {p}" for p in pulados)
+        messagebox.showinfo("Envio concluído", msg)
 
     def _render_detalhes_list(self):
         list_outer = self._detail_list_outer
@@ -5842,10 +7871,12 @@ class BPMFrame(tk.Frame, ThreadSafeUIMixin):
                             wait_continuar(ctx,STEP); click_continuar(ctx,STEP); pace()
                             self._log_line("  Filtro AplicAut preenchido.", "step")
 
+                            produto_val = "20" if self._mode == "nova_plataforma" else "34"
+                            tpop_val = "0" if self._mode == "nova_plataforma" else "1"
                             ctx.locator('select[name="produto"]').wait_for(state="visible",timeout=STEP)
-                            ctx.locator('select[name="produto"]').select_option(value="34"); pace()
+                            ctx.locator('select[name="produto"]').select_option(value=produto_val); pace()
                             ctx.locator('select[name="tpOperacao"]').wait_for(state="visible",timeout=STEP)
-                            ctx.locator('select[name="tpOperacao"]').select_option(value="1"); pace()
+                            ctx.locator('select[name="tpOperacao"]').select_option(value=tpop_val); pace()
 
                             loc_buscar = ctx.locator('input[type="submit"][data-ng-click="BuscarListaPN()"]')
                             if loc_buscar.count()==0: loc_buscar=ctx.locator('input[type="submit"][value="Processar"]')
@@ -5910,6 +7941,8 @@ class BPMFrame(tk.Frame, ThreadSafeUIMixin):
                 except: pass
                 self._worker_running = False
                 self._started = False
+                if not self._cancel_requested:
+                    self.controller.bpm_run_selection = []
 
 class App(tk.Tk):
     def __init__(self):
@@ -5966,6 +7999,7 @@ class App(tk.Tk):
             (AnalisarOperacoesFrame, "AnalisarOperacoes"),
             (LimitesInvertidoFrame,  "LimitesInvertido"),
             (TaxasInvertidoFrame,    "TaxasInvertido"),
+            (HistoricoOperacoesFrame,"HistoricoOperacoes"),
         ]:
             f = Cls(self._content, self)
             self.frames[name] = f
@@ -6028,7 +8062,7 @@ class App(tk.Tk):
         if name in ("BPM", "BPM_CONFIG", "BPM_CONFIG_NOVA", "BPM_HUB"):
             sidebar_name = "BPM"
         elif name in ("OperacoesInvertido", "LimitesInvertido", "AnalisarOperacoes",
-                      "TaxasInvertido"):
+                      "TaxasInvertido", "HistoricoOperacoes"):
             sidebar_name = "OperacoesInvertido"
         self._sidebar.set_active(sidebar_name)
         self._titlebar.set_module(name)
