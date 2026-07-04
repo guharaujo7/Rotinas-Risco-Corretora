@@ -865,10 +865,18 @@ INVERTIDO_TRADER_POR_CLIENTE = {
 
 def get_trader_por_cliente(nome_sacado: str) -> str:
     """Retorna o trader responsável pelo cliente (Risco Sacado Invertido),
-    ou string vazia se não houver mapeamento."""
-    key = _normalize_sacado_key(nome_sacado or "")
+    ou string vazia se não houver mapeamento. Usa o mesmo casamento
+    tolerante (aliases + palavras-chave) das regras de prazo, pois nomes
+    de sacado vindos da planilha podem variar ligeiramente do cadastro
+    (abreviações, grafia)."""
+    if not nome_sacado:
+        return ""
+    key = _normalize_sacado_key(nome_sacado)
     for nome, trader in INVERTIDO_TRADER_POR_CLIENTE.items():
         if _normalize_sacado_key(nome) == key:
+            return trader
+    for nome, trader in INVERTIDO_TRADER_POR_CLIENTE.items():
+        if _invertido_sacado_matches(nome_sacado, nome):
             return trader
     return ""
 
@@ -2923,6 +2931,8 @@ HISTORICO_DB_PATH = os.path.join(
 HISTORICO_SCHEMA_VERSION = 1
 HISTORICO_PENDING_LOCAL_PATH = os.path.join(
     tempfile.gettempdir(), "historico_pendente_local.jsonl")
+HISTORICO_PENDING_REJEITADAS_PATH = os.path.join(
+    tempfile.gettempdir(), "historico_rejeitadas_pendente_local.jsonl")
 
 
 def _current_username() -> str:
@@ -2949,6 +2959,7 @@ class HistoricoOperacoesData:
         self._ensure_schema()
         if self._available:
             self._flush_pending_local()
+            self._flush_pending_rejeitadas()
         else:
             self._schedule_retry()
 
@@ -2972,6 +2983,7 @@ class HistoricoOperacoesData:
         self._ensure_schema()
         if self._available and not was_available:
             self._flush_pending_local()
+            self._flush_pending_rejeitadas()
             for cb in list(self._on_reconnect_callbacks):
                 try:
                     cb()
@@ -2981,10 +2993,16 @@ class HistoricoOperacoesData:
             self._schedule_retry()
 
     def _network_reachable(self):
+        now = time.monotonic()
+        cached = getattr(self, "_reach_cache", None)
+        if cached is not None and (now - cached[0]) < 5:
+            return cached[1]
         try:
-            return os.path.isdir(os.path.dirname(HISTORICO_DB_PATH))
+            result = os.path.isdir(os.path.dirname(HISTORICO_DB_PATH))
         except Exception:
-            return False
+            result = False
+        self._reach_cache = (now, result)
+        return result
 
     def _connect(self):
         conn = sqlite3.connect(HISTORICO_DB_PATH, timeout=8)
@@ -3025,12 +3043,32 @@ class HistoricoOperacoesData:
                                 valor_liquido   TEXT,
                                 incluida        INTEGER NOT NULL DEFAULT 1
                             )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS notas_rejeitadas (
+                                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                                dedup_key       TEXT NOT NULL UNIQUE,
+                                cliente         TEXT NOT NULL,
+                                cnpj_sacado     TEXT,
+                                trader          TEXT,
+                                nf              TEXT,
+                                valor           TEXT,
+                                data_vencimento TEXT,
+                                prazo_dias      INTEGER,
+                                motivo          TEXT,
+                                data_hora       TEXT NOT NULL,
+                                data_dia        TEXT NOT NULL,
+                                usuario         TEXT,
+                                arquivo_origem  TEXT
+                            )""")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_op_cnpj ON operacoes(cnpj_sacado)")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_op_dia ON operacoes(data_dia)")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_notas_op ON notas(operacao_id)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rej_dia ON notas_rejeitadas(data_dia)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rej_cliente ON notas_rejeitadas(cliente)")
             conn.execute(
                 "INSERT OR IGNORE INTO schema_info(key, value) VALUES ('version', ?)",
                 (str(HISTORICO_SCHEMA_VERSION),))
@@ -3097,6 +3135,61 @@ class HistoricoOperacoesData:
         candidatos.sort(key=lambda c: c["data_hora"], reverse=True)
         return candidatos[0]
 
+    def confirmados_hoje_por_cnpj(self, cnpjs: list):
+        """Versão em lote de `ja_confirmado_hoje`: busca, numa única
+        consulta, as confirmações de hoje pra vários CNPJs de uma vez
+        (usado pelos badges do BPM, pra evitar N conexões separadas)."""
+        cnpjs = [c for c in (cnpjs or []) if c]
+        if not cnpjs:
+            return {}
+        hoje = date.today().isoformat()
+        resultado = {}
+
+        if self._network_reachable():
+            try:
+                conn = self._connect()
+                ph = ",".join("?" for _ in cnpjs)
+                rows = conn.execute(
+                    f"""SELECT cnpj_sacado, id, cliente, montante_total, liquido_total,
+                               taxa, data_hora
+                        FROM operacoes
+                        WHERE cnpj_sacado IN ({ph}) AND data_dia = ? AND status = 'confirmado'
+                        ORDER BY data_hora DESC""",
+                    cnpjs + [hoje]).fetchall()
+                conn.close()
+                for r in rows:
+                    resultado.setdefault(r[0], {"id": r[1], "cliente": r[2],
+                                                 "montante_total": r[3], "liquido_total": r[4],
+                                                 "taxa": r[5], "data_hora": r[6]})
+            except Exception:
+                pass
+
+        if os.path.isfile(HISTORICO_PENDING_LOCAL_PATH):
+            try:
+                with open(HISTORICO_PENDING_LOCAL_PATH, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            p = _json_mod.loads(line)
+                        except Exception:
+                            continue
+                        cnpj = p.get("cnpj_sacado")
+                        if (cnpj in cnpjs and p.get("data_dia") == hoje and
+                                p.get("status") == "confirmado"):
+                            atual = resultado.get(cnpj)
+                            if atual is None or p["data_hora"] > atual["data_hora"]:
+                                resultado[cnpj] = {
+                                    "id": p["id"], "cliente": p["cliente"],
+                                    "montante_total": p["montante_total"],
+                                    "liquido_total": p["liquido_total"],
+                                    "taxa": p["taxa"], "data_hora": p["data_hora"]}
+            except Exception:
+                pass
+
+        return resultado
+
     # ── Escrita ─────────────────────────────────────────────────────────
     def registrar_operacao(self, *, cliente, cnpj_sacado, cnpj_cedente, usuario,
                             modo, trader, montante_total, liquido_total, taxa,
@@ -3162,6 +3255,159 @@ class HistoricoOperacoesData:
         except Exception:
             self._available = False
             return False
+
+    # ── Notas rejeitadas (alertas recusados na triagem) ────────────────────
+    @staticmethod
+    def _rejeitada_dedup_key(cnpj_sacado, nf, valor, data_vencimento, motivo):
+        """Chave estável para evitar duplicidade: a MESMA nota suspeita
+        (mesmo cliente, NF, valor, vencimento e motivo) não é regravada em
+        análises futuras, mesmo que reapareça em outra planilha."""
+        base = "|".join([
+            (cnpj_sacado or "").strip(),
+            str(nf or "").strip().upper(),
+            str(valor or "").strip(),
+            str(data_vencimento or "").strip(),
+            str(motivo or "").strip().lower(),
+        ])
+        import hashlib
+        return hashlib.sha1(base.encode("utf-8")).hexdigest()
+
+    def registrar_notas_rejeitadas(self, *, cliente, cnpj_sacado, trader,
+                                    notas, arquivo_origem):
+        """Grava, uma única vez cada, as notas rejeitadas na triagem de
+        alertas (com o motivo do alerta). `notas` é uma lista de dicts com
+        nf/valor/data_vencimento/prazo_dias/motivo. Duplicatas (mesma nota
+        já registrada antes) são ignoradas silenciosamente — não há
+        necessidade de decisão do usuário para isso."""
+        now = datetime.now()
+        usuario = _current_username()
+        payloads = []
+        for n in notas:
+            motivo = n.get("motivo") or ""
+            dedup = self._rejeitada_dedup_key(
+                cnpj_sacado, n.get("nf"), n.get("valor"),
+                n.get("data_vencimento"), motivo)
+            payloads.append({
+                "dedup_key": dedup, "cliente": cliente, "cnpj_sacado": cnpj_sacado,
+                "trader": trader, "nf": n.get("nf"), "valor": str(n.get("valor")),
+                "data_vencimento": n.get("data_vencimento"),
+                "prazo_dias": n.get("prazo_dias"), "motivo": motivo,
+                "data_hora": now.isoformat(timespec="seconds"),
+                "data_dia": now.date().isoformat(), "usuario": usuario,
+                "arquivo_origem": arquivo_origem,
+            })
+        if not payloads:
+            return True
+        if not self._network_reachable():
+            self._available = False
+            self._queue_local_rejeitadas(payloads)
+            self._schedule_retry()
+            return False
+        try:
+            conn = self._connect()
+            conn.executemany(
+                """INSERT OR IGNORE INTO notas_rejeitadas
+                   (dedup_key, cliente, cnpj_sacado, trader, nf, valor,
+                    data_vencimento, prazo_dias, motivo, data_hora, data_dia,
+                    usuario, arquivo_origem)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(p["dedup_key"], p["cliente"], p["cnpj_sacado"], p["trader"],
+                  p["nf"], p["valor"], p["data_vencimento"], p["prazo_dias"],
+                  p["motivo"], p["data_hora"], p["data_dia"], p["usuario"],
+                  p["arquivo_origem"]) for p in payloads])
+            conn.commit()
+            conn.close()
+            self._available = True
+            return True
+        except Exception:
+            self._available = False
+            self._queue_local_rejeitadas(payloads)
+            self._schedule_retry()
+            return False
+
+    def _queue_local_rejeitadas(self, payloads):
+        try:
+            with open(HISTORICO_PENDING_REJEITADAS_PATH, "a", encoding="utf-8") as f:
+                for p in payloads:
+                    f.write(_json_mod.dumps(p, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _flush_pending_rejeitadas(self):
+        if not os.path.isfile(HISTORICO_PENDING_REJEITADAS_PATH):
+            return
+        try:
+            with open(HISTORICO_PENDING_REJEITADAS_PATH, "r", encoding="utf-8") as f:
+                lines = [l.strip() for l in f if l.strip()]
+        except Exception:
+            return
+        remaining = []
+        for line in lines:
+            try:
+                p = _json_mod.loads(line)
+            except Exception:
+                continue
+            try:
+                conn = self._connect()
+                conn.execute(
+                    """INSERT OR IGNORE INTO notas_rejeitadas
+                       (dedup_key, cliente, cnpj_sacado, trader, nf, valor,
+                        data_vencimento, prazo_dias, motivo, data_hora, data_dia,
+                        usuario, arquivo_origem)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (p["dedup_key"], p["cliente"], p["cnpj_sacado"], p["trader"],
+                     p["nf"], p["valor"], p["data_vencimento"], p["prazo_dias"],
+                     p["motivo"], p["data_hora"], p["data_dia"], p["usuario"],
+                     p["arquivo_origem"]))
+                conn.commit()
+                conn.close()
+            except Exception:
+                remaining.append(line)
+        try:
+            with open(HISTORICO_PENDING_REJEITADAS_PATH, "w", encoding="utf-8") as f:
+                for line in remaining:
+                    f.write(line + "\n")
+        except Exception:
+            pass
+
+    def listar_notas_rejeitadas(self, *, cliente=None, trader=None,
+                                 data_de=None, data_ate=None, busca=None):
+        """Retorna notas rejeitadas (com motivo), mais recentes primeiro,
+        filtráveis por cliente/trader/período/NF ou CNPJ."""
+        if not self._network_reachable():
+            return []
+        try:
+            conn = self._connect()
+            clauses, params = [], []
+            if data_de:
+                clauses.append("data_dia >= ?"); params.append(data_de)
+            if data_ate:
+                clauses.append("data_dia <= ?"); params.append(data_ate)
+            if trader:
+                clauses.append("trader = ?"); params.append(trader)
+            if cliente:
+                ph = ",".join(["?"] * len(cliente))
+                clauses.append(f"cliente IN ({ph})")
+                params.extend(cliente)
+            if busca:
+                b = f"%{busca.strip()}%"
+                clauses.append("(cnpj_sacado LIKE ? OR nf LIKE ?)")
+                params.extend([b, b])
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            cur = conn.execute(
+                f"""SELECT id, cliente, cnpj_sacado, trader, nf, valor,
+                           data_vencimento, prazo_dias, motivo, data_hora,
+                           data_dia, usuario, arquivo_origem
+                    FROM notas_rejeitadas {where}
+                    ORDER BY data_hora DESC""", params)
+            cols = ["id", "cliente", "cnpj_sacado", "trader", "nf", "valor",
+                    "data_vencimento", "prazo_dias", "motivo", "data_hora",
+                    "data_dia", "usuario", "arquivo_origem"]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            conn.close()
+            return rows
+        except Exception:
+            return []
 
     # ── Leitura para a tela de Histórico ───────────────────────────────────
     def listar_operacoes(self, *, cliente=None, trader=None, status=None,
@@ -4100,7 +4346,7 @@ class BPMHubFrame(tk.Frame):
         pass
 
 
-class BPMConfigFrame(tk.Frame):
+class BPMConfigFrame(tk.Frame, ThreadSafeUIMixin):
     CLIENTS = list(BPM_CLIENT_DATA.keys())
 
     def __init__(self, parent, controller):
@@ -4113,6 +4359,7 @@ class BPMConfigFrame(tk.Frame):
             "write", lambda *_: setattr(self.controller, "bpm_funcional", self._func_var.get()))
         self._senha_var.trace_add(
             "write", lambda *_: setattr(self.controller, "bpm_password", self._senha_var.get()))
+        self._init_ui_queue()
         self._build()
 
     def _only_digits(self, s):
@@ -4231,7 +4478,7 @@ class BPMConfigFrame(tk.Frame):
         name_lbl = tk.Label(name_wrap, text=cli, bg=C["surface"], fg=C["ink_muted"],
                             font=("Segoe UI",9))
         name_lbl.pack(side="left")
-        badge_lbl = tk.Label(name_wrap, text="", bg=C["surface"], fg=C["ok"],
+        badge_lbl = tk.Label(name_wrap, text="   carregando…", bg=C["surface"], fg=C["ink_faint"],
                              font=("Segoe UI", 8))
         badge_lbl.pack(side="left")
 
@@ -4284,19 +4531,40 @@ class BPMConfigFrame(tk.Frame):
     def _refresh_confirmacoes(self):
         """Atualiza os badges '● Montante disponível' com base no que foi
         confirmado hoje em Analisar Operações (não mexe na seleção atual
-        do usuário)."""
+        do usuário). Consulta o SQLite numa thread separada — uma única
+        query em lote pra todos os clientes — pra não travar a tela."""
         if not hasattr(self, "_client_rows"):
             return
-        hist = HistoricoOperacoesData.get()
+        cnpjs = [row.get("cnpj") for row in self._client_rows.values() if row.get("cnpj")]
+        if not cnpjs:
+            return
+
+        req_token = object()
+        self._confirmacoes_req = req_token
+
+        def _worker():
+            try:
+                mapa = HistoricoOperacoesData.get().confirmados_hoje_por_cnpj(cnpjs)
+            except Exception:
+                mapa = {}
+            self._ui(lambda: self._aplicar_confirmacoes(mapa, req_token))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _aplicar_confirmacoes(self, mapa: dict, req_token):
+        if getattr(self, "_confirmacoes_req", None) is not req_token:
+            return  # uma consulta mais nova já está em andamento/concluída
         for cli, row in self._client_rows.items():
             cnpj = row.get("cnpj")
-            conf = hist.ja_confirmado_hoje(cnpj) if cnpj else None
+            conf = mapa.get(cnpj)
             row["confirmado_holder"][0] = conf
+            if not row["badge_lbl"].winfo_exists():
+                continue
             if conf:
                 montante_fmt = _fmt_brl(Decimal(conf["montante_total"]))
-                row["badge_lbl"].configure(text=f"   ● Disponível — {montante_fmt}")
+                row["badge_lbl"].configure(text=f"   ● Disponível — {montante_fmt}", fg=C["ok"])
             else:
-                row["badge_lbl"].configure(text="")
+                row["badge_lbl"].configure(text="", fg=C["ok"])
 
 
 
@@ -5409,7 +5677,7 @@ class HorizontalRankChart(tk.Canvas):
                              fill=C["ink_faint"], font=("Segoe UI", 7), anchor="w")
 
 
-class HistoricoOperacoesFrame(tk.Frame):
+class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
     """Histórico de Operações — consulta somente-leitura ao banco SQLite
     gravado pela confirmação em Analisar Operações. Filtros por cliente,
     trader, período e status; resumo agregado; gráficos; e tabela com
@@ -5420,6 +5688,8 @@ class HistoricoOperacoesFrame(tk.Frame):
         self.controller = controller
         self._data = HistoricoOperacoesData.get()
         self._rows = []
+        self._rejeitadas_rows = []
+        self._modo_view = "operacoes"
         self._expanded_ids = set()
         self._filtro_clientes = set()
         self._filtro_trader = None
@@ -5428,6 +5698,9 @@ class HistoricoOperacoesFrame(tk.Frame):
         self._filtro_de = None
         self._filtro_ate = None
         self._busca_var = tk.StringVar()
+        self._loading = False
+        self._reload_req = None
+        self._init_ui_queue()
         self._build()
 
     def on_show(self):
@@ -5454,6 +5727,20 @@ class HistoricoOperacoesFrame(tk.Frame):
 
         self._hairline_top = make_hairline(self, bg=C["hair"])
         self._hairline_top.pack(fill="x", padx=0, pady=(16, 0))
+
+        tabs = tk.Frame(self, bg=C["bg"])
+        tabs.pack(fill="x", padx=32, pady=(14, 0))
+        self._tab_btns_view = {}
+        for key, label in [("operacoes", "Operações Confirmadas"),
+                            ("rejeitadas", "Notas Rejeitadas")]:
+            b = tk.Button(tabs, text=label, command=lambda k=key: self._switch_view(k),
+                         bg=C["bg"], fg=C["ink_muted"],
+                         activebackground=C["bg"], activeforeground=C["ink"],
+                         font=("Segoe UI", 9), relief="flat", bd=0,
+                         padx=0, pady=6, cursor="hand2")
+            b.pack(side="left", padx=(0, 20))
+            self._tab_btns_view[key] = b
+        self._update_view_tabs()
 
         self._net_banner = tk.Frame(self, bg=C["err_dim"])
         tk.Label(
@@ -5661,26 +5948,135 @@ class HistoricoOperacoesFrame(tk.Frame):
         popup.focus_set()
 
     # ── Carregamento e agregação ───────────────────────────────────────
+    def _switch_view(self, modo):
+        if modo == self._modo_view:
+            return
+        self._modo_view = modo
+        self._update_view_tabs()
+        self._reload()
+
+    def _update_view_tabs(self):
+        for k, btn in self._tab_btns_view.items():
+            if k == self._modo_view:
+                btn.configure(fg=C["accent"], font=("Segoe UI", 9, "bold"))
+            else:
+                btn.configure(fg=C["ink_muted"], font=("Segoe UI", 9))
+        # Filtro de status só se aplica a Operações Confirmadas.
+        if hasattr(self, "_status_btn"):
+            self._status_btn.configure(
+                state=("normal" if self._modo_view == "operacoes" else "disabled"))
+
     def _reload(self):
         self._refresh_network_state()
-        try:
-            self._rows = self._data.listar_operacoes(
-                cliente=(list(self._filtro_clientes) if self._filtro_clientes else None),
-                trader=self._filtro_trader, status=self._filtro_status,
-                data_de=self._filtro_de, data_ate=self._filtro_ate,
-                busca=self._busca_var.get().strip() or None)
-        except Exception:
-            self._rows = []
+        self._show_loading()
+
+        req_token = object()
+        self._reload_req = req_token
+        modo = self._modo_view
+        filtros = dict(
+            cliente=(list(self._filtro_clientes) if self._filtro_clientes else None),
+            trader=self._filtro_trader,
+            data_de=self._filtro_de, data_ate=self._filtro_ate,
+            busca=self._busca_var.get().strip() or None)
+
+        def _worker():
+            try:
+                if modo == "operacoes":
+                    rows = self._data.listar_operacoes(status=self._filtro_status, **filtros)
+                else:
+                    rows = self._data.listar_notas_rejeitadas(**filtros)
+            except Exception:
+                rows = []
+            self._ui(lambda: self._on_reload_done(rows, req_token, modo))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_reload_done(self, rows, req_token, modo):
+        if self._reload_req is not req_token:
+            return  # um filtro mais novo já foi aplicado enquanto isto rodava
+        if modo == "operacoes":
+            self._rows = rows
+        else:
+            self._rejeitadas_rows = rows
         self._expanded_ids.clear()
+        self._loading = False
         self._render()
+
+    def _show_loading(self):
+        self._loading = True
+        for w in self._content.winfo_children():
+            w.destroy()
+        box = tk.Frame(self._content, bg=C["bg"])
+        box.pack(fill="x", pady=40)
+        tk.Label(box, text="◐", bg=C["bg"], fg=C["ok"],
+                 font=("Segoe UI", 18, "bold")).pack()
+        tk.Label(box, text="Carregando histórico…", bg=C["bg"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(pady=(8, 0))
 
     def _render(self):
         for w in self._content.winfo_children():
             w.destroy()
 
+        if self._modo_view == "rejeitadas":
+            self._render_rejeitadas(self._content)
+            return
+
         self._render_resumo(self._content)
         self._render_graficos(self._content)
         self._render_tabela(self._content)
+
+    def _render_rejeitadas(self, parent):
+        rows = self._rejeitadas_rows
+        info_row = tk.Frame(parent, bg=C["bg"])
+        info_row.pack(fill="x", pady=(0, 12))
+        tk.Label(info_row, text=f"{len(rows)} nota(s) rejeitada(s) na triagem de alertas",
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9)).pack(anchor="w")
+
+        card = card_frame(parent)
+        card.pack(fill="both", expand=True)
+        pad = tk.Frame(card, bg=C["surface"], padx=4, pady=4)
+        pad.pack(fill="both", expand=True)
+
+        hdr = tk.Frame(pad, bg=C["surface2"])
+        hdr.pack(fill="x")
+        cols = [("Cliente", 3), ("Trader", 1), ("NF", 1), ("Valor", 2),
+                ("Vencimento", 1), ("Data análise", 1), ("Motivo", 4)]
+        for i, (txt, wgt) in enumerate(cols):
+            hdr.columnconfigure(i, weight=wgt, uniform="rtbl")
+            tk.Label(hdr, text=txt, bg=C["surface2"], fg=C["ink_faint"],
+                     font=("Segoe UI", 8, "bold"), anchor="w").grid(
+                     row=0, column=i, sticky="ew", padx=8, pady=6)
+
+        if not rows:
+            tk.Label(pad, text="Nenhuma nota rejeitada encontrada para os filtros atuais.",
+                     bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 9)).pack(
+                     anchor="w", padx=8, pady=20)
+            return
+
+        for r in rows:
+            row_wrap = tk.Frame(pad, bg=C["bg"])
+            row_wrap.pack(fill="x")
+            make_hairline(row_wrap, bg=C["hair"]).pack(fill="x")
+            line = tk.Frame(row_wrap, bg=C["surface"])
+            line.pack(fill="x")
+            for i, (_t, wgt) in enumerate(cols):
+                line.columnconfigure(i, weight=wgt, uniform="rtbl")
+            vals = [
+                r.get("cliente") or "—",
+                r.get("trader") or "—",
+                r.get("nf") or "—",
+                _fmt_brl_from_raw(r.get("valor") or "0"),
+                _fmt_date_short(r.get("data_vencimento")),
+                _hist_fmt_dia(r.get("data_dia") or ""),
+            ]
+            for i, v in enumerate(vals):
+                tk.Label(line, text=v, bg=C["surface"], fg=C["ink"],
+                         font=("Segoe UI", 9), anchor="w", wraplength=140,
+                         justify="left").grid(row=0, column=i, sticky="new", padx=8, pady=8)
+            tk.Label(line, text=r.get("motivo") or "—", bg=C["surface"], fg=C["warn"],
+                     font=("Segoe UI", 8), anchor="w", justify="left",
+                     wraplength=280).grid(row=0, column=6, sticky="new", padx=8, pady=8)
+
 
     def _render_resumo(self, parent):
         montante_total = sum((_valor_to_decimal(r["montante_total"]) for r in self._rows),
@@ -6383,10 +6779,17 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         def _mw(event):
             sf._scroll_mousewheel(event)
             return "break"
+        def _bind_tree(w):
+            try:
+                w.bind("<MouseWheel>", _mw)
+                w.bind("<Button-4>", _mw)
+                w.bind("<Button-5>", _mw)
+            except Exception:
+                pass
+            for child in w.winfo_children():
+                _bind_tree(child)
         for widget in widgets:
-            widget.bind("<MouseWheel>", _mw)
-            widget.bind("<Button-4>", _mw)
-            widget.bind("<Button-5>", _mw)
+            _bind_tree(widget)
 
     def _open_detalhes(self, nome_sacado):
         group = self._find_group(nome_sacado)
@@ -6681,51 +7084,55 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             item = tk.Frame(list_outer, bg=C["surface2"],
                             highlightthickness=1,
                             highlightbackground=C["hair"] if included else C["err"])
-            item.pack(fill="x", pady=(0, 8))
+            item.pack(fill="x", pady=(0, 4))
             scroll_targets.append(item)
 
-            head = tk.Frame(item, bg=C["surface2"], padx=14, pady=10)
-            head.pack(fill="x")
-            scroll_targets.append(head)
+            line = tk.Frame(item, bg=C["surface2"], padx=12, pady=8)
+            line.pack(fill="x")
+            scroll_targets.append(line)
+
+            prazo_txt = f"{op['prazo']}d" if op.get("prazo") else "—"
+            campos = [
+                (op["nf"] or "—", 9, C["ink"], False),
+                (op["valor"], 12, C["ok"], True),
+                (op["data_inclusao"] or "—", 9, C["ink_muted"], False),
+                (op["data_vencimento"] or "—", 9, C["ink_muted"], False),
+                (prazo_txt, 5, C["ink_muted"], False),
+            ]
+            for texto, largura, cor, negrito in campos:
+                tk.Label(line, text=texto, bg=C["surface2"], fg=cor,
+                         font=("Segoe UI", 8, "bold" if negrito else "normal"),
+                         width=largura, anchor="w").pack(side="left")
+
             badge_txt = "No montante" if included else "Excluída"
             badge_fg = C["ok"] if included else C["err"]
-            tk.Label(head, text=badge_txt, bg=C["surface2"],
-                     fg=badge_fg, font=("Segoe UI", 7, "bold")).pack(side="left")
+            tk.Label(line, text=badge_txt, bg=C["surface2"], fg=badge_fg,
+                     font=("Segoe UI", 7, "bold"), width=12, anchor="w").pack(side="left")
+
             if included:
                 styled_button(
-                    head, "Excluir", lambda o=op: self._toggle_nota(o, exclude=True),
+                    line, "Excluir", lambda o=op: self._toggle_nota(o, exclude=True),
                     danger=True, small=True).pack(side="right")
             else:
                 styled_button(
-                    head, "Incluir", lambda o=op: self._toggle_nota(o, exclude=False),
+                    line, "Incluir", lambda o=op: self._toggle_nota(o, exclude=False),
                     accent=True, small=True).pack(side="right")
 
-            body = tk.Frame(item, bg=C["surface2"], padx=14, pady=12)
-            body.pack(fill="x")
-            scroll_targets.append(body)
-            fields = [
-                ("NF", op["nf"] or "—", False),
-                ("Valor", op["valor"], True),
-                ("Inclusão", op["data_inclusao"] or "—", False),
-                ("Vencimento", op["data_vencimento"] or "—", False),
-                ("Prazo", f"{op['prazo']} dias" if op.get("prazo") else "—", False),
-            ]
-            for label, value, accent in fields:
-                row_f = tk.Frame(body, bg=C["surface2"])
-                row_f.pack(fill="x", pady=(0, 3))
-                scroll_targets.append(row_f)
-                tk.Label(row_f, text=label, bg=C["surface2"], fg=C["ink_faint"],
-                         font=("Segoe UI", 7, "bold"), width=10, anchor="w").pack(side="left")
-                fg = C["ok"] if accent else C["ink"]
-                tk.Label(row_f, text=value, bg=C["surface2"], fg=fg,
-                         font=("Segoe UI", 8, "bold" if accent else "normal"),
-                         anchor="w").pack(side="left", fill="x", expand=True)
+        def _col_header():
+            head = tk.Frame(list_outer, bg=C["surface"])
+            head.pack(fill="x", padx=12, pady=(0, 2))
+            scroll_targets.append(head)
+            for txt, w_ in (("NF", 9), ("VALOR", 12), ("INCLUSÃO", 9),
+                            ("VENCIMENTO", 9), ("PRAZO", 5)):
+                tk.Label(head, text=txt, bg=C["surface"], fg=C["ink_faint"],
+                         font=("Segoe UI", 6, "bold"), width=w_, anchor="w").pack(side="left")
 
         if incluidas:
             tk.Label(list_outer, text=f"NO MONTANTE ({len(incluidas)})", bg=C["surface"],
                      fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(
                          anchor="w", pady=(0, 6))
             scroll_targets.append(list_outer)
+            _col_header()
         for op in incluidas:
             _nota_card(op, included=True)
 
@@ -6733,6 +7140,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             tk.Label(list_outer, text=f"EXCLUÍDAS / DISPONÍVEIS ({len(excluidas)})",
                      bg=C["surface"], fg=C["ink_faint"],
                      font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(14, 6))
+            _col_header()
             for op in excluidas:
                 _nota_card(op, included=False)
 
@@ -6859,16 +7267,45 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         )
         if pending:
             return
-        rejected_uids = {
-            item["op"]["uid"] for item in self._alert_items
+        rejected_items = [
+            item for item in self._alert_items
             if self._alert_decisions.get(item["index"]) == "reject"
-        }
+        ]
+        rejected_uids = {item["op"]["uid"] for item in rejected_items}
         self._excluded_uids = set(rejected_uids)
+        self._save_rejected_notes(rejected_items)
         self._close_alerts_modal()
         self._pending_ops = []
         self._alert_items = []
         self._alert_decisions = {}
         self._render_results(self._all_ops)
+
+    def _save_rejected_notes(self, rejected_items):
+        """Grava as notas rejeitadas na triagem (com o motivo do alerta) no
+        histórico, agrupadas por cliente. A deduplicação é feita no banco
+        (mesma nota/motivo não é regravada, mesmo reaparecendo depois)."""
+        if not rejected_items:
+            return
+        arquivo = os.path.basename(
+            getattr(self.controller, "invertido_xlsx_path", "") or "")
+        por_cliente = {}
+        for item in rejected_items:
+            op = item["op"]
+            nome = op.get("nome_sacado") or ""
+            por_cliente.setdefault(nome, {"cnpj": op.get("doc_sacado") or "", "notas": []})
+            por_cliente[nome]["notas"].append({
+                "nf": op.get("nf"),
+                "valor": op.get("valor_raw", Decimal("0")),
+                "data_vencimento": op.get("data_vencimento"),
+                "prazo_dias": _invertido_parse_prazo_days(op.get("prazo")),
+                "motivo": " · ".join(item["motivos"]),
+            })
+        hist = HistoricoOperacoesData.get()
+        for nome, info in por_cliente.items():
+            trader = get_trader_por_cliente(nome)
+            hist.registrar_notas_rejeitadas(
+                cliente=nome, cnpj_sacado=info["cnpj"], trader=trader,
+                notas=info["notas"], arquivo_origem=arquivo)
 
     def _show_alerts_modal(self, ops, alerts):
         self._close_alerts_modal()
@@ -6883,10 +7320,10 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         card = tk.Frame(overlay, bg=C["surface"],
                         highlightthickness=1, highlightbackground=C["hair"])
-        card.place(relx=0.5, rely=0.5, anchor="center", width=780, height=620)
+        card.place(relx=0.5, rely=0.5, anchor="center", width=860, height=660)
         card.bind("<Button-1>", lambda _e: "break")
 
-        pad = tk.Frame(card, bg=C["surface"], padx=28, pady=22)
+        pad = tk.Frame(card, bg=C["surface"], padx=26, pady=20)
         pad.pack(fill="both", expand=True)
 
         top = tk.Frame(pad, bg=C["surface"])
@@ -6904,14 +7341,13 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             text=(f"{len(alerts)} nota(s) com pendências. Revise e decida se cada "
                   "uma deve seguir na operação."),
             bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
-            wraplength=700, justify="left",
-        ).pack(anchor="w", pady=(8, 0))
+            wraplength=760, justify="left",
+        ).pack(anchor="w", pady=(6, 0))
 
-        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(16, 0))
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 0))
 
-        scroll_wrap = tk.Frame(pad, bg=C["surface"], height=430)
+        scroll_wrap = tk.Frame(pad, bg=C["surface"])
         scroll_wrap.pack(fill="both", expand=True, pady=(12, 0))
-        scroll_wrap.pack_propagate(False)
 
         sf = ScrollableFrame(scroll_wrap, bg=C["surface"])
         sf.pack(fill="both", expand=True)
@@ -6927,62 +7363,59 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             op = item["op"]
             item_card = tk.Frame(list_outer, bg=C["surface2"],
                                  highlightthickness=1, highlightbackground=C["hair"])
-            item_card.pack(fill="x", pady=(0, 10))
-            all_scroll_targets.append(item_card)
+            item_card.pack(fill="x", pady=(0, 8))
 
-            head = tk.Frame(item_card, bg=C["surface2"], padx=16, pady=10)
-            head.pack(fill="x")
-            all_scroll_targets.append(head)
-            tk.Label(head, text=op["nome_sacado"], bg=C["surface2"], fg=C["ink"],
-                     font=("Segoe UI", 9, "bold"), anchor="w").pack(side="left", fill="x", expand=True)
+            head = tk.Frame(item_card, bg=C["surface2"], padx=14)
+            head.pack(fill="x", pady=(10, 4))
+            tk.Label(head, text=op.get("nome_sacado") or "—", bg=C["surface2"],
+                     fg=C["ink"], font=("Segoe UI", 10, "bold"),
+                     anchor="w").pack(side="left", fill="x", expand=True)
             badge = tk.Label(head, text="Pendente", bg=C["surface2"], fg=C["warn"],
                              font=("Segoe UI", 8, "bold"))
             badge.pack(side="right")
 
-            body = tk.Frame(item_card, bg=C["surface2"], padx=16)
-            body.pack(fill="x", pady=(0, 10))
-            all_scroll_targets.append(body)
-
+            info = tk.Frame(item_card, bg=C["surface2"], padx=14)
+            info.pack(fill="x")
             prazo_txt = f"{op['prazo']} dias" if op.get("prazo") else "—"
-            for label, value, accent in (
-                ("Nome Sacado", op.get("nome_sacado") or "—", False),
-                ("NF", op.get("nf") or "—", False),
-                ("Valor", op.get("valor") or "—", True),
-                ("Vencimento", op.get("data_vencimento") or "—", False),
-                ("Prazo", prazo_txt, False),
+            for label, value in (
+                ("NF", op.get("nf") or "—"),
+                ("Valor", op.get("valor") or "—"),
+                ("Vencimento", op.get("data_vencimento") or "—"),
+                ("Prazo", prazo_txt),
             ):
-                row_f = tk.Frame(body, bg=C["surface2"])
-                row_f.pack(fill="x", pady=(0, 2))
-                all_scroll_targets.append(row_f)
-                tk.Label(row_f, text=label, bg=C["surface2"], fg=C["ink_faint"],
-                         font=("Segoe UI", 7, "bold"), width=12, anchor="w").pack(side="left")
-                fg = C["ok"] if accent else C["ink"]
-                tk.Label(row_f, text=value, bg=C["surface2"], fg=fg,
-                         font=("Segoe UI", 8, "bold" if accent else "normal"),
-                         anchor="w").pack(side="left", fill="x", expand=True)
+                cell = tk.Frame(info, bg=C["surface2"])
+                cell.pack(side="left", padx=(0, 18))
+                tk.Label(cell, text=label, bg=C["surface2"], fg=C["ink_faint"],
+                         font=("Segoe UI", 6, "bold")).pack(anchor="w")
+                tk.Label(cell, text=value, bg=C["surface2"], fg=C["ink"],
+                         font=("Segoe UI", 8, "bold")).pack(anchor="w")
 
-            motivo_f = tk.Frame(body, bg=C["surface2"])
-            motivo_f.pack(fill="x", pady=(6, 0))
-            all_scroll_targets.append(motivo_f)
-            tk.Label(motivo_f, text="Motivo", bg=C["surface2"], fg=C["ink_faint"],
-                     font=("Segoe UI", 7, "bold"), width=12, anchor="w").pack(side="left", anchor="n")
-            tk.Label(
-                motivo_f,
-                text=" · ".join(item["motivos"]),
-                bg=C["surface2"], fg=C["warn"],
-                font=("Segoe UI", 8), wraplength=560, justify="left",
-            ).pack(side="left", fill="x", expand=True)
+            motivo_row = tk.Frame(item_card, bg=C["surface2"], padx=14)
+            motivo_row.pack(fill="x", pady=(8, 4))
+            tk.Label(motivo_row, text="MOTIVO", bg=C["surface2"], fg=C["ink_faint"],
+                     font=("Segoe UI", 6, "bold")).pack(anchor="w")
+            motivo_lbl = tk.Label(
+                motivo_row, text=" · ".join(item["motivos"]),
+                bg=C["surface2"], fg=C["warn"], font=("Segoe UI", 8, "bold"),
+                justify="left", anchor="w")
+            motivo_lbl.pack(anchor="w", fill="x", pady=(2, 0))
+            # Wraplength dinâmico: recalcula com base na largura real
+            # disponível, então o texto nunca fica cortado independente do
+            # tamanho da janela/modal.
+            def _rewrap(event, lbl=motivo_lbl):
+                w = max(event.width - 4, 100)
+                lbl.configure(wraplength=w)
+            motivo_row.bind("<Configure>", _rewrap)
 
-            btn_row = tk.Frame(item_card, bg=C["surface2"], padx=16)
-            btn_row.pack(fill="x", pady=(6, 12))
-            all_scroll_targets.append(btn_row)
+            btn_row = tk.Frame(item_card, bg=C["surface2"], padx=14)
+            btn_row.pack(fill="x", pady=(8, 10))
             widgets = {"card": item_card, "badge": badge}
             self._alert_item_widgets.append((item, widgets))
             styled_button(
                 btn_row, "✓ Aceitar",
                 lambda it=item, w=widgets: self._set_alert_decision(it, "accept", w),
                 accent=True, small=True,
-            ).pack(side="left", padx=(0, 8))
+            ).pack(side="left", padx=(0, 6))
             styled_button(
                 btn_row, "✕ Rejeitar",
                 lambda it=item, w=widgets: self._set_alert_decision(it, "reject", w),
