@@ -2935,6 +2935,32 @@ CURVA_SPOT_PATH = (
 )
 
 
+def _parse_taxa_pct(value):
+    """Normaliza a taxa da curva ('Tomar/Compr') para um Decimal em escala
+    percentual (ex.: 14.144 significando 14,144% a.a.), aceitando:
+    - string com vírgula e '%' (ex. "14,144%")
+    - número já em % (ex. 14.144)
+    - fração do Excel (ex. 0.14144), convertida multiplicando por 100
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        s = value.strip().replace("%", "").replace(",", ".")
+        try:
+            num = Decimal(s)
+        except Exception:
+            return None
+        return num
+    if isinstance(value, (int, float)):
+        num = Decimal(str(value))
+        # Se vier como fração do Excel (formatação de célula em %),
+        # valores típicos de DI ficam entre 0 e ~1 (ex. 0.14144 = 14,144%).
+        if num < 1:
+            num = num * 100
+        return num
+    return None
+
+
 class CurvaSpotData:
     """Carrega a curva DI (Vencimento, DU, DC, Funding) do arquivo de rede
     (mesmo layout usado em spread.py: colunas D,E,G,J, pulando 1 linha de
@@ -2986,17 +3012,17 @@ class CurvaSpotData:
             wb = xlrd.open_workbook(CURVA_SPOT_PATH)
             ws = wb.sheet_by_index(0)
             rows = {}
-            # Colunas D,E,G,J (0-indexed: 3,4,6,9) => Vencimento, DU, DC, Funding("Dar")
-            # skiprows=1 (cabeçalho) + a própria linha de rótulos: dados a
-            # partir da linha 2 (0-indexed), até 150 linhas, igual ao spread.py.
+            # Layout real da curva (confirmado no PDF de referência):
+            # col0=Nº, col1=Início, col2=Vencimento, col3=DC, col4=DC(dup),
+            # col5=DU, col6=Taxa "Tomar/Compr" (% a.a.) — usada como Funding.
             start_row = 2
             end_row = min(ws.nrows, start_row + 150)
             for r in range(start_row, end_row):
                 try:
-                    venc_cell = ws.cell_value(r, 3)
-                    du_cell = ws.cell_value(r, 4)
-                    dc_cell = ws.cell_value(r, 6)
-                    fund_cell = ws.cell_value(r, 9)
+                    venc_cell = ws.cell_value(r, 2)
+                    dc_cell = ws.cell_value(r, 3)
+                    du_cell = ws.cell_value(r, 5)
+                    fund_cell = ws.cell_value(r, 6)
                 except Exception:
                     continue
                 if venc_cell in (None, ""):
@@ -3005,9 +3031,11 @@ class CurvaSpotData:
                 if venc is None:
                     continue
                 try:
-                    du = int(du_cell)
-                    dc = int(dc_cell)
-                    funding = Decimal(str(fund_cell))
+                    du = int(float(du_cell))
+                    dc = int(float(dc_cell))
+                    funding = _parse_taxa_pct(fund_cell)
+                    if funding is None:
+                        continue
                 except Exception:
                     continue
                 rows[venc] = {"DU": du, "DC": dc, "Funding": funding}
@@ -3089,7 +3117,7 @@ def calcular_spread_sacado(notas, taxa_alvo_str):
         num = Decimal("0")
         den = Decimal("0")
         for L in linhas:
-            funding = L["Funding"] + 1
+            funding = L["Funding"] / Decimal("100") + 1
             base = funding * (spread_pct / Decimal("100") + 1)
             expo = Decimal(L["DU"]) / Decimal("252")
             taxa_efetiva = float(base) ** float(expo)
@@ -3101,22 +3129,39 @@ def calcular_spread_sacado(notas, taxa_alvo_str):
             return Decimal("0")
         return (num / den).quantize(Decimal("0.0001"))
 
-    spread = Decimal("0")
-    taxa_media = Decimal("0")
-    passo = Decimal("0.001")
-    max_iter = 20000
+    # Busca binária: a taxa média é monotônica crescente com o spread
+    # (mesma lógica de spread.py, porém convergindo em ~dezenas de passos
+    # em vez de milhares — evita travar a UI no clique do botão).
+    passo_final = Decimal("0.001")
+    lo = Decimal("-50.000")
+    hi = Decimal("50.000")
+    tm_lo = _taxa_media(lo)
+    tm_hi = _taxa_media(hi)
+    max_iter = 60
     it = 0
-    while taxa_alvo != taxa_media and it < max_iter:
-        if taxa_alvo > taxa_media:
-            spread += passo
-        else:
-            spread -= passo
-        spread = spread.quantize(Decimal("0.001"))
+    convergiu = True
+
+    if taxa_alvo <= tm_lo:
+        spread = lo
+        taxa_media = tm_lo
+    elif taxa_alvo >= tm_hi:
+        spread = hi
+        taxa_media = tm_hi
+    else:
+        while (hi - lo) > passo_final and it < max_iter:
+            mid = ((lo + hi) / 2).quantize(passo_final)
+            tm_mid = _taxa_media(mid)
+            if tm_mid < taxa_alvo:
+                lo = mid
+            else:
+                hi = mid
+            it += 1
+        spread = hi.quantize(passo_final)
         taxa_media = _taxa_media(spread)
-        it += 1
+        convergiu = it < max_iter
 
     return {"ok": True, "spread": spread, "taxa_media": taxa_media,
-            "notas_usadas": len(linhas), "convergiu": it < max_iter}
+            "notas_usadas": len(linhas), "convergiu": convergiu}
 
 
 # ─── Histórico de Operações (Risco Sacado Invertido) ───────────────────────
@@ -6849,30 +6894,14 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             except Exception:
                 pass
             self._spread_overlay = None
+        self._spread_body = None
 
     def _abrir_spread_sacado(self, group):
-        """Calcula e exibe o spread implícito da operação do sacado, dado
-        o funding da curva DI e a taxa mensal linear já parametrizada no
-        Depara (TaxasData) para este cliente."""
+        """Abre o popup de spread imediatamente (mostrando 'Calculando...')
+        e roda o cálculo pesado (leitura da curva de rede + busca binária)
+        em thread separada, para não travar a UI."""
         if getattr(self, "_spread_overlay", None) is not None:
             return
-
-        cnpj = group.get("doc_sacado") or ""
-        taxa_info = TaxasData.get().get_taxa(cnpj) if cnpj else None
-        vigente = TaxasData.get().is_vigente(cnpj) if cnpj else False
-        taxa_str = taxa_info.get("taxa") if taxa_info else None
-
-        notas = []
-        for op in self._ops_do_grupo(group):
-            venc = _parse_data_curta(op.get("data_vencimento"))
-            notas.append({"valor_raw": op.get("valor_raw", Decimal("0")),
-                           "data_vencimento": venc})
-
-        if not taxa_str or not vigente:
-            resultado = {"ok": False,
-                         "reason": "Sem taxa vigente no Depara para este sacado"}
-        else:
-            resultado = calcular_spread_sacado(notas, taxa_str)
 
         overlay = tk.Frame(self._detail_card if getattr(self, "_detail_card", None) else self,
                             bg="#0c0c0c")
@@ -6901,6 +6930,45 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         body = tk.Frame(pad, bg=C["surface"])
         body.pack(fill="both", expand=True, pady=(12, 0))
+        self._spread_body = body
+
+        tk.Label(body, text="Calculando…", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w")
+
+        def _worker():
+            cnpj = group.get("doc_sacado") or ""
+            taxa_info = TaxasData.get().get_taxa(cnpj) if cnpj else None
+            vigente = TaxasData.get().is_vigente(cnpj) if cnpj else False
+            taxa_str = taxa_info.get("taxa") if taxa_info else None
+
+            notas = []
+            for op in self._ops_do_grupo(group):
+                venc = _parse_data_curta(op.get("data_vencimento"))
+                notas.append({"valor_raw": op.get("valor_raw", Decimal("0")),
+                               "data_vencimento": venc})
+
+            if not taxa_str or not vigente:
+                resultado = {"ok": False,
+                             "reason": "Sem taxa vigente no Depara para este sacado"}
+            else:
+                try:
+                    resultado = calcular_spread_sacado(notas, taxa_str)
+                except Exception as e:
+                    resultado = {"ok": False, "reason": f"Erro no cálculo: {e}"}
+
+            try:
+                self.after(0, lambda: self._preencher_spread_resultado(resultado, taxa_str))
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _preencher_spread_resultado(self, resultado, taxa_str):
+        body = getattr(self, "_spread_body", None)
+        if body is None or not body.winfo_exists():
+            return
+        for w in body.winfo_children():
+            w.destroy()
 
         if not resultado.get("ok"):
             tk.Label(body, text=f"⚠ {resultado.get('reason', 'Não foi possível calcular')}",
