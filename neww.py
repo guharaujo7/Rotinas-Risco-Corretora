@@ -871,9 +871,6 @@ MIRROR_CLIENTS = {
     "Posto Timbozao Itaperuna":"Posto Sapucaia","Posto Pioneiro":"Posto Sapucaia",
 }
 
-# Trader responsável por cliente — usado apenas no histórico de operações do
-# Risco Sacado Invertido (filtro/gráfico "por trader"). Mapeamento próprio,
-# separado da tabela de trader por região numérica do Share/BPM geral.
 INVERTIDO_TRADER_POR_CLIENTE = {
     "Transdourada":             "Debora",
     "RPB":                      "Matheus",
@@ -891,11 +888,7 @@ INVERTIDO_TRADER_POR_CLIENTE = {
 
 
 def get_trader_por_cliente(nome_sacado: str) -> str:
-    """Retorna o trader responsável pelo cliente (Risco Sacado Invertido),
-    ou string vazia se não houver mapeamento. Usa o mesmo casamento
-    tolerante (aliases + palavras-chave) das regras de prazo, pois nomes
-    de sacado vindos da planilha podem variar ligeiramente do cadastro
-    (abreviações, grafia)."""
+    
     if not nome_sacado:
         return ""
     key = _normalize_sacado_key(nome_sacado)
@@ -950,10 +943,7 @@ def only_digits(s):
 
 def _bind_digits_only(entry, var, max_len, min_len=None, hint_lbl=None,
                        valid_lengths=None, hint_text=None):
-    """Restringe um Entry a aceitar apenas dígitos, até max_len caracteres.
-    Se hint_lbl for informado, mostra um aviso minimalista ao perder o foco
-    quando o tamanho não corresponde ao exigido (min_len, ou a um dos
-    valid_lengths quando especificado — ex.: CPF/CNPJ: 11 ou 14)."""
+    
     def _check_len():
         if hint_lbl is None:
             return
@@ -994,9 +984,7 @@ def _bind_digits_only(entry, var, max_len, min_len=None, hint_lbl=None,
         entry.bind("<FocusOut>", lambda _e: _check_len())
 
 def _bind_conta_field(entry, var, hint_lbl):
-    """Campo de conta no formato 99999-9 (5 dígitos + dígito verificador).
-    O usuário só digita números; o hífen é inserido automaticamente, e um
-    aviso minimalista aparece enquanto faltar o dígito verificador."""
+    
     state = {"updating": False}
 
     def _format(digits):
@@ -1064,21 +1052,11 @@ def normalize_text_variants(t):
     return RE_SPACES.sub(" ",t).strip(), re.sub(r"\s+","",t or "")
 
 def _plain_label_value_map(pdf_path):
-    """Extração geométrica genérica para PDFs em formato de tabela (páginas
-    do Salesforce exportadas): os campos aparecem em duas colunas fixas
-    (esquerda/direita), com uma linha de rótulos seguida da linha de
-    valores logo abaixo, ambos alinhados pela mesma posição X inicial da
-    coluna. Detecta as duas posições X mais comuns onde rótulos começam
-    (colunas esquerda e direita) e usa essas posições como "trilhos" para
-    juntar cada rótulo com seu valor na linha seguinte, evitando pegar
-    texto de colunas vizinhas (ex.: barra lateral direita com links).
-    Retorna {} se pdfplumber não estiver disponível ou nada for reconhecido."""
+    
     if pdfplumber is None or not pdf_path:
         return {}
     out = {}
-    # Rótulos conhecidos do formato "Operação MN / Risco Sacado" do
-    # Salesforce. Usados para localizar as linhas de rótulo com confiança,
-    # em vez de tentar adivinhar heuristicamente qualquer linha.
+   
     known_labels = [
         "Razão Social", "CNPJ", "Conta Corrente do Cliente",
         "Número da Solicitação", "Evento", "Plataforma",
@@ -1109,15 +1087,11 @@ def _plain_label_value_map(pdf_path):
                 rows = _word_rows_from_pdf_page(words)
                 for i, row in enumerate(rows):
                     line = " ".join(w["text"] for w in row)
-                    # Só considera linhas que batem >=1 rótulo conhecido no
-                    # começo de algum "segmento" — isto é, colunas cujo
-                    # primeiro token corresponde ao início de um rótulo.
+                    
                     matches = list(label_re.finditer(line))
                     if not matches:
                         continue
-                    # Mapeia cada match de rótulo para a posição X inicial
-                    # da palavra correspondente na linha (usa a primeira
-                    # palavra do match).
+                   
                     segs = []
                     for m in matches:
                         char_pos = 0
@@ -1136,11 +1110,7 @@ def _plain_label_value_map(pdf_path):
                     x_min = segs[0][1]
                     x_max = segs[-1][1]
                     base_top = row[0]["top"]
-                    # Procura a próxima linha (dentro de uma janela vertical
-                    # razoável) que tenha ao menos uma palavra dentro do
-                    # intervalo X coberto pelos rótulos desta linha — pula
-                    # linhas "estranhas" que só têm conteúdo de outra coluna
-                    # (ex.: texto da barra lateral direita).
+                   
                     vrow = None
                     for cand_row in rows[i + 1:]:
                         if cand_row[0]["top"] - base_top > 30:
@@ -1165,8 +1135,7 @@ def _plain_label_value_map(pdf_path):
 
 
 def _plain_map_lookup(pmap, *label_variants):
-    """Procura o valor de um rótulo no mapa posicional, tolerando pequenas
-    variações de grafia (acentuação, maiúsculas)."""
+    
     for variant in label_variants:
         v = pmap.get(variant.lower())
         if v:
@@ -1175,11 +1144,7 @@ def _plain_map_lookup(pmap, *label_variants):
 
 
 def extract_text_from_pdf(p):
-    # pdfplumber é usado como extrator principal: o PyPDF2 tem um bug
-    # conhecido de espaçamento em PDFs com posicionamento de caractere fino
-    # (comum em páginas do Salesforce exportadas), quebrando palavras no
-    # meio (ex.: "RECON PR OMOC OES EVENT OS EIRELI"). O pdfplumber usa as
-    # posições reais dos caracteres e não sofre desse problema.
+    
     if pdfplumber is not None:
         try:
             lo, pl = [], []
@@ -1192,7 +1157,7 @@ def extract_text_from_pdf(p):
             return "\n".join(lo), "\n".join(pl)
         except Exception:
             pass
-    # Fallback: PyPDF2 (apenas se pdfplumber não estiver instalado/falhar).
+    
     if PdfReader is None:
         return "", ""
     r = PdfReader(p, strict=False)
@@ -5940,6 +5905,190 @@ def _hist_fmt_hora(data_hora: str) -> str:
         return data_hora or ""
 
 
+def _blend_hex(c1, c2, t):
+    """Mistura duas cores hex (#rrggbb) — usado para simular transparência
+    em preenchimentos de área no Canvas (que não suporta alpha nativo)."""
+    c1 = c1.lstrip("#"); c2 = c2.lstrip("#")
+    r1, g1, b1 = int(c1[0:2], 16), int(c1[2:4], 16), int(c1[4:6], 16)
+    r2, g2, b2 = int(c2[0:2], 16), int(c2[2:4], 16), int(c2[4:6], 16)
+    r = round(r1 + (r2 - r1) * t)
+    g = round(g1 + (g2 - g1) * t)
+    b = round(b1 + (b2 - b1) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _fmt_compact_brl(v):
+    v = float(v)
+    sign = "-" if v < 0 else ""
+    av = abs(v)
+    if av >= 1_000_000:
+        return f"{sign}R$ {av/1_000_000:.1f}M"
+    if av >= 1_000:
+        return f"{sign}R$ {av/1_000:.0f}k"
+    return f"{sign}R$ {av:.0f}"
+
+
+def _fmt_compact_pct(v):
+    return f"{float(v):.2f}%"
+
+
+class StockLineChart(tk.Canvas):
+    """Gráfico de linha/área no estilo terminal de bolsa: grid, eixo com
+    valores, preenchimento sob a série principal, crosshair com tooltip ao
+    passar o mouse, e indicador de variação (ponto inicial x final) no
+    canto superior direito."""
+
+    def __init__(self, parent, height=220, **kwargs):
+        super().__init__(parent, height=height, bg=C["surface"],
+                         highlightthickness=0, bd=0, **kwargs)
+        self._labels, self._series, self._colors, self._legend = [], [], [], []
+        self._y_fmt = _fmt_compact_brl
+        self._area_idx = 0
+        self._geom = None
+        self.bind("<Configure>", lambda _e: self._redraw())
+        self.bind("<Motion>", self._on_motion)
+        self.bind("<Leave>", lambda _e: (self.delete("hover"), None))
+
+    def set_data(self, labels, series, colors, legend=None, y_fmt=None, area_idx=0):
+        self._labels = labels
+        self._series = series
+        self._colors = colors
+        self._legend = legend or []
+        self._y_fmt = y_fmt or _fmt_compact_brl
+        self._area_idx = area_idx
+        self._redraw()
+
+    def _redraw(self, _e=None):
+        self.delete("all")
+        self._geom = None
+        w = max(self.winfo_width(), 1)
+        h = max(self.winfo_height(), 1)
+        has_data = self._labels and self._series and any(self._series)
+        if not has_data:
+            self.create_text(w / 2, h / 2, text="Sem dados no período",
+                             fill=C["ink_faint"], font=("Segoe UI", 9))
+            return
+
+        top_pad, bottom_pad, left_pad, right_pad = 26, 20, 8, 54
+        chart_w = max(w - left_pad - right_pad, 10)
+        chart_h = max(h - top_pad - bottom_pad, 10)
+        n = len(self._labels)
+
+        todos_vals = [v for serie in self._series for v in serie]
+        vmax = max(todos_vals) if todos_vals else 1
+        vmin = min(min(todos_vals), 0) if todos_vals else 0
+        if vmax == vmin:
+            vmax = vmin + 1
+        span = vmax - vmin
+
+        def X(i):
+            return left_pad + (i / max(n - 1, 1)) * chart_w if n > 1 else left_pad + chart_w / 2
+
+        def Y(v):
+            return top_pad + chart_h - ((v - vmin) / span) * chart_h
+
+        # grade horizontal + rótulos do eixo Y (4 faixas)
+        for k in range(5):
+            gy = top_pad + chart_h * k / 4
+            self.create_line(left_pad, gy, left_pad + chart_w, gy,
+                             fill=C["hair"], width=1)
+            gv = vmax - span * k / 4
+            self.create_text(left_pad + chart_w + 8, gy, text=self._y_fmt(gv),
+                             fill=C["ink_faint"], font=("Segoe UI", 7), anchor="w")
+
+        # legenda
+        lx = left_pad
+        for txt, color in zip(self._legend, self._colors):
+            self.create_oval(lx, 4, lx + 8, 12, fill=color, outline="")
+            self.create_text(lx + 12, 8, text=txt, fill=C["ink_muted"],
+                             font=("Segoe UI", 7), anchor="w")
+            lx += len(txt) * 6 + 26
+
+        # preenchimento de área sob a série principal
+        serie0 = self._series[self._area_idx] if self._series else []
+        if serie0 and n > 1:
+            base_color = self._colors[self._area_idx % len(self._colors)]
+            fill_color = _blend_hex(base_color, C["surface"], 0.82)
+            pts = [(X(i), Y(v)) for i, v in enumerate(serie0)]
+            poly = [left_pad, top_pad + chart_h]
+            for x, y in pts:
+                poly += [x, y]
+            poly += [left_pad + chart_w, top_pad + chart_h]
+            self.create_polygon(poly, fill=fill_color, outline="")
+
+        # linhas das séries
+        pontos_por_serie = []
+        for si, serie in enumerate(self._series):
+            color = self._colors[si % len(self._colors)]
+            pts = [(X(i), Y(v)) for i, v in enumerate(serie)]
+            pontos_por_serie.append(pts)
+            if len(pts) > 1:
+                flat = [c for xy in pts for c in xy]
+                self.create_line(*flat, fill=color, width=2, smooth=True,
+                                 splinesteps=8)
+            if n <= 40:
+                for x, y in pts:
+                    self.create_oval(x - 2.5, y - 2.5, x + 2.5, y + 2.5,
+                                     fill=color, outline="")
+
+        # rótulos do eixo X (amostrados p/ não poluir)
+        step = max(1, n // 8)
+        for i, label in enumerate(self._labels):
+            if i % step == 0 or i == n - 1:
+                self.create_text(X(i), top_pad + chart_h + 8, text=label,
+                                 fill=C["ink_faint"], font=("Segoe UI", 7), anchor="n")
+
+        # indicador de variação (primeiro x último ponto da série principal)
+        if serie0 and len(serie0) >= 2 and serie0[0] != 0:
+            delta_pct = (serie0[-1] - serie0[0]) / abs(serie0[0]) * 100
+            up = delta_pct >= 0
+            arrow = "▲" if up else "▼"
+            color = C["ok"] if up else C["err"]
+            self.create_text(left_pad + chart_w, 8,
+                             text=f"{arrow} {abs(delta_pct):.1f}%",
+                             fill=color, font=("Segoe UI", 8, "bold"), anchor="e")
+
+        self._geom = dict(left_pad=left_pad, top_pad=top_pad, chart_w=chart_w,
+                          chart_h=chart_h, n=n, vmin=vmin, span=span,
+                          pontos_por_serie=pontos_por_serie)
+
+    def _on_motion(self, event):
+        g = self._geom
+        self.delete("hover")
+        if not g or g["n"] == 0:
+            return
+        rel = (event.x - g["left_pad"]) / max(g["chart_w"], 1)
+        idx = round(rel * max(g["n"] - 1, 0))
+        idx = max(0, min(idx, g["n"] - 1))
+        if not (0 <= idx < len(self._labels)):
+            return
+        x = g["left_pad"] + (idx / max(g["n"] - 1, 1)) * g["chart_w"] if g["n"] > 1 \
+            else g["left_pad"] + g["chart_w"] / 2
+        self.create_line(x, g["top_pad"], x, g["top_pad"] + g["chart_h"],
+                         fill=C["ink_faint"], dash=(2, 2), tags="hover")
+
+        linhas = [self._labels[idx]]
+        for si, serie in enumerate(self._series):
+            if idx < len(serie):
+                nome = self._legend[si] if si < len(self._legend) else f"série {si+1}"
+                linhas.append(f"{nome}: {self._y_fmt(serie[idx])}")
+        texto = "\n".join(linhas)
+
+        tx = min(x + 10, self.winfo_width() - 8)
+        anchor = "nw" if x < self.winfo_width() - 120 else "ne"
+        if anchor == "ne":
+            tx = x - 10
+        ty = g["top_pad"] + 4
+        tid = self.create_text(tx, ty, text=texto, fill=C["ink"],
+                               font=("Segoe UI", 7), anchor=anchor, tags="hover")
+        bbox = self.bbox(tid)
+        if bbox:
+            pad = 4
+            self.create_rectangle(bbox[0]-pad, bbox[1]-pad, bbox[2]+pad, bbox[3]+pad,
+                                  fill=C["surface3"], outline=C["hair"], tags="hover")
+            self.tag_raise(tid)
+
+
 class MiniBarChart(tk.Canvas):
     """Gráfico de barras minimalista (Canvas puro), no estilo visual do app.
     Aceita uma ou duas séries sobrepostas (para Montante x Líquido)."""
@@ -6064,6 +6213,7 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         self._rows = []
         self._rejeitadas_rows = []
         self._modo_view = "operacoes"
+        self._grafico_modo = "volume"
         self._expanded_ids = set()
         self._filtro_clientes = set()
         self._filtro_trader = None
@@ -6184,8 +6334,8 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         ate_entry = styled_entry(periodo_row, textvariable=self._data_ate_var, width=11)
         ate_entry.pack(side="left", padx=(6, 12))
 
-        self._bind_data_mask(self._data_de_var)
-        self._bind_data_mask(self._data_ate_var)
+        self._bind_data_mask(de_entry, self._data_de_var)
+        self._bind_data_mask(ate_entry, self._data_ate_var)
 
         for e in (de_entry, ate_entry):
             e.bind("<Return>", lambda _e: self._aplicar_periodo_datas())
@@ -6207,22 +6357,49 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                                           font=("Segoe UI", 8))
         self._filtro_ativo_lbl.pack(side="left")
 
-    def _bind_data_mask(self, var):
-        """Aplica máscara dd/mm/aaaa a uma StringVar: o usuário digita só
-        números, as barras são inseridas automaticamente após o dia e o
-        mês, e não é possível digitar mais que 8 dígitos (dd+mm+aaaa)."""
-        def _on_change(*_a):
-            raw = var.get()
-            digits = re.sub(r"\D", "", raw)[:8]
-            out = digits
-            if len(digits) > 4:
-                out = f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
-            elif len(digits) > 2:
-                out = f"{digits[:2]}/{digits[2:]}"
-            if out != raw:
-                var.set(out)
+    def _bind_data_mask(self, entry, var):
+        """Aplica máscara dd/mm/aaaa ao Entry: o usuário digita só números,
+        as barras são inseridas automaticamente após o dia e o mês, o
+        cursor é reposicionado corretamente após cada tecla (senão os
+        próximos dígitos entram no lugar errado), e não é possível
+        digitar mais que 8 dígitos (dd+mm+aaaa)."""
 
-        var.trace_add("write", _on_change)
+        def _formatar(digits):
+            digits = digits[:8]
+            if len(digits) > 4:
+                return f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
+            if len(digits) > 2:
+                return f"{digits[:2]}/{digits[2:]}"
+            return digits
+
+        def _on_key(event):
+            # Deixa teclas de navegação/atalho passarem sem reformatar.
+            if event.keysym in ("Left", "Right", "Home", "End", "Tab",
+                                 "Shift_L", "Shift_R", "Delete"):
+                return
+            cursor_antes = entry.index(tk.INSERT)
+            raw = var.get()
+            digitos_antes_do_cursor = len(re.sub(r"\D", "", raw[:cursor_antes]))
+
+            digits = re.sub(r"\D", "", raw)[:8]
+            novo_texto = _formatar(digits)
+            if novo_texto != raw:
+                var.set(novo_texto)
+
+            # Recalcula onde o cursor deve ficar: logo após o mesmo número
+            # de dígitos que estavam antes dele, pulando as barras que a
+            # máscara insere no meio do caminho.
+            pos = 0
+            vistos = 0
+            for ch in novo_texto:
+                if vistos >= digitos_antes_do_cursor:
+                    break
+                if ch != "/":
+                    vistos += 1
+                pos += 1
+            entry.icursor(pos)
+
+        entry.bind("<KeyRelease>", _on_key)
 
     def _parse_data_filtro(self, txt):
         txt = (txt or "").strip()
@@ -6593,28 +6770,57 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         row.columnconfigure(0, weight=2, uniform="g")
         row.columnconfigure(1, weight=1, uniform="g")
 
-        # Montante x Líquido ao longo do tempo (por dia)
+        # Montante x Líquido, ou Spread médio, ao longo do tempo (por dia)
         por_dia = {}
         for r in self._rows:
             d = r["data_dia"]
-            por_dia.setdefault(d, [Decimal("0"), Decimal("0")])
-            por_dia[d][0] += _valor_to_decimal(r["montante_total"])
-            por_dia[d][1] += _valor_to_decimal(r["liquido_total"])
+            por_dia.setdefault(d, {"montante": Decimal("0"), "liquido": Decimal("0"),
+                                   "spreads": []})
+            por_dia[d]["montante"] += _valor_to_decimal(r["montante_total"])
+            por_dia[d]["liquido"] += _valor_to_decimal(r["liquido_total"])
+            sp = r.get("spread")
+            if sp:
+                try:
+                    por_dia[d]["spreads"].append(Decimal(str(sp).replace(",", ".")))
+                except Exception:
+                    pass
         dias_ord = sorted(por_dia.keys())
         labels = [_hist_fmt_dia(d)[:5] for d in dias_ord]
-        serie_montante = [float(por_dia[d][0]) for d in dias_ord]
-        serie_liquido = [float(por_dia[d][1]) for d in dias_ord]
 
         card1 = card_frame(row)
         card1.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         p1 = tk.Frame(card1, bg=C["surface"], padx=14, pady=10)
         p1.pack(fill="both", expand=True)
-        tk.Label(p1, text="Montante × Líquido ao longo do tempo", bg=C["surface"],
-                 fg=C["ink_muted"], font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        chart1 = MiniBarChart(p1, height=140)
-        chart1.pack(fill="x", pady=(6, 0))
-        chart1.set_data(labels, [serie_montante, serie_liquido],
-                        [C["accent"], C["ok"]], legend=["Montante", "Líquido"])
+
+        head1 = tk.Frame(p1, bg=C["surface"])
+        head1.pack(fill="x")
+        self._chart1_title_lbl = tk.Label(
+            head1, text="Montante × Líquido ao longo do tempo", bg=C["surface"],
+            fg=C["ink_muted"], font=("Segoe UI", 8, "bold"))
+        self._chart1_title_lbl.pack(side="left")
+
+        toggle = tk.Frame(head1, bg=C["surface"])
+        toggle.pack(side="right")
+        self._btn_grafico_volume = tk.Button(
+            toggle, text="Volume", command=lambda: self._set_grafico_modo("volume"),
+            bg=C["surface"], activebackground=C["surface"],
+            relief="flat", bd=0, padx=8, pady=2, cursor="hand2",
+            font=("Segoe UI", 8))
+        self._btn_grafico_volume.pack(side="left")
+        self._btn_grafico_spread = tk.Button(
+            toggle, text="Spread", command=lambda: self._set_grafico_modo("spread"),
+            bg=C["surface"], activebackground=C["surface"],
+            relief="flat", bd=0, padx=8, pady=2, cursor="hand2",
+            font=("Segoe UI", 8))
+        self._btn_grafico_spread.pack(side="left", padx=(4, 0))
+
+        self._chart1 = StockLineChart(p1, height=200)
+        self._chart1.pack(fill="x", pady=(6, 0))
+        self._por_dia_grafico = por_dia
+        self._dias_ord_grafico = dias_ord
+        self._labels_grafico = labels
+        self._atualizar_botoes_grafico()
+        self._aplicar_dados_grafico()
 
         # Ranking de clientes por montante
         por_cliente = {}
@@ -6633,6 +6839,49 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         chart2 = HorizontalRankChart(p2, height=140)
         chart2.pack(fill="x", pady=(6, 0))
         chart2.set_data(ranking)
+
+    def _set_grafico_modo(self, modo):
+        if modo == self._grafico_modo:
+            return
+        self._grafico_modo = modo
+        self._atualizar_botoes_grafico()
+        self._aplicar_dados_grafico()
+
+    def _atualizar_botoes_grafico(self):
+        vol_on = self._grafico_modo == "volume"
+        self._btn_grafico_volume.configure(
+            fg=(C["accent"] if vol_on else C["ink_muted"]),
+            font=("Segoe UI", 8, "bold" if vol_on else "normal"))
+        self._btn_grafico_spread.configure(
+            fg=(C["warn"] if not vol_on else C["ink_muted"]),
+            font=("Segoe UI", 8, "bold" if not vol_on else "normal"))
+
+    def _aplicar_dados_grafico(self):
+        por_dia = self._por_dia_grafico
+        dias_ord = self._dias_ord_grafico
+        labels = self._labels_grafico
+
+        if self._grafico_modo == "volume":
+            self._chart1_title_lbl.configure(
+                text="Montante × Líquido ao longo do tempo")
+            serie_montante = [float(por_dia[d]["montante"]) for d in dias_ord]
+            serie_liquido = [float(por_dia[d]["liquido"]) for d in dias_ord]
+            self._chart1.set_data(
+                labels, [serie_montante, serie_liquido],
+                [C["accent"], C["ok"]], legend=["Montante", "Líquido"],
+                y_fmt=_fmt_compact_brl, area_idx=0)
+        else:
+            escopo = "todas as operações" if not (self._filtro_de or self._filtro_ate) \
+                else "período filtrado"
+            self._chart1_title_lbl.configure(text=f"Spread médio por dia — {escopo}")
+            dias_com_spread = [d for d in dias_ord if por_dia[d]["spreads"]]
+            labels_sp = [_hist_fmt_dia(d)[:5] for d in dias_com_spread]
+            serie_spread = [
+                float(sum(por_dia[d]["spreads"]) / len(por_dia[d]["spreads"]))
+                for d in dias_com_spread]
+            self._chart1.set_data(
+                labels_sp, [serie_spread], [C["warn"]], legend=["Spread médio"],
+                y_fmt=_fmt_compact_pct, area_idx=0)
 
     def _render_tabela(self, parent):
         card = card_frame(parent)
