@@ -759,9 +759,12 @@ _TD_STYLE = ("border:1pt solid #FAF7F5;padding:4pt;font-family:'Itau Display',se
              "font-size:7.5pt;color:#333333;text-align:center")
 
 
-def enviar_email_outlook_risco_sacado(subject: str, html_body: str):
+def enviar_email_outlook_risco_sacado(subject: str, html_body: str,
+                                       to: str = "", cc: str = ""):
     """Abre um popup do Outlook (sem enviar automaticamente) já preenchido
-    com título, corpo e imagem embutida, para revisão e envio manual."""
+    com título, corpo, destinatários (To/CC) e imagem embutida, para
+    revisão e envio manual. `to`/`cc` já vêm formatados como
+    "email; email; email"."""
     if not WIN32_OK:
         raise RuntimeError(
             "Integração com Outlook (win32com) não está disponível neste ambiente.")
@@ -776,6 +779,10 @@ def enviar_email_outlook_risco_sacado(subject: str, html_body: str):
         outlook = win32.Dispatch("Outlook.Application")
         mail = outlook.CreateItem(0)  # olMailItem
         mail.Subject = subject
+        if to:
+            mail.To = to
+        if cc:
+            mail.CC = cc
         img_path = _get_risco_sacado_logo_path()
         attachment = mail.Attachments.Add(img_path)
         try:
@@ -888,6 +895,118 @@ INVERTIDO_TRADER_POR_CLIENTE = {
     "Posto Timbozao Itaperuna": "Thiago",
     "Posto Pioneiro":           "Thiago",
 }
+
+
+# Destinatários (PARA/CC) por cliente/grupo — Risco Sacado Invertido.
+# Mesmo casamento tolerante de nome usado no trader (aliases + palavras-chave).
+INVERTIDO_EMAILS_POR_CLIENTE = {
+    "Transdourada": {
+        "para": [
+            "riscosacadobr@vibraenergia.com.br", "cleomar@vibraenergia.com.br",
+            "cecilia.bezerra@grupogdias.com.br", "antonio.noboa@grupogdias.com.br",
+            "elisconceicao@vibraenergia.com.br", "cleomar@vibraenergia.com.br",
+        ],
+        "cc": [
+            "renato.alves-antonio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
+            "alana.ferreira@mailer.com.br", "allan.palotti-silva@mailer.com.br",
+            "isadora.silv@mailer.com.br", "simone.lavinio@itau-unibanco.com.br",
+            "mesarecebiveis.mm@itaubba.com", "LiberacaoMMMN@correio.itau.com.br",
+            "silvia.alm@mailer.com.br", "julia.garai-andrade@mailer.com.br",
+            "milena.oshiro@mailer.com.br", "caio.farinha@mailer.com.br",
+            "geovana.andrade-silva@mailer.com.br",
+        ],
+    },
+    "RPB": {
+        "para": [
+            "elisconceicao@vibraenergia.com.br", "rodrigo@rederpb.com.br",
+            "riscosacadobr@vibraenergia.com.br",
+        ],
+        "cc": [
+            "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
+            "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
+            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
+            "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
+            "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
+            "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
+            "allan.palotti-silva@mailer.com.br",
+        ],
+    },
+    "Mirian Varzea": {
+        "para": ["elisconceicao@vibraenergia.com.br", "riscosacadobr@vibraenergia.com.br"],
+        "cc": [
+            "simone.lavinio@itau-unibanco.com.br", "milena.oshiro@mailer.com.br",
+            "julia.garai-andrade@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
+            "alana.ferreira@mailer.com.br", "caio.farinha@mailer.com.br",
+            "allan.palotti-silva@mailer.com.br", "LiberacaoMMMN@correio.itau.com.br",
+            "rosemeire-fatima.santos@itau-unibanco.com.br", "mesarecebiveis.mm@itaubba.com",
+            "renato.alves-antonio@itau-unibanco.com.br", "silvia.alm@mailer.com.br",
+            "isadora.silv@mailer.com.br",
+        ],
+    },
+    "Petrocal": {
+        "para": [
+            "elisconceicao@vibraenergia.com.br", "paulo@petrocal.com.br",
+            "mireille@petrocal.com.br", "financeiro@petrocal.com.br",
+            "marcelo.veloso@petrocal.com.br", "riscosacadobr@vibraenergia.com.br",
+        ],
+        "cc": [
+            "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
+            "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
+            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
+            "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
+            "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
+            "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
+            "allan.palotti-silva@mailer.com.br",
+        ],
+    },
+    "Posto Sapucaia": {
+        "para": [
+            "elisconceicao@vibraenergia.com.br", "mairyanne@redetimbozao.com.br",
+            "riscosacadobr@vibraenergia.com.br",
+        ],
+        "cc": [
+            "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
+            "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
+            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
+            "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
+            "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
+            "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
+            "allan.palotti-silva@mailer.com.br",
+        ],
+    },
+}
+# Clientes "espelho" (Mirian Cuiaba, PetroMix/PetroVel, postos da rede
+# Timbozão) usam o mesmo destinatário do cliente "mãe" — reaproveita
+# MIRROR_CLIENTS, já usado para o limite compartilhado.
+
+
+def get_emails_por_cliente(nome_sacado: str) -> dict:
+    """Retorna {"para": [...], "cc": [...]} para o cliente (Risco Sacado
+    Invertido), ou listas vazias se não houver mapeamento. Usa o mesmo
+    casamento tolerante (aliases + palavras-chave) do trader/prazo, e
+    também resolve clientes-espelho para o destinatário do cliente-mãe."""
+    vazio = {"para": [], "cc": []}
+    if not nome_sacado:
+        return vazio
+    key = _normalize_sacado_key(nome_sacado)
+
+    def _lookup(nome):
+        k = _normalize_sacado_key(nome)
+        for cliente, emails in INVERTIDO_EMAILS_POR_CLIENTE.items():
+            if _normalize_sacado_key(cliente) == k:
+                return emails
+        for cliente, emails in INVERTIDO_EMAILS_POR_CLIENTE.items():
+            if _invertido_sacado_matches(nome, cliente):
+                return emails
+        return None
+
+    encontrado = _lookup(nome_sacado)
+    if encontrado is None:
+        for espelho, mae in MIRROR_CLIENTS.items():
+            if _normalize_sacado_key(espelho) == key or _invertido_sacado_matches(nome_sacado, espelho):
+                encontrado = _lookup(mae)
+                break
+    return encontrado or vazio
 
 
 def get_trader_por_cliente(nome_sacado: str) -> str:
@@ -7103,6 +7222,17 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                  font=("Segoe UI", 9, "bold"), wraplength=170,
                  justify="center").pack()
 
+        doc_sacado_card = group.get("doc_sacado") or ""
+        ja_hoje = None
+        if doc_sacado_card:
+            try:
+                ja_hoje = HistoricoOperacoesData.get().ja_confirmado_hoje(doc_sacado_card)
+            except Exception:
+                ja_hoje = None
+        if ja_hoje:
+            tk.Label(body, text=f"✓ Confirmado hoje às {ja_hoje['data_hora'][11:16]}",
+                     bg=bg, fg=C["ok"], font=("Segoe UI", 7, "bold")).pack(pady=(4, 0))
+
         info = tk.Frame(body, bg=bg)
         info.pack(pady=(10, 0), fill="x")
         liquido, completo = self._calc_valor_liquido_group(group)
@@ -7524,6 +7654,9 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             pad, text="", bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9))
         self._detail_sub_lbl.pack(anchor="w", pady=(8, 0))
 
+        self._detail_status_lbl = tk.Label(
+            pad, text="", bg=C["surface"], fg=C["ok"], font=("Segoe UI", 9, "bold"))
+
         tk.Label(
             pad,
             text=("Inclua notas excluídas na triagem ou exclua notas que não devem "
@@ -7655,7 +7788,10 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                     "valor_raw": n["valor"], "valor_liquido": n["valor_liquido"]}
                    for n in incluidas],
             taxa_str=payload["taxa_str"])
-        return {"ok": True, "subject": subject, "html": html}
+        emails = get_emails_por_cliente(nome_sacado)
+        to = "; ".join(emails["para"])
+        cc = "; ".join(emails["cc"])
+        return {"ok": True, "subject": subject, "html": html, "to": to, "cc": cc}
 
     def _confirmar_operacao(self, group):
         """Grava no histórico (SQLite) a confirmação do montante de um
@@ -7804,6 +7940,17 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             arquivo_origem=arquivo,
             notas=payload["notas"])
 
+        try:
+            if (self._detail_overlay is not None
+                    and _normalize_sacado_key(self._detail_nome) == _normalize_sacado_key(group["nome_sacado"])):
+                self._render_detalhes_list()
+        except Exception:
+            pass
+        try:
+            self._rebuild_group_cards()
+        except Exception:
+            pass
+
         montante_fmt = _fmt_brl(payload["montante_total"])
         liquido_fmt = _fmt_brl(payload["liquido_total"])
         spread_fmt = f", spread {spread_str}%" if spread_str else ""
@@ -7836,7 +7983,8 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                 f"{group['nome_sacado']}: {result['reason']}.")
             return
         try:
-            enviar_email_outlook_risco_sacado(result["subject"], result["html"])
+            enviar_email_outlook_risco_sacado(
+                result["subject"], result["html"], to=result["to"], cc=result["cc"])
         except Exception as e:
             messagebox.showerror("Erro ao abrir e-mail", str(e))
 
@@ -7858,7 +8006,8 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                 pulados.append(f"{group['nome_sacado']} — {result['reason']}")
                 continue
             try:
-                enviar_email_outlook_risco_sacado(result["subject"], result["html"])
+                enviar_email_outlook_risco_sacado(
+                    result["subject"], result["html"], to=result["to"], cc=result["cc"])
                 enviados.append(group["nome_sacado"])
             except Exception as e:
                 pulados.append(f"{group['nome_sacado']} — erro: {e}")
@@ -7889,6 +8038,22 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         if excluidas:
             resumo += f" · {len(excluidas)} excluída(s)"
         self._detail_sub_lbl.configure(text=resumo)
+
+        doc_sacado = self._detail_doc_sacado()
+        ja = None
+        try:
+            ja = HistoricoOperacoesData.get().ja_confirmado_hoje(doc_sacado) if doc_sacado else None
+        except Exception:
+            ja = None
+        if ja:
+            hora = ja["data_hora"][11:16]
+            self._detail_status_lbl.configure(
+                text=f"✓ Confirmado hoje às {hora} — montante {_fmt_brl(Decimal(ja['montante_total']))}",
+                fg=C["ok"])
+            self._detail_status_lbl.pack(anchor="w", pady=(4, 0))
+        else:
+            self._detail_status_lbl.configure(text="")
+            self._detail_status_lbl.pack_forget()
 
         def _nota_card(op, included):
             item = tk.Frame(list_outer, bg=C["surface2"],
