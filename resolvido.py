@@ -745,6 +745,7 @@ def build_risco_sacado_email_html(sacado_nome: str, sacado_cnpj: str,
 </table>
 <p>&nbsp;</p>
 <p>&quot;Operação é paga ao Fornecedor na conta indicada.</p>
+<p>Banco Itaú Unibanco S.A - Agência 0911 / Conta 11863-6.&quot;</p>
 <p>Lembrando que operações antecipadas/pagas não são passíveis de cancelamento. No bankline terá acesso as notas antecipadas através da Rota - Mais Serviços - Consulta de Notas Negociadas</p>
 <p>&nbsp;</p>
 <p><span style="font-size:16.5pt;font-family:'Itau Display',serif;color:#9A9A9A;font-weight:bold">Bons Negócios,</span></p>
@@ -7779,7 +7780,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         incluidas = [n for n in payload["notas"] if n["incluida"]]
         nome_sacado = group["nome_sacado"]
-        subject = f"RISCO SACADO INVERTIDO - {nome_sacado.upper()}"
+        subject = f"RISCO SACADO INVERTIDO - {nome_sacado.upper()} x VIBRA ENERGIA SA"
         html = build_risco_sacado_email_html(
             sacado_nome=nome_sacado.upper(),
             sacado_cnpj=payload["doc_sacado"],
