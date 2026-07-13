@@ -1,7 +1,7 @@
 import os, sys, re, random, struct, tkinter as tk, threading, time, tempfile, shutil, webbrowser, ctypes, json as _json_mod, uuid as _uuid_mod, queue, base64, sqlite3, io
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from tkinter import ttk, filedialog, messagebox, font as tkfont
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 try:
     import pdfplumber
@@ -558,8 +558,27 @@ def _invertido_check_valor(valor_raw: Decimal) -> str | None:
     return None
 
 
-def _invertido_check_prazo(nome_sacado: str, prazo) -> str | None:
+def _invertido_check_prazo(nome_sacado: str, prazo, cnpj_sacado: str = "") -> str | None:
     days = _invertido_parse_prazo_days(prazo)
+
+    # 1) Prazo cadastrado no Depara para este cliente tem prioridade sobre
+    # as regras antigas fixas por nome.
+    prazo_depara = TaxasData.get().get_prazo(cnpj_sacado) if cnpj_sacado else None
+    if prazo_depara:
+        if days is None:
+            return "Prazo ausente ou inválido"
+        minimo = prazo_depara.get("min")
+        esperado = prazo_depara.get("esperado")
+        maximo = prazo_depara.get("max")
+        if minimo is not None and days < minimo:
+            return (f"Prazo de {days} dias muito abaixo do esperado "
+                    f"({esperado} dias — cadastrado no Depara)")
+        if maximo is not None and days > maximo:
+            return (f"Prazo de {days} dias muito acima do esperado "
+                    f"({esperado} dias — cadastrado no Depara)")
+        return None
+
+    # 2) Sem prazo no Depara: fallback nas regras fixas antigas por nome.
     if days is None:
         for rule_name in list(INVERTIDO_PRAZO_MAX) + list(INVERTIDO_PRAZO_EXPECTED):
             if _invertido_sacado_matches(nome_sacado, rule_name):
@@ -596,7 +615,8 @@ def _invertido_collect_alerts(ops: list) -> list:
         val_msg = _invertido_check_valor(op.get("valor_raw", Decimal("0")))
         if val_msg:
             motivos.append(val_msg)
-        prazo_msg = _invertido_check_prazo(op.get("nome_sacado"), op.get("prazo"))
+        prazo_msg = _invertido_check_prazo(op.get("nome_sacado"), op.get("prazo"),
+                                            cnpj_sacado=only_digits(op.get("doc_sacado") or ""))
         if prazo_msg:
             motivos.append(prazo_msg)
         if motivos:
@@ -739,9 +759,12 @@ _TD_STYLE = ("border:1pt solid #FAF7F5;padding:4pt;font-family:'Itau Display',se
              "font-size:7.5pt;color:#333333;text-align:center")
 
 
-def enviar_email_outlook_risco_sacado(subject: str, html_body: str):
+def enviar_email_outlook_risco_sacado(subject: str, html_body: str,
+                                       to: str = "", cc: str = ""):
     """Abre um popup do Outlook (sem enviar automaticamente) já preenchido
-    com título, corpo e imagem embutida, para revisão e envio manual."""
+    com título, corpo, destinatários (To/CC) e imagem embutida, para
+    revisão e envio manual. `to`/`cc` já vêm formatados como
+    "email; email; email"."""
     if not WIN32_OK:
         raise RuntimeError(
             "Integração com Outlook (win32com) não está disponível neste ambiente.")
@@ -756,6 +779,10 @@ def enviar_email_outlook_risco_sacado(subject: str, html_body: str):
         outlook = win32.Dispatch("Outlook.Application")
         mail = outlook.CreateItem(0)  # olMailItem
         mail.Subject = subject
+        if to:
+            mail.To = to
+        if cc:
+            mail.CC = cc
         img_path = _get_risco_sacado_logo_path()
         attachment = mail.Attachments.Add(img_path)
         try:
@@ -868,6 +895,118 @@ INVERTIDO_TRADER_POR_CLIENTE = {
     "Posto Timbozao Itaperuna": "Thiago",
     "Posto Pioneiro":           "Thiago",
 }
+
+
+# Destinatários (PARA/CC) por cliente/grupo — Risco Sacado Invertido.
+# Mesmo casamento tolerante de nome usado no trader (aliases + palavras-chave).
+INVERTIDO_EMAILS_POR_CLIENTE = {
+    "Transdourada": {
+        "para": [
+            "riscosacadobr@vibraenergia.com.br", "cleomar@vibraenergia.com.br",
+            "cecilia.bezerra@grupogdias.com.br", "antonio.noboa@grupogdias.com.br",
+            "elisconceicao@vibraenergia.com.br", "cleomar@vibraenergia.com.br",
+        ],
+        "cc": [
+            "renato.alves-antonio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
+            "alana.ferreira@mailer.com.br", "allan.palotti-silva@mailer.com.br",
+            "isadora.silv@mailer.com.br", "simone.lavinio@itau-unibanco.com.br",
+            "mesarecebiveis.mm@itaubba.com", "LiberacaoMMMN@correio.itau.com.br",
+            "silvia.alm@mailer.com.br", "julia.garai-andrade@mailer.com.br",
+            "milena.oshiro@mailer.com.br", "caio.farinha@mailer.com.br",
+            "geovana.andrade-silva@mailer.com.br",
+        ],
+    },
+    "RPB": {
+        "para": [
+            "elisconceicao@vibraenergia.com.br", "rodrigo@rederpb.com.br",
+            "riscosacadobr@vibraenergia.com.br",
+        ],
+        "cc": [
+            "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
+            "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
+            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
+            "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
+            "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
+            "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
+            "allan.palotti-silva@mailer.com.br",
+        ],
+    },
+    "Mirian Varzea": {
+        "para": ["elisconceicao@vibraenergia.com.br", "riscosacadobr@vibraenergia.com.br"],
+        "cc": [
+            "simone.lavinio@itau-unibanco.com.br", "milena.oshiro@mailer.com.br",
+            "julia.garai-andrade@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
+            "alana.ferreira@mailer.com.br", "caio.farinha@mailer.com.br",
+            "allan.palotti-silva@mailer.com.br", "LiberacaoMMMN@correio.itau.com.br",
+            "rosemeire-fatima.santos@itau-unibanco.com.br", "mesarecebiveis.mm@itaubba.com",
+            "renato.alves-antonio@itau-unibanco.com.br", "silvia.alm@mailer.com.br",
+            "isadora.silv@mailer.com.br",
+        ],
+    },
+    "Petrocal": {
+        "para": [
+            "elisconceicao@vibraenergia.com.br", "paulo@petrocal.com.br",
+            "mireille@petrocal.com.br", "financeiro@petrocal.com.br",
+            "marcelo.veloso@petrocal.com.br", "riscosacadobr@vibraenergia.com.br",
+        ],
+        "cc": [
+            "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
+            "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
+            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
+            "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
+            "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
+            "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
+            "allan.palotti-silva@mailer.com.br",
+        ],
+    },
+    "Posto Sapucaia": {
+        "para": [
+            "elisconceicao@vibraenergia.com.br", "mairyanne@redetimbozao.com.br",
+            "riscosacadobr@vibraenergia.com.br",
+        ],
+        "cc": [
+            "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
+            "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
+            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
+            "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
+            "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
+            "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
+            "allan.palotti-silva@mailer.com.br",
+        ],
+    },
+}
+# Clientes "espelho" (Mirian Cuiaba, PetroMix/PetroVel, postos da rede
+# Timbozão) usam o mesmo destinatário do cliente "mãe" — reaproveita
+# MIRROR_CLIENTS, já usado para o limite compartilhado.
+
+
+def get_emails_por_cliente(nome_sacado: str) -> dict:
+    """Retorna {"para": [...], "cc": [...]} para o cliente (Risco Sacado
+    Invertido), ou listas vazias se não houver mapeamento. Usa o mesmo
+    casamento tolerante (aliases + palavras-chave) do trader/prazo, e
+    também resolve clientes-espelho para o destinatário do cliente-mãe."""
+    vazio = {"para": [], "cc": []}
+    if not nome_sacado:
+        return vazio
+    key = _normalize_sacado_key(nome_sacado)
+
+    def _lookup(nome):
+        k = _normalize_sacado_key(nome)
+        for cliente, emails in INVERTIDO_EMAILS_POR_CLIENTE.items():
+            if _normalize_sacado_key(cliente) == k:
+                return emails
+        for cliente, emails in INVERTIDO_EMAILS_POR_CLIENTE.items():
+            if _invertido_sacado_matches(nome, cliente):
+                return emails
+        return None
+
+    encontrado = _lookup(nome_sacado)
+    if encontrado is None:
+        for espelho, mae in MIRROR_CLIENTS.items():
+            if _normalize_sacado_key(espelho) == key or _invertido_sacado_matches(nome_sacado, espelho):
+                encontrado = _lookup(mae)
+                break
+    return encontrado or vazio
 
 
 def get_trader_por_cliente(nome_sacado: str) -> str:
@@ -1536,6 +1675,7 @@ FRAME_LABELS = {
     "LimitesInvertido":  "Limites Invertido",
     "AnalisarOperacoes": "Analisar Operações",
     "TaxasInvertido":    "Taxas (Depara)",
+    "Pipeline":          "Pipeline",
 }
 
 
@@ -2263,6 +2403,7 @@ class Sidebar(tk.Frame):
         ("Share",             "⊕",  "Cadastro Share"),
         ("BPM",               "⚡",  "BPM"),
         ("OperacoesInvertido","⬡",  "Operações Invertido"),
+        ("Pipeline",          "◫",  "Pipeline"),
     ]
 
     def __init__(self, parent, controller, **kwargs):
@@ -2907,10 +3048,27 @@ class TaxasData:
         return self._taxas.get(cnpj)
 
     def set_taxa(self, cnpj, valor_str):
+        prazo_existente = self._taxas.get(cnpj, {}).get("prazo")
         self._taxas[cnpj] = {
             "taxa": valor_str,
             "validade_mes": _mes_atual_key(),
         }
+        if prazo_existente is not None:
+            self._taxas[cnpj]["prazo"] = prazo_existente
+        return self.save()
+
+    def get_prazo(self, cnpj):
+        """Retorna {'min':int,'esperado':int,'max':int} ou None se o
+        cliente não tiver prazo cadastrado no Depara. Não tem validade
+        mensal — uma vez definido, vale até ser alterado manualmente."""
+        info = self._taxas.get(cnpj)
+        if not info:
+            return None
+        return info.get("prazo")
+
+    def set_prazo(self, cnpj, minimo, esperado, maximo):
+        entry = self._taxas.setdefault(cnpj, {})
+        entry["prazo"] = {"min": int(minimo), "esperado": int(esperado), "max": int(maximo)}
         return self.save()
 
     def is_vigente(self, cnpj):
@@ -2933,32 +3091,6 @@ CURVA_SPOT_PATH = (
     r"\\bbaprod3\fo\diretoria de produtos ativos\ativos em reais\risco sacado"
     r"\cotacoes\curva_diaria.xls"
 )
-
-
-def _parse_taxa_pct(value):
-    """Normaliza a taxa da curva ('Tomar/Compr') para um Decimal em escala
-    percentual (ex.: 14.144 significando 14,144% a.a.), aceitando:
-    - string com vírgula e '%' (ex. "14,144%")
-    - número já em % (ex. 14.144)
-    - fração do Excel (ex. 0.14144), convertida multiplicando por 100
-    """
-    if value is None or value == "":
-        return None
-    if isinstance(value, str):
-        s = value.strip().replace("%", "").replace(",", ".")
-        try:
-            num = Decimal(s)
-        except Exception:
-            return None
-        return num
-    if isinstance(value, (int, float)):
-        num = Decimal(str(value))
-        # Se vier como fração do Excel (formatação de célula em %),
-        # valores típicos de DI ficam entre 0 e ~1 (ex. 0.14144 = 14,144%).
-        if num < 1:
-            num = num * 100
-        return num
-    return None
 
 
 class CurvaSpotData:
@@ -2999,31 +3131,30 @@ class CurvaSpotData:
             self._schedule_retry()
 
     def _try_load(self):
-        # Layout real (Nº, Início, Vencimento, DC, DC, DU, Tomar/Compr):
-        # col2=Vencimento, col3=DC, col5=DU, col6=Taxa (Funding, % a.a.).
-        # A linha de cabeçalho (e portanto as datas de início/vencimento)
-        # é sempre localizada dinamicamente — nunca fixada — pois varia a
-        # cada geração do arquivo de rede.
+        # Layout real confirmado no arquivo de rede (planilha "curva_diaria.xls"):
+        # linha 0 = título solto ("252 c/ caixa"), linha 1 (0-based) = cabeçalho
+        # ("Nº","Início","Vencimento","DC","DC","DU","Tomar Compr","Curva s/ cx",
+        # "Dar","Spread"), dados começam na linha 2 (0-based).
+        # Colunas (0-based): D=3 Vencimento, F=5 DC, G=6 DU, J=9 Dar (=Funding).
+        # NÃO usar o layout do PDF de referência como fonte — o PDF corta
+        # colunas por largura de página e não reflete o .xls real.
         if not XLRD_OK or not os.path.isfile(CURVA_SPOT_PATH):
             self._available = False
             return
         try:
             wb = xlrd.open_workbook(CURVA_SPOT_PATH, logfile=io.StringIO())
             ws = wb.sheet_by_index(0)
-            start_row = next(
-                (r + 1 for r in range(min(ws.nrows, 20))
-                 if "vencimento" in str(ws.cell_value(r, 2)).strip().lower()),
-                2)
+            start_row = 2  # pula título (linha 0) e cabeçalho (linha 1)
             rows = {}
             for r in range(start_row, min(ws.nrows, start_row + 150)):
                 try:
-                    venc = _parse_curva_data(ws.cell_value(r, 2), wb.datemode)
+                    venc = _parse_curva_data(ws.cell_value(r, 3), wb.datemode)
                     if venc is None:
                         continue
-                    du = int(float(ws.cell_value(r, 5)))
-                    dc = int(float(ws.cell_value(r, 3)))
-                    funding = _parse_taxa_pct(ws.cell_value(r, 6))
-                    if funding is None:
+                    dc = int(float(ws.cell_value(r, 5)))
+                    du = int(float(ws.cell_value(r, 6)))
+                    funding = _parse_taxa_pct(ws.cell_value(r, 9))
+                    if funding is None or du <= 0 or dc <= 0:
                         continue
                 except Exception:
                     continue
@@ -3057,19 +3188,26 @@ def _parse_curva_data(value, datemode):
 
 
 def _parse_taxa_pct(value):
-    """Normaliza a taxa 'Tomar/Compr' para Decimal em escala percentual
-    (ex.: 14.144 = 14,144% a.a.), aceitando string com vírgula/'%',
-    número já em % ou fração do Excel (< 1, multiplicada por 100)."""
+    """Normaliza a taxa da curva (coluna 'Dar'/Funding do spread.py
+    original) para FRAÇÃO (ex.: 0.14144 = 14,144% a.a.), pois a fórmula
+    original faz `Funding + 1` diretamente, sem dividir por 100. Aceita
+    string com vírgula/'%' (ex. "14,144%"), número já em fração do Excel
+    (ex. 0.14144) ou número em escala percentual (ex. 14.144)."""
     if value in (None, ""):
         return None
     if isinstance(value, str):
+        s = value.strip()
+        has_pct = "%" in s
         try:
-            return Decimal(value.strip().replace("%", "").replace(",", "."))
+            num = Decimal(s.replace("%", "").replace(",", "."))
         except Exception:
             return None
+        if has_pct or num > 1:
+            num = num / 100
+        return num
     if isinstance(value, (int, float)):
         num = Decimal(str(value))
-        return num * 100 if num < 1 else num
+        return num / 100 if num > 1 else num
     return None
 
 
@@ -3130,9 +3268,15 @@ def calcular_spread_sacado(notas, taxa_alvo_str):
     def _taxa_media(spread_pct):
         num = den = Decimal("0")
         for L in linhas:
-            funding = L["Funding"] / Decimal("100") + 1
+            if not L["DC"] or not L["DU"]:
+                continue  # ponto sem prazo válido (DC/DU = 0) não entra na média
+            funding = L["Funding"] + 1
             base = funding * (spread_pct / Decimal("100") + 1)
+            if base <= 0:
+                continue
             taxa_efetiva = float(base) ** (L["DU"] / 252)
+            if taxa_efetiva == 0:
+                continue
             taxa_am = round(((taxa_efetiva - 1) / taxa_efetiva) / L["DC"] * 3000, 4)
             num += L["valor"] * L["DC"] * Decimal(str(taxa_am))
             den += L["valor"] * L["DC"]
@@ -3172,7 +3316,7 @@ def calcular_spread_sacado(notas, taxa_alvo_str):
 
 HISTORICO_DB_PATH = os.path.join(
     os.path.dirname(SHARED_TAXAS_PATH), "historico_operacoes.db")
-HISTORICO_SCHEMA_VERSION = 1
+HISTORICO_SCHEMA_VERSION = 2
 HISTORICO_PENDING_LOCAL_PATH = os.path.join(
     tempfile.gettempdir(), "historico_pendente_local.jsonl")
 HISTORICO_PENDING_REJEITADAS_PATH = os.path.join(
@@ -3249,15 +3393,44 @@ class HistoricoOperacoesData:
         return result
 
     def _connect(self):
-        conn = sqlite3.connect(HISTORICO_DB_PATH, timeout=8)
-        conn.execute("PRAGMA journal_mode=WAL")
+        # WAL não é suportado com segurança em compartilhamentos de rede
+        # (SMB/CIFS) — a própria documentação do SQLite recomenda não
+        # usá-lo nesses casos, pois depende de locks mapeados em memória
+        # que o protocolo de rede não garante corretamente entre máquinas
+        # diferentes. Isso causava "database is locked" / corrupção do
+        # arquivo -shm quando várias pessoas usavam o app ao mesmo tempo,
+        # o que aparecia para o usuário como "sem conexão com a rede".
+        # journal_mode padrão (DELETE) é o indicado pelo próprio SQLite
+        # para bancos em rede. timeout mais alto dá margem para locks
+        # breves de outro usuário gravando ao mesmo tempo.
+        conn = sqlite3.connect(HISTORICO_DB_PATH, timeout=20)
+        conn.execute("PRAGMA journal_mode=DELETE")
         return conn
+
+    _migracao_spread_feita = False  # nível de classe: uma vez por processo
+
+    def _backup_antes_da_migracao(self):
+        """Copia o .db atual para um arquivo de backup na mesma pasta,
+        uma única vez, antes de alterar o schema pela primeira vez neste
+        processo. Nunca apaga ou sobrescreve dados existentes — apenas
+        adiciona um arquivo extra ao lado do original."""
+        try:
+            if not os.path.isfile(HISTORICO_DB_PATH):
+                return  # banco novo, nada para arquivar
+            backup_path = HISTORICO_DB_PATH + ".backup-pre-spread"
+            if os.path.isfile(backup_path):
+                return  # já existe backup de uma execução anterior; não repete
+            shutil.copy2(HISTORICO_DB_PATH, backup_path)
+        except Exception as e:
+            print(f"[historico] falha ao criar backup pré-migração: {e}", file=sys.stderr)
 
     def _ensure_schema(self):
         if not self._network_reachable():
             self._available = False
             return
         try:
+            if not HistoricoOperacoesData._migracao_spread_feita:
+                self._backup_antes_da_migracao()
             conn = self._connect()
             conn.execute("""CREATE TABLE IF NOT EXISTS schema_info (
                                 key TEXT PRIMARY KEY, value TEXT)""")
@@ -3275,8 +3448,24 @@ class HistoricoOperacoesData:
                                 montante_total  TEXT NOT NULL,
                                 liquido_total   TEXT NOT NULL,
                                 taxa            TEXT,
+                                spread          TEXT,
                                 arquivo_origem  TEXT
                             )""")
+            # Migração: bases criadas antes desta versão não têm a coluna
+            # 'spread' (CREATE TABLE IF NOT EXISTS não adiciona colunas em
+            # tabela já existente). Operações confirmadas antes desta
+            # versão ficam com spread NULL — não há como calcular
+            # retroativamente, e não é esse o objetivo. Só as confirmações
+            # feitas a partir de agora passam a gravar o spread.
+            # Roda só uma vez por processo (não a cada retry de 30s) para
+            # reduzir concorrência de ALTER TABLE entre várias máquinas
+            # acessando o mesmo arquivo de rede ao mesmo tempo.
+            if not HistoricoOperacoesData._migracao_spread_feita:
+                try:
+                    conn.execute("ALTER TABLE operacoes ADD COLUMN spread TEXT")
+                except Exception:
+                    pass  # coluna já existe (outro processo já migrou) — ok
+                HistoricoOperacoesData._migracao_spread_feita = True
             conn.execute("""CREATE TABLE IF NOT EXISTS notas (
                                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                                 operacao_id     TEXT NOT NULL,
@@ -3319,7 +3508,10 @@ class HistoricoOperacoesData:
             conn.commit()
             conn.close()
             self._available = True
-        except Exception:
+        except Exception as e:
+            # Não silenciar: erro de lock/schema é diferente de "sem rede"
+            # e esconder isso foi o que tornou o problema difícil de achar.
+            print(f"[historico] _ensure_schema falhou: {e}", file=sys.stderr)
             self._available = False
 
     # ── Leitura ─────────────────────────────────────────────────────────
@@ -3437,9 +3629,12 @@ class HistoricoOperacoesData:
     # ── Escrita ─────────────────────────────────────────────────────────
     def registrar_operacao(self, *, cliente, cnpj_sacado, cnpj_cedente, usuario,
                             modo, trader, montante_total, liquido_total, taxa,
-                            arquivo_origem, notas):
+                            arquivo_origem, notas, spread=None):
         """Grava uma operação confirmada + notas (append-only). Se a rede
         estiver indisponível, guarda numa fila local e sincroniza depois.
+        `spread` é opcional (string) — quando fornecido, é o spread (%)
+        validado no momento da confirmação, calculado sobre o mesmo
+        conjunto de notas/taxa confirmado nesta operação.
         Retorna (ok: bool, op_id: str) — ok=False indica que ficou apenas
         na fila local aguardando reconexão, não que a confirmação falhou."""
         op_id = str(_uuid_mod.uuid4())
@@ -3451,7 +3646,9 @@ class HistoricoOperacoesData:
             "data_dia": now.date().isoformat(), "usuario": usuario, "modo": modo,
             "trader": trader, "status": "confirmado",
             "montante_total": str(montante_total), "liquido_total": str(liquido_total),
-            "taxa": taxa, "arquivo_origem": arquivo_origem,
+            "taxa": taxa,
+            "spread": (str(spread) if spread is not None else None),
+            "arquivo_origem": arquivo_origem,
             "notas": [{"nf": n.get("nf"), "valor": str(n.get("valor")),
                        "data_vencimento": n.get("data_vencimento"),
                        "prazo_dias": n.get("prazo_dias"),
@@ -3470,35 +3667,53 @@ class HistoricoOperacoesData:
         if not self._network_reachable():
             self._available = False
             return False
-        try:
-            conn = self._connect()
-            conn.execute(
-                """INSERT OR IGNORE INTO operacoes
-                   (id, cliente, cnpj_sacado, cnpj_cedente, data_hora, data_dia,
-                    usuario, modo, trader, status, montante_total, liquido_total,
-                    taxa, arquivo_origem)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (payload["id"], payload["cliente"], payload["cnpj_sacado"],
-                 payload["cnpj_cedente"], payload["data_hora"], payload["data_dia"],
-                 payload["usuario"], payload["modo"], payload["trader"],
-                 payload["status"], payload["montante_total"],
-                 payload["liquido_total"], payload["taxa"], payload["arquivo_origem"]))
-            conn.executemany(
-                """INSERT INTO notas
-                   (operacao_id, nf, valor, data_vencimento, prazo_dias,
-                    valor_liquido, incluida)
-                   VALUES (?,?,?,?,?,?,?)""",
-                [(payload["id"], n.get("nf"), n.get("valor"), n.get("data_vencimento"),
-                  n.get("prazo_dias"), n.get("valor_liquido"),
-                  1 if n.get("incluida", True) else 0)
-                 for n in payload["notas"]])
-            conn.commit()
-            conn.close()
-            self._available = True
-            return True
-        except Exception:
-            self._available = False
-            return False
+        # Lock transitório ("database is locked") é esperado ocasionalmente
+        # num .db compartilhado por vários usuários — tenta mais algumas
+        # vezes com pequena espera antes de desistir e cair para a fila
+        # local, em vez de marcar a rede toda como indisponível de cara.
+        tentativas = 3
+        ultimo_erro = None
+        for tentativa in range(1, tentativas + 1):
+            try:
+                conn = self._connect()
+                conn.execute(
+                    """INSERT OR IGNORE INTO operacoes
+                       (id, cliente, cnpj_sacado, cnpj_cedente, data_hora, data_dia,
+                        usuario, modo, trader, status, montante_total, liquido_total,
+                        taxa, spread, arquivo_origem)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (payload["id"], payload["cliente"], payload["cnpj_sacado"],
+                     payload["cnpj_cedente"], payload["data_hora"], payload["data_dia"],
+                     payload["usuario"], payload["modo"], payload["trader"],
+                     payload["status"], payload["montante_total"],
+                     payload["liquido_total"], payload["taxa"], payload.get("spread"),
+                     payload["arquivo_origem"]))
+                conn.executemany(
+                    """INSERT INTO notas
+                       (operacao_id, nf, valor, data_vencimento, prazo_dias,
+                        valor_liquido, incluida)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    [(payload["id"], n.get("nf"), n.get("valor"), n.get("data_vencimento"),
+                      n.get("prazo_dias"), n.get("valor_liquido"),
+                      1 if n.get("incluida", True) else 0)
+                     for n in payload["notas"]])
+                conn.commit()
+                conn.close()
+                self._available = True
+                return True
+            except sqlite3.OperationalError as e:
+                ultimo_erro = e
+                if "locked" in str(e).lower() and tentativa < tentativas:
+                    time.sleep(0.5 * tentativa)
+                    continue
+                break
+            except Exception as e:
+                ultimo_erro = e
+                break
+        print(f"[historico] _write_payload falhou após {tentativas} tentativa(s): "
+              f"{ultimo_erro}", file=sys.stderr)
+        self._available = False
+        return False
 
     # ── Notas rejeitadas (alertas recusados na triagem) ────────────────────
     @staticmethod
@@ -3692,12 +3907,12 @@ class HistoricoOperacoesData:
                 cur = conn.execute(
                     f"""SELECT id, cliente, cnpj_sacado, cnpj_cedente, data_hora,
                                data_dia, usuario, modo, trader, status,
-                               montante_total, liquido_total, taxa, arquivo_origem
+                               montante_total, liquido_total, taxa, spread, arquivo_origem
                         FROM operacoes {where}
                         ORDER BY data_hora DESC""", params)
                 cols = ["id", "cliente", "cnpj_sacado", "cnpj_cedente", "data_hora",
                         "data_dia", "usuario", "modo", "trader", "status",
-                        "montante_total", "liquido_total", "taxa", "arquivo_origem"]
+                        "montante_total", "liquido_total", "taxa", "spread", "arquivo_origem"]
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]
                 conn.close()
             except Exception:
@@ -3727,7 +3942,7 @@ class HistoricoOperacoesData:
             rows.append({k: p.get(k) for k in
                          ["id", "cliente", "cnpj_sacado", "cnpj_cedente", "data_hora",
                           "data_dia", "usuario", "modo", "trader", "status",
-                          "montante_total", "liquido_total", "taxa", "arquivo_origem"]})
+                          "montante_total", "liquido_total", "taxa", "spread", "arquivo_origem"]})
         rows.sort(key=lambda r: r.get("data_hora") or "", reverse=True)
         return rows
 
@@ -5692,6 +5907,21 @@ class TaxasInvertidoFrame(tk.Frame):
                               font=("Segoe UI", 7, "bold"))
         status_lbl.pack(side="left")
 
+        prazo_info = self._data.get_prazo(cnpj) if disponivel else None
+        prazo_row = tk.Frame(body, bg=bg)
+        prazo_row.pack(fill="x", pady=(8, 0))
+        tk.Label(prazo_row, text="PRAZO", bg=bg, fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold"), width=6, anchor="w").pack(side="left")
+        if prazo_info:
+            prazo_txt = (f"{prazo_info['esperado']}d  "
+                         f"(min {prazo_info['min']} · máx {prazo_info['max']})")
+        else:
+            prazo_txt = "Não cadastrado"
+        prazo_lbl = tk.Label(prazo_row, text=prazo_txt, bg=bg,
+                             fg=C["ink"] if prazo_info else C["ink_faint"],
+                             font=("Segoe UI", 8), anchor="w")
+        prazo_lbl.pack(side="left", fill="x", expand=True)
+
         btn_row = tk.Frame(body, bg=bg)
         btn_row.pack(fill="x", pady=(12, 0))
         edit_btn = styled_button(
@@ -5702,9 +5932,17 @@ class TaxasInvertidoFrame(tk.Frame):
         if not disponivel:
             edit_btn.configure(state="disabled")
 
+        prazo_btn = styled_button(
+            btn_row, "Editar prazo" if prazo_info else "Definir prazo",
+            lambda n=nome, c=cnpj: self._open_prazo_dialog(n, c),
+            small=True)
+        prazo_btn.pack(side="left", padx=(6, 0))
+        if not disponivel:
+            prazo_btn.configure(state="disabled")
+
         self._cards[cnpj] = {
             "outer": outer, "taxa_lbl": taxa_lbl, "status_lbl": status_lbl,
-            "top_bar": top_bar,
+            "top_bar": top_bar, "prazo_lbl": prazo_lbl,
         }
 
     def _open_edit_dialog(self, nome, cnpj):
@@ -5775,14 +6013,86 @@ class TaxasInvertidoFrame(tk.Frame):
 
         entry.bind("<Return>", lambda _e: _salvar())
 
+    def _open_prazo_dialog(self, nome, cnpj):
+        if not self._data.is_available():
+            return
+        prazo_info = self._data.get_prazo(cnpj)
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Prazo — {nome}")
+        dlg.configure(bg=C["surface"])
+        dlg.geometry("380x340")
+        dlg.resizable(False, False)
+        dlg.grab_set()
 
-PERIODO_ATALHOS = [
-    ("7 dias",   7),
-    ("1 mês",    30),
-    ("3 meses",  90),
-    ("6 meses",  182),
-    ("12 meses", 365),
-]
+        pad = tk.Frame(dlg, bg=C["surface"], padx=24, pady=20)
+        pad.pack(fill="both", expand=True)
+
+        tk.Label(pad, text=nome, bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(pad, text=f"CNPJ {cnpj}", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 14))
+
+        tk.Label(pad, text="Prazo esperado, mínimo e máximo (dias) para este "
+                            "cliente. Usado apenas como referência para alertar "
+                            "notas fora da faixa na triagem de operações.",
+                 bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 8),
+                 wraplength=330, justify="left").pack(anchor="w")
+
+        campos = tk.Frame(pad, bg=C["surface"])
+        campos.pack(fill="x", pady=(14, 0))
+
+        def _campo(parent, label, valor_inicial):
+            col = tk.Frame(parent, bg=C["surface"])
+            col.pack(side="left", padx=(0, 12))
+            tk.Label(col, text=label, bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w")
+            var = tk.StringVar(value=valor_inicial)
+            entry = styled_entry(col, textvariable=var, width=7)
+            entry.configure(font=("Segoe UI", 12, "bold"))
+            entry.pack(anchor="w", pady=(4, 0))
+            return var, entry
+
+        min_var, min_entry = _campo(
+            campos, "MÍNIMO", str(prazo_info["min"]) if prazo_info else "")
+        esp_var, esp_entry = _campo(
+            campos, "ESPERADO", str(prazo_info["esperado"]) if prazo_info else "")
+        max_var, max_entry = _campo(
+            campos, "MÁXIMO", str(prazo_info["max"]) if prazo_info else "")
+        min_entry.focus_set()
+
+        err_lbl = tk.Label(pad, text="", bg=C["surface"], fg=C["err"],
+                           font=("Segoe UI", 8), wraplength=330, justify="left")
+        err_lbl.pack(anchor="w", pady=(12, 0))
+
+        def _salvar():
+            try:
+                minimo = int(min_var.get().strip())
+                esperado = int(esp_var.get().strip())
+                maximo = int(max_var.get().strip())
+            except ValueError:
+                err_lbl.configure(text="Preencha os três campos com números inteiros.")
+                return
+            if not (0 <= minimo <= esperado <= maximo):
+                err_lbl.configure(
+                    text="A ordem deve ser: mínimo ≤ esperado ≤ máximo (todos ≥ 0).")
+                return
+            ok = self._data.set_prazo(cnpj, minimo, esperado, maximo)
+            if not ok:
+                err_lbl.configure(
+                    text="Sem conexão com a rede. Não foi possível salvar agora.")
+                return
+            dlg.destroy()
+            self._refresh_network_state()
+
+        btn_row = tk.Frame(pad, bg=C["surface"])
+        btn_row.pack(fill="x", pady=(18, 0))
+        styled_button(btn_row, "Cancelar", dlg.destroy).pack(side="left")
+        styled_button(btn_row, "Salvar", _salvar, accent=True).pack(side="right")
+
+        dlg.bind("<Return>", lambda _e: _salvar())
+
 
 STATUS_LABELS = {
     "confirmado": "Enviado",
@@ -5808,6 +6118,190 @@ def _hist_fmt_hora(data_hora: str) -> str:
         return datetime.fromisoformat(data_hora).strftime("%d/%m/%Y %H:%M")
     except Exception:
         return data_hora or ""
+
+
+def _blend_hex(c1, c2, t):
+    """Mistura duas cores hex (#rrggbb) — usado para simular transparência
+    em preenchimentos de área no Canvas (que não suporta alpha nativo)."""
+    c1 = c1.lstrip("#"); c2 = c2.lstrip("#")
+    r1, g1, b1 = int(c1[0:2], 16), int(c1[2:4], 16), int(c1[4:6], 16)
+    r2, g2, b2 = int(c2[0:2], 16), int(c2[2:4], 16), int(c2[4:6], 16)
+    r = round(r1 + (r2 - r1) * t)
+    g = round(g1 + (g2 - g1) * t)
+    b = round(b1 + (b2 - b1) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _fmt_compact_brl(v):
+    v = float(v)
+    sign = "-" if v < 0 else ""
+    av = abs(v)
+    if av >= 1_000_000:
+        return f"{sign}R$ {av/1_000_000:.1f}M"
+    if av >= 1_000:
+        return f"{sign}R$ {av/1_000:.0f}k"
+    return f"{sign}R$ {av:.0f}"
+
+
+def _fmt_compact_pct(v):
+    return f"{float(v):.2f}%"
+
+
+class StockLineChart(tk.Canvas):
+    """Gráfico de linha/área no estilo terminal de bolsa: grid, eixo com
+    valores, preenchimento sob a série principal, crosshair com tooltip ao
+    passar o mouse, e indicador de variação (ponto inicial x final) no
+    canto superior direito."""
+
+    def __init__(self, parent, height=220, **kwargs):
+        super().__init__(parent, height=height, bg=C["surface"],
+                         highlightthickness=0, bd=0, **kwargs)
+        self._labels, self._series, self._colors, self._legend = [], [], [], []
+        self._y_fmt = _fmt_compact_brl
+        self._area_idx = 0
+        self._geom = None
+        self.bind("<Configure>", lambda _e: self._redraw())
+        self.bind("<Motion>", self._on_motion)
+        self.bind("<Leave>", lambda _e: (self.delete("hover"), None))
+
+    def set_data(self, labels, series, colors, legend=None, y_fmt=None, area_idx=0):
+        self._labels = labels
+        self._series = series
+        self._colors = colors
+        self._legend = legend or []
+        self._y_fmt = y_fmt or _fmt_compact_brl
+        self._area_idx = area_idx
+        self._redraw()
+
+    def _redraw(self, _e=None):
+        self.delete("all")
+        self._geom = None
+        w = max(self.winfo_width(), 1)
+        h = max(self.winfo_height(), 1)
+        has_data = self._labels and self._series and any(self._series)
+        if not has_data:
+            self.create_text(w / 2, h / 2, text="Sem dados no período",
+                             fill=C["ink_faint"], font=("Segoe UI", 9))
+            return
+
+        top_pad, bottom_pad, left_pad, right_pad = 26, 20, 8, 54
+        chart_w = max(w - left_pad - right_pad, 10)
+        chart_h = max(h - top_pad - bottom_pad, 10)
+        n = len(self._labels)
+
+        todos_vals = [v for serie in self._series for v in serie]
+        vmax = max(todos_vals) if todos_vals else 1
+        vmin = min(min(todos_vals), 0) if todos_vals else 0
+        if vmax == vmin:
+            vmax = vmin + 1
+        span = vmax - vmin
+
+        def X(i):
+            return left_pad + (i / max(n - 1, 1)) * chart_w if n > 1 else left_pad + chart_w / 2
+
+        def Y(v):
+            return top_pad + chart_h - ((v - vmin) / span) * chart_h
+
+        # grade horizontal + rótulos do eixo Y (4 faixas)
+        for k in range(5):
+            gy = top_pad + chart_h * k / 4
+            self.create_line(left_pad, gy, left_pad + chart_w, gy,
+                             fill=C["hair"], width=1)
+            gv = vmax - span * k / 4
+            self.create_text(left_pad + chart_w + 8, gy, text=self._y_fmt(gv),
+                             fill=C["ink_faint"], font=("Segoe UI", 7), anchor="w")
+
+        # legenda
+        lx = left_pad
+        for txt, color in zip(self._legend, self._colors):
+            self.create_oval(lx, 4, lx + 8, 12, fill=color, outline="")
+            self.create_text(lx + 12, 8, text=txt, fill=C["ink_muted"],
+                             font=("Segoe UI", 7), anchor="w")
+            lx += len(txt) * 6 + 26
+
+        # preenchimento de área sob a série principal
+        serie0 = self._series[self._area_idx] if self._series else []
+        if serie0 and n > 1:
+            base_color = self._colors[self._area_idx % len(self._colors)]
+            fill_color = _blend_hex(base_color, C["surface"], 0.82)
+            pts = [(X(i), Y(v)) for i, v in enumerate(serie0)]
+            poly = [left_pad, top_pad + chart_h]
+            for x, y in pts:
+                poly += [x, y]
+            poly += [left_pad + chart_w, top_pad + chart_h]
+            self.create_polygon(poly, fill=fill_color, outline="")
+
+        # linhas das séries
+        pontos_por_serie = []
+        for si, serie in enumerate(self._series):
+            color = self._colors[si % len(self._colors)]
+            pts = [(X(i), Y(v)) for i, v in enumerate(serie)]
+            pontos_por_serie.append(pts)
+            if len(pts) > 1:
+                flat = [c for xy in pts for c in xy]
+                self.create_line(*flat, fill=color, width=2, smooth=True,
+                                 splinesteps=8)
+            if n <= 40:
+                for x, y in pts:
+                    self.create_oval(x - 2.5, y - 2.5, x + 2.5, y + 2.5,
+                                     fill=color, outline="")
+
+        # rótulos do eixo X (amostrados p/ não poluir)
+        step = max(1, n // 8)
+        for i, label in enumerate(self._labels):
+            if i % step == 0 or i == n - 1:
+                self.create_text(X(i), top_pad + chart_h + 8, text=label,
+                                 fill=C["ink_faint"], font=("Segoe UI", 7), anchor="n")
+
+        # indicador de variação (primeiro x último ponto da série principal)
+        if serie0 and len(serie0) >= 2 and serie0[0] != 0:
+            delta_pct = (serie0[-1] - serie0[0]) / abs(serie0[0]) * 100
+            up = delta_pct >= 0
+            arrow = "▲" if up else "▼"
+            color = C["ok"] if up else C["err"]
+            self.create_text(left_pad + chart_w, 8,
+                             text=f"{arrow} {abs(delta_pct):.1f}%",
+                             fill=color, font=("Segoe UI", 8, "bold"), anchor="e")
+
+        self._geom = dict(left_pad=left_pad, top_pad=top_pad, chart_w=chart_w,
+                          chart_h=chart_h, n=n, vmin=vmin, span=span,
+                          pontos_por_serie=pontos_por_serie)
+
+    def _on_motion(self, event):
+        g = self._geom
+        self.delete("hover")
+        if not g or g["n"] == 0:
+            return
+        rel = (event.x - g["left_pad"]) / max(g["chart_w"], 1)
+        idx = round(rel * max(g["n"] - 1, 0))
+        idx = max(0, min(idx, g["n"] - 1))
+        if not (0 <= idx < len(self._labels)):
+            return
+        x = g["left_pad"] + (idx / max(g["n"] - 1, 1)) * g["chart_w"] if g["n"] > 1 \
+            else g["left_pad"] + g["chart_w"] / 2
+        self.create_line(x, g["top_pad"], x, g["top_pad"] + g["chart_h"],
+                         fill=C["ink_faint"], dash=(2, 2), tags="hover")
+
+        linhas = [self._labels[idx]]
+        for si, serie in enumerate(self._series):
+            if idx < len(serie):
+                nome = self._legend[si] if si < len(self._legend) else f"série {si+1}"
+                linhas.append(f"{nome}: {self._y_fmt(serie[idx])}")
+        texto = "\n".join(linhas)
+
+        tx = min(x + 10, self.winfo_width() - 8)
+        anchor = "nw" if x < self.winfo_width() - 120 else "ne"
+        if anchor == "ne":
+            tx = x - 10
+        ty = g["top_pad"] + 4
+        tid = self.create_text(tx, ty, text=texto, fill=C["ink"],
+                               font=("Segoe UI", 7), anchor=anchor, tags="hover")
+        bbox = self.bbox(tid)
+        if bbox:
+            pad = 4
+            self.create_rectangle(bbox[0]-pad, bbox[1]-pad, bbox[2]+pad, bbox[3]+pad,
+                                  fill=C["surface3"], outline=C["hair"], tags="hover")
+            self.tag_raise(tid)
 
 
 class MiniBarChart(tk.Canvas):
@@ -5938,12 +6432,12 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         self._filtro_clientes = set()
         self._filtro_trader = None
         self._filtro_status = None
-        self._filtro_periodo_dias = None
         self._filtro_de = None
         self._filtro_ate = None
         self._busca_var = tk.StringVar()
         self._loading = False
         self._reload_req = None
+        self._grafico_modo = "volume"
         self._init_ui_queue()
         self._build()
 
@@ -6040,36 +6534,126 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         placeholder.pack(side="left")
         styled_button(bar, "Buscar", self._reload, small=True).pack(side="left", padx=(6, 0))
 
+        periodo_row = tk.Frame(self, bg=C["bg"])
+        periodo_row.pack(fill="x", padx=32, pady=(8, 0))
+
+        tk.Label(periodo_row, text="DE", bg=C["bg"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(side="left")
+        self._data_de_var = tk.StringVar()
+        de_entry = styled_entry(periodo_row, textvariable=self._data_de_var, width=11)
+        de_entry.pack(side="left", padx=(6, 12))
+
+        tk.Label(periodo_row, text="ATÉ", bg=C["bg"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(side="left")
+        self._data_ate_var = tk.StringVar()
+        ate_entry = styled_entry(periodo_row, textvariable=self._data_ate_var, width=11)
+        ate_entry.pack(side="left", padx=(6, 12))
+
+        self._bind_data_mask(de_entry, self._data_de_var)
+        self._bind_data_mask(ate_entry, self._data_ate_var)
+
+        for e in (de_entry, ate_entry):
+            e.bind("<Return>", lambda _e: self._aplicar_periodo_datas())
+
+        styled_button(periodo_row, "Aplicar", self._aplicar_periodo_datas,
+                      accent=True, small=True).pack(side="left")
+        self._chip_todos = styled_button(periodo_row, "Tudo", self._limpar_periodo, small=True)
+        self._chip_todos.pack(side="left", padx=(6, 0))
+
+        tk.Label(periodo_row, text="  (digite apenas os números — dd/mm/aaaa; "
+                                    "deixe em branco para não limitar um dos lados)",
+                 bg=C["bg"], fg=C["ink_faint"], font=("Segoe UI", 7)).pack(side="left")
+
+        self._filtro_de = None
+        self._filtro_ate = None
         chips_row = tk.Frame(self, bg=C["bg"])
-        chips_row.pack(fill="x", padx=32, pady=(8, 0))
-        self._chip_btns = {}
-        for label, dias in PERIODO_ATALHOS:
-            b = styled_button(chips_row, label, lambda d=dias: self._set_periodo_atalho(d),
-                              small=True)
-            b.pack(side="left", padx=(0, 6))
-            self._chip_btns[dias] = b
-        self._chip_todos = styled_button(chips_row, "Tudo",
-                                          lambda: self._set_periodo_atalho(None), small=True)
-        self._chip_todos.pack(side="left", padx=(0, 6))
-        self._filtro_periodo_dias = "todos"
-        self._active_chip_dias = None
+        chips_row.pack(fill="x", padx=32, pady=(6, 0))
         self._filtro_ativo_lbl = tk.Label(chips_row, text="", bg=C["bg"], fg=C["ink_faint"],
                                           font=("Segoe UI", 8))
-        self._filtro_ativo_lbl.pack(side="left", padx=(10, 0))
+        self._filtro_ativo_lbl.pack(side="left")
 
-    def _set_periodo_atalho(self, dias):
-        self._active_chip_dias = dias
-        for d, btn in self._chip_btns.items():
-            btn.configure(bg=(C["accent_dim"] if d == dias else C["surface2"]),
-                         fg=(C["accent"] if d == dias else C["ink_muted"]))
-        self._chip_todos.configure(bg=(C["accent_dim"] if dias is None else C["surface2"]),
-                                   fg=(C["accent"] if dias is None else C["ink_muted"]))
-        if dias is None:
-            self._filtro_de = None
-            self._filtro_ate = None
+    def _bind_data_mask(self, entry, var):
+        """Aplica máscara dd/mm/aaaa ao Entry: o usuário digita só números,
+        as barras são inseridas automaticamente após o dia e o mês, o
+        cursor é reposicionado corretamente após cada tecla (senão os
+        próximos dígitos entram no lugar errado), e não é possível
+        digitar mais que 8 dígitos (dd+mm+aaaa)."""
+
+        def _formatar(digits):
+            digits = digits[:8]
+            if len(digits) > 4:
+                return f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
+            if len(digits) > 2:
+                return f"{digits[:2]}/{digits[2:]}"
+            return digits
+
+        def _on_key(event):
+            # Deixa teclas de navegação/atalho passarem sem reformatar.
+            if event.keysym in ("Left", "Right", "Home", "End", "Tab",
+                                 "Shift_L", "Shift_R", "Delete"):
+                return
+            cursor_antes = entry.index(tk.INSERT)
+            raw = var.get()
+            digitos_antes_do_cursor = len(re.sub(r"\D", "", raw[:cursor_antes]))
+
+            digits = re.sub(r"\D", "", raw)[:8]
+            novo_texto = _formatar(digits)
+            if novo_texto != raw:
+                var.set(novo_texto)
+
+            # Recalcula onde o cursor deve ficar: logo após o mesmo número
+            # de dígitos que estavam antes dele, pulando as barras que a
+            # máscara insere no meio do caminho.
+            pos = 0
+            vistos = 0
+            for ch in novo_texto:
+                if vistos >= digitos_antes_do_cursor:
+                    break
+                if ch != "/":
+                    vistos += 1
+                pos += 1
+            entry.icursor(pos)
+
+        entry.bind("<KeyRelease>", _on_key)
+
+    def _parse_data_filtro(self, txt):
+        txt = (txt or "").strip()
+        if not txt:
+            return None
+        try:
+            d, m, a = txt.split("/")
+            return date(int(a), int(m), int(d)).isoformat()
+        except Exception:
+            return "invalido"
+
+    def _aplicar_periodo_datas(self):
+        de_iso = self._parse_data_filtro(self._data_de_var.get())
+        ate_iso = self._parse_data_filtro(self._data_ate_var.get())
+        if de_iso == "invalido" or ate_iso == "invalido":
+            messagebox.showwarning(
+                "Data inválida",
+                "Use o formato dd/mm/aaaa para as datas De/Até.")
+            return
+        if de_iso and ate_iso and de_iso > ate_iso:
+            messagebox.showwarning(
+                "Período inválido", "A data 'De' não pode ser posterior à data 'Até'.")
+            return
+        self._filtro_de = de_iso
+        self._filtro_ate = ate_iso
+        if de_iso or ate_iso:
+            txt_de = self._data_de_var.get().strip() or "início"
+            txt_ate = self._data_ate_var.get().strip() or "hoje"
+            self._filtro_ativo_lbl.configure(text=f"Período: {txt_de} até {txt_ate}")
         else:
-            self._filtro_ate = date.today().isoformat()
-            self._filtro_de = (date.today() - __import__("datetime").timedelta(days=dias)).isoformat()
+            self._filtro_ativo_lbl.configure(text="")
+        self._reload()
+
+    def _limpar_periodo(self):
+        self._data_de_var.set("")
+        self._data_ate_var.set("")
+        self._filtro_de = None
+        self._filtro_ate = None
+        self._filtro_ativo_lbl.configure(text="")
         self._reload()
 
     def _abrir_filtro_cliente(self):
@@ -6349,34 +6933,109 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             tk.Label(pad, text=val, bg=C["surface"], fg=color,
                      font=("Segoe UI", 17, "bold")).pack(anchor="w", pady=(2, 0))
 
+        self._render_spread_medio(parent)
+
+    def _render_spread_medio(self, parent):
+        """Janela minimalista com o spread médio das operações atualmente
+        exibidas: sem filtro aplicado, é a média de todo o histórico; com
+        filtro, é a média apenas do resultado filtrado. Operações sem
+        spread gravado (confirmadas antes deste recurso, ou onde o
+        cálculo falhou) não entram na média."""
+        spreads = []
+        for r in self._rows:
+            sp = r.get("spread")
+            if not sp:
+                continue
+            try:
+                spreads.append(Decimal(str(sp).replace(",", ".")))
+            except Exception:
+                continue
+
+        card = card_frame(parent)
+        card.pack(fill="x", pady=(0, 16))
+        pad = tk.Frame(card, bg=C["surface"], padx=16, pady=12)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text="Spread médio", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(side="left")
+        escopo = "todas as operações" if not (self._filtro_de or self._filtro_ate) else "período filtrado"
+        tk.Label(top, text=f"  ·  {escopo}", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7)).pack(side="left")
+
+        if spreads:
+            media = (sum(spreads) / len(spreads)).quantize(Decimal("0.0001"))
+            val_txt = f"{media} %"
+            sub_txt = f"com base em {len(spreads)} de {len(self._rows)} operação(ões)"
+            color = C["ok"]
+        else:
+            val_txt = "—"
+            sub_txt = "nenhuma operação com spread registrado neste recorte"
+            color = C["ink_faint"]
+
+        tk.Label(pad, text=val_txt, bg=C["surface"], fg=color,
+                 font=("Segoe UI", 17, "bold")).pack(anchor="w", pady=(2, 0))
+        tk.Label(pad, text=sub_txt, bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7)).pack(anchor="w")
+
     def _render_graficos(self, parent):
         row = tk.Frame(parent, bg=C["bg"])
         row.pack(fill="x", pady=(0, 16))
         row.columnconfigure(0, weight=2, uniform="g")
         row.columnconfigure(1, weight=1, uniform="g")
 
-        # Montante x Líquido ao longo do tempo (por dia)
+        # Montante x Líquido, ou Spread médio, ao longo do tempo (por dia)
         por_dia = {}
         for r in self._rows:
             d = r["data_dia"]
-            por_dia.setdefault(d, [Decimal("0"), Decimal("0")])
-            por_dia[d][0] += _valor_to_decimal(r["montante_total"])
-            por_dia[d][1] += _valor_to_decimal(r["liquido_total"])
+            por_dia.setdefault(d, {"montante": Decimal("0"), "liquido": Decimal("0"),
+                                   "spreads": []})
+            por_dia[d]["montante"] += _valor_to_decimal(r["montante_total"])
+            por_dia[d]["liquido"] += _valor_to_decimal(r["liquido_total"])
+            sp = r.get("spread")
+            if sp:
+                try:
+                    por_dia[d]["spreads"].append(Decimal(str(sp).replace(",", ".")))
+                except Exception:
+                    pass
         dias_ord = sorted(por_dia.keys())
         labels = [_hist_fmt_dia(d)[:5] for d in dias_ord]
-        serie_montante = [float(por_dia[d][0]) for d in dias_ord]
-        serie_liquido = [float(por_dia[d][1]) for d in dias_ord]
 
         card1 = card_frame(row)
         card1.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         p1 = tk.Frame(card1, bg=C["surface"], padx=14, pady=10)
         p1.pack(fill="both", expand=True)
-        tk.Label(p1, text="Montante × Líquido ao longo do tempo", bg=C["surface"],
-                 fg=C["ink_muted"], font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        chart1 = MiniBarChart(p1, height=140)
-        chart1.pack(fill="x", pady=(6, 0))
-        chart1.set_data(labels, [serie_montante, serie_liquido],
-                        [C["accent"], C["ok"]], legend=["Montante", "Líquido"])
+
+        head1 = tk.Frame(p1, bg=C["surface"])
+        head1.pack(fill="x")
+        self._chart1_title_lbl = tk.Label(
+            head1, text="Montante × Líquido ao longo do tempo", bg=C["surface"],
+            fg=C["ink_muted"], font=("Segoe UI", 8, "bold"))
+        self._chart1_title_lbl.pack(side="left")
+
+        toggle = tk.Frame(head1, bg=C["surface"])
+        toggle.pack(side="right")
+        self._btn_grafico_volume = tk.Button(
+            toggle, text="Volume", command=lambda: self._set_grafico_modo("volume"),
+            bg=C["surface"], activebackground=C["surface"],
+            relief="flat", bd=0, padx=8, pady=2, cursor="hand2",
+            font=("Segoe UI", 8))
+        self._btn_grafico_volume.pack(side="left")
+        self._btn_grafico_spread = tk.Button(
+            toggle, text="Spread", command=lambda: self._set_grafico_modo("spread"),
+            bg=C["surface"], activebackground=C["surface"],
+            relief="flat", bd=0, padx=8, pady=2, cursor="hand2",
+            font=("Segoe UI", 8))
+        self._btn_grafico_spread.pack(side="left", padx=(4, 0))
+
+        self._chart1 = StockLineChart(p1, height=200)
+        self._chart1.pack(fill="x", pady=(6, 0))
+        self._por_dia_grafico = por_dia
+        self._dias_ord_grafico = dias_ord
+        self._labels_grafico = labels
+        self._atualizar_botoes_grafico()
+        self._aplicar_dados_grafico()
 
         # Ranking de clientes por montante
         por_cliente = {}
@@ -6396,6 +7055,49 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         chart2.pack(fill="x", pady=(6, 0))
         chart2.set_data(ranking)
 
+    def _set_grafico_modo(self, modo):
+        if modo == self._grafico_modo:
+            return
+        self._grafico_modo = modo
+        self._atualizar_botoes_grafico()
+        self._aplicar_dados_grafico()
+
+    def _atualizar_botoes_grafico(self):
+        vol_on = self._grafico_modo == "volume"
+        self._btn_grafico_volume.configure(
+            fg=(C["accent"] if vol_on else C["ink_muted"]),
+            font=("Segoe UI", 8, "bold" if vol_on else "normal"))
+        self._btn_grafico_spread.configure(
+            fg=(C["warn"] if not vol_on else C["ink_muted"]),
+            font=("Segoe UI", 8, "bold" if not vol_on else "normal"))
+
+    def _aplicar_dados_grafico(self):
+        por_dia = self._por_dia_grafico
+        dias_ord = self._dias_ord_grafico
+        labels = self._labels_grafico
+
+        if self._grafico_modo == "volume":
+            self._chart1_title_lbl.configure(
+                text="Montante × Líquido ao longo do tempo")
+            serie_montante = [float(por_dia[d]["montante"]) for d in dias_ord]
+            serie_liquido = [float(por_dia[d]["liquido"]) for d in dias_ord]
+            self._chart1.set_data(
+                labels, [serie_montante, serie_liquido],
+                [C["accent"], C["ok"]], legend=["Montante", "Líquido"],
+                y_fmt=_fmt_compact_brl, area_idx=0)
+        else:
+            escopo = "todas as operações" if not (self._filtro_de or self._filtro_ate) \
+                else "período filtrado"
+            self._chart1_title_lbl.configure(text=f"Spread médio por dia — {escopo}")
+            dias_com_spread = [d for d in dias_ord if por_dia[d]["spreads"]]
+            labels_sp = [_hist_fmt_dia(d)[:5] for d in dias_com_spread]
+            serie_spread = [
+                float(sum(por_dia[d]["spreads"]) / len(por_dia[d]["spreads"]))
+                for d in dias_com_spread]
+            self._chart1.set_data(
+                labels_sp, [serie_spread], [C["warn"]], legend=["Spread médio"],
+                y_fmt=_fmt_compact_pct, area_idx=0)
+
     def _render_tabela(self, parent):
         card = card_frame(parent)
         card.pack(fill="both", expand=True)
@@ -6404,7 +7106,7 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         hdr = tk.Frame(pad, bg=C["surface2"])
         hdr.pack(fill="x")
-        cols = [("Cliente", 3), ("Data", 1), ("Trader", 1), ("Modo", 1),
+        cols = [("Cliente", 3), ("Data", 1), ("Trader", 1), ("Spread", 1),
                 ("Montante", 2), ("Líquido", 2), ("Status", 1), ("", 1)]
         for i, (txt, wgt) in enumerate(cols):
             hdr.columnconfigure(i, weight=wgt, uniform="tbl")
@@ -6439,9 +7141,12 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         status_color = C[STATUS_COLORS.get(status_key, "ink_muted")]
         arrow = "▾" if expanded else "▸"
 
+        spread_val = r.get("spread")
+        spread_txt = f"{spread_val}%" if spread_val else "—"
+
         vals = [
             f"{arrow} {r['cliente']}", _hist_fmt_dia(r["data_dia"]), trader,
-            r.get("modo") or "—",
+            spread_txt,
             _fmt_brl(_valor_to_decimal(r["montante_total"])),
             _fmt_brl(_valor_to_decimal(r["liquido_total"])),
         ]
@@ -6479,10 +7184,13 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         meta.pack(fill="x", padx=10, pady=(8, 4))
         cnpj = _fmt_cnpj(only_digits(r.get("cnpj_sacado", "")))
         taxa = r.get("taxa") or "—"
+        spread_val = r.get("spread")
+        spread_txt = f"{spread_val}%" if spread_val else "não calculado"
         origem = r.get("arquivo_origem") or "—"
         usuario = r.get("usuario") or "—"
         confirmado_em = _hist_fmt_hora(r.get("data_hora", ""))
         tk.Label(meta, text=f"CNPJ: {cnpj}   ·   Taxa vigente: {taxa}%   ·   "
+                             f"Spread: {spread_txt}   ·   "
                              f"Confirmado por {usuario} em {confirmado_em}",
                  bg=C["surface2"], fg=C["ink_faint"], font=("Segoe UI", 8)).pack(anchor="w")
         tk.Label(meta, text=f"Planilha de origem: {origem}",
@@ -6547,8 +7255,8 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             ws = wb.active
             ws.title = "Operações"
             headers = ["Cliente", "CNPJ", "Data", "Trader", "Modo", "Status",
-                       "Montante total", "Líquido total", "Taxa (%)", "Usuário",
-                       "Confirmado em", "Arquivo origem"]
+                       "Montante total", "Líquido total", "Taxa (%)", "Spread (%)",
+                       "Usuário", "Confirmado em", "Arquivo origem"]
             ws.append(headers)
             for r in self._rows:
                 ws.append([
@@ -6557,10 +7265,10 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                     r.get("modo") or "", STATUS_LABELS.get(r.get("status"), r.get("status")),
                     float(_valor_to_decimal(r["montante_total"])),
                     float(_valor_to_decimal(r["liquido_total"])),
-                    r.get("taxa") or "", r.get("usuario") or "",
+                    r.get("taxa") or "", r.get("spread") or "", r.get("usuario") or "",
                     _hist_fmt_hora(r.get("data_hora", "")), r.get("arquivo_origem") or "",
                 ])
-            for col in "ABCDEFGHIJKL":
+            for col in "ABCDEFGHIJKLM":
                 ws.column_dimensions[col].width = 18
 
             ws2 = wb.create_sheet("Notas")
@@ -6776,6 +7484,17 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                  font=("Segoe UI", 9, "bold"), wraplength=170,
                  justify="center").pack()
 
+        doc_sacado_card = group.get("doc_sacado") or ""
+        ja_hoje = None
+        if doc_sacado_card:
+            try:
+                ja_hoje = HistoricoOperacoesData.get().ja_confirmado_hoje(doc_sacado_card)
+            except Exception:
+                ja_hoje = None
+        if ja_hoje:
+            tk.Label(body, text=f"✓ Confirmado hoje às {ja_hoje['data_hora'][11:16]}",
+                     bg=bg, fg=C["ok"], font=("Segoe UI", 7, "bold")).pack(pady=(4, 0))
+
         info = tk.Frame(body, bg=bg)
         info.pack(pady=(10, 0), fill="x")
         liquido, completo = self._calc_valor_liquido_group(group)
@@ -6898,9 +7617,14 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
     def _abrir_spread_sacado(self, group):
         """Abre o popup de spread imediatamente (mostrando 'Calculando...')
         e roda o cálculo pesado (leitura da curva de rede + busca binária)
-        em thread separada, para não travar a UI."""
-        if getattr(self, "_spread_overlay", None) is not None:
-            return
+        em thread separada, para não travar a UI. Cada clique — em
+        qualquer sacado — sempre recalcula do zero, usando o valor e a
+        taxa daquele cliente específico (nunca reaproveita um resultado
+        anterior)."""
+        # Fecha qualquer popup de spread anterior (mesmo se o widget já
+        # tiver morrido) antes de abrir um novo — evita que um overlay
+        # "preso" bloqueie o clique seguinte em qualquer outro sacado.
+        self._close_spread_modal()
 
         parent = self
         detail_card = getattr(self, "_detail_card", None)
@@ -6950,6 +7674,8 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
             notas = []
             for op in self._ops_do_grupo(group):
+                if op.get("uid") in self._excluded_uids:
+                    continue  # nota excluída na triagem não entra no spread
                 venc = _parse_data_curta(op.get("data_vencimento"))
                 notas.append({"valor_raw": op.get("valor_raw", Decimal("0")),
                                "data_vencimento": venc})
@@ -7190,6 +7916,9 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             pad, text="", bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9))
         self._detail_sub_lbl.pack(anchor="w", pady=(8, 0))
 
+        self._detail_status_lbl = tk.Label(
+            pad, text="", bg=C["surface"], fg=C["ok"], font=("Segoe UI", 9, "bold"))
+
         tk.Label(
             pad,
             text=("Inclua notas excluídas na triagem ou exclua notas que não devem "
@@ -7321,11 +8050,17 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                     "valor_raw": n["valor"], "valor_liquido": n["valor_liquido"]}
                    for n in incluidas],
             taxa_str=payload["taxa_str"])
-        return {"ok": True, "subject": subject, "html": html}
+        emails = get_emails_por_cliente(nome_sacado)
+        to = "; ".join(emails["para"])
+        cc = "; ".join(emails["cc"])
+        return {"ok": True, "subject": subject, "html": html, "to": to, "cc": cc}
 
     def _confirmar_operacao(self, group):
         """Grava no histórico (SQLite) a confirmação do montante de um
-        sacado — no máximo uma confirmação por cliente por dia."""
+        sacado — no máximo uma confirmação por cliente por dia. Antes de
+        gravar, calcula o spread (mesmas notas incluídas neste momento) e
+        pede validação do usuário; o spread validado é gravado junto no
+        histórico."""
         doc_sacado = group.get("doc_sacado") or ""
         hist = HistoricoOperacoesData.get()
         ja = hist.ja_confirmado_hoje(doc_sacado) if doc_sacado else None
@@ -7344,6 +8079,112 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                 f"{group['nome_sacado']}: {payload['reason']}.")
             return
 
+        self._calcular_spread_e_confirmar(group, payload)
+
+    def _calcular_spread_e_confirmar(self, group, payload):
+        """Roda o cálculo de spread em thread (mesma lógica do popup de
+        Spread) sobre o conjunto de notas atualmente incluído, depois abre
+        o diálogo de validação/confirmação na thread da UI."""
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=340, height=120)
+        tk.Label(card, text="Calculando spread…", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(expand=True)
+
+        def _worker():
+            taxa_str = payload["taxa_str"]
+            notas = [{"valor_raw": n["valor"], "data_vencimento": n["data_vencimento"]}
+                     for n in payload["notas"] if n["incluida"]]
+            try:
+                resultado = calcular_spread_sacado(notas, taxa_str)
+            except Exception as e:
+                resultado = {"ok": False, "reason": f"Erro no cálculo: {e}"}
+
+            def _done():
+                try:
+                    overlay.destroy()
+                except Exception:
+                    pass
+                self._abrir_confirmacao_spread(group, payload, resultado)
+            try:
+                self.after(0, _done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _abrir_confirmacao_spread(self, group, payload, resultado):
+        """Mostra o spread calculado (ou o motivo da falha) e pede
+        confirmação explícita do usuário antes de gravar no histórico.
+        Se o spread não pôde ser calculado, o usuário pode optar por
+        confirmar mesmo assim (fica gravado sem spread) ou cancelar."""
+        spread_str = resultado.get("spread") if resultado.get("ok") else None
+
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=380, height=260)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=22, pady=18)
+        pad.pack(fill="both", expand=True)
+
+        tk.Label(pad, text="Confirmar operação", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(pad, text=group["nome_sacado"], bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9), wraplength=320, justify="left").pack(
+            anchor="w", pady=(4, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(12, 12))
+
+        if resultado.get("ok"):
+            linhas = [
+                ("Spread", f"{resultado['spread']} %"),
+                ("Taxa alvo (Depara)", f"{payload['taxa_str']} % a.m."),
+                ("Montante", _fmt_brl(payload["montante_total"])),
+            ]
+            for label, value in linhas:
+                row_f = tk.Frame(pad, bg=C["surface"])
+                row_f.pack(fill="x", pady=(0, 6))
+                tk.Label(row_f, text=label, bg=C["surface"], fg=C["ink_faint"],
+                         font=("Segoe UI", 8, "bold"), width=16, anchor="w").pack(side="left")
+                tk.Label(row_f, text=value, bg=C["surface"], fg=C["ok"],
+                         font=("Segoe UI", 9, "bold"), anchor="w").pack(side="left")
+            if not resultado.get("convergiu", True):
+                tk.Label(pad, text="⚠ Cálculo não convergiu no limite de iterações",
+                         bg=C["surface"], fg=C["warn"], font=("Segoe UI", 8),
+                         wraplength=320, justify="left").pack(anchor="w", pady=(4, 0))
+        else:
+            tk.Label(pad, text=f"⚠ Não foi possível calcular o spread: "
+                                f"{resultado.get('reason', 'motivo desconhecido')}.\n"
+                                "Você pode confirmar mesmo assim (spread ficará em branco "
+                                "no histórico) ou cancelar e revisar.",
+                     bg=C["surface"], fg=C["err"], font=("Segoe UI", 9),
+                     wraplength=320, justify="left").pack(anchor="w")
+
+        def _cancelar():
+            try:
+                overlay.destroy()
+            except Exception:
+                pass
+
+        def _confirmar():
+            try:
+                overlay.destroy()
+            except Exception:
+                pass
+            self._gravar_operacao_confirmada(group, payload, spread_str)
+
+        btn_row = tk.Frame(pad, bg=C["surface"])
+        btn_row.pack(fill="x", side="bottom", pady=(14, 0))
+        styled_button(btn_row, "Cancelar", _cancelar).pack(side="left")
+        styled_button(btn_row, "Confirmar ✓", _confirmar, accent=True).pack(side="right")
+
+    def _gravar_operacao_confirmada(self, group, payload, spread_str):
+        hist = HistoricoOperacoesData.get()
         trader = get_trader_por_cliente(group["nome_sacado"])
         arquivo = os.path.basename(
             getattr(self.controller, "invertido_xlsx_path", "") or "")
@@ -7357,22 +8198,35 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             montante_total=payload["montante_total"],
             liquido_total=payload["liquido_total"],
             taxa=payload["taxa_str"],
+            spread=spread_str,
             arquivo_origem=arquivo,
             notas=payload["notas"])
 
+        try:
+            if (self._detail_overlay is not None
+                    and _normalize_sacado_key(self._detail_nome) == _normalize_sacado_key(group["nome_sacado"])):
+                self._render_detalhes_list()
+        except Exception:
+            pass
+        try:
+            self._rebuild_group_cards()
+        except Exception:
+            pass
+
         montante_fmt = _fmt_brl(payload["montante_total"])
         liquido_fmt = _fmt_brl(payload["liquido_total"])
+        spread_fmt = f", spread {spread_str}%" if spread_str else ""
         if ok:
             messagebox.showinfo(
                 "Confirmado",
                 f"{group['nome_sacado']} confirmado — montante {montante_fmt}, "
-                f"líquido {liquido_fmt}.")
+                f"líquido {liquido_fmt}{spread_fmt}.")
         else:
             messagebox.showinfo(
                 "Confirmado (pendente de sincronização)",
                 f"{group['nome_sacado']} confirmado localmente — montante {montante_fmt}, "
-                f"líquido {liquido_fmt}.\nA rede está indisponível no momento; o registro "
-                "será sincronizado automaticamente ao reconectar.")
+                f"líquido {liquido_fmt}{spread_fmt}.\nA rede está indisponível no momento; "
+                "o registro será sincronizado automaticamente ao reconectar.")
 
     def _confirmar_operacao_detalhes(self):
         group = self._find_group(self._detail_nome)
@@ -7391,7 +8245,8 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                 f"{group['nome_sacado']}: {result['reason']}.")
             return
         try:
-            enviar_email_outlook_risco_sacado(result["subject"], result["html"])
+            enviar_email_outlook_risco_sacado(
+                result["subject"], result["html"], to=result["to"], cc=result["cc"])
         except Exception as e:
             messagebox.showerror("Erro ao abrir e-mail", str(e))
 
@@ -7413,7 +8268,8 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                 pulados.append(f"{group['nome_sacado']} — {result['reason']}")
                 continue
             try:
-                enviar_email_outlook_risco_sacado(result["subject"], result["html"])
+                enviar_email_outlook_risco_sacado(
+                    result["subject"], result["html"], to=result["to"], cc=result["cc"])
                 enviados.append(group["nome_sacado"])
             except Exception as e:
                 pulados.append(f"{group['nome_sacado']} — erro: {e}")
@@ -7444,6 +8300,22 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         if excluidas:
             resumo += f" · {len(excluidas)} excluída(s)"
         self._detail_sub_lbl.configure(text=resumo)
+
+        doc_sacado = self._detail_doc_sacado()
+        ja = None
+        try:
+            ja = HistoricoOperacoesData.get().ja_confirmado_hoje(doc_sacado) if doc_sacado else None
+        except Exception:
+            ja = None
+        if ja:
+            hora = ja["data_hora"][11:16]
+            self._detail_status_lbl.configure(
+                text=f"✓ Confirmado hoje às {hora} — montante {_fmt_brl(Decimal(ja['montante_total']))}",
+                fg=C["ok"])
+            self._detail_status_lbl.pack(anchor="w", pady=(4, 0))
+        else:
+            self._detail_status_lbl.configure(text="")
+            self._detail_status_lbl.pack_forget()
 
         def _nota_card(op, included):
             item = tk.Frame(list_outer, bg=C["surface2"],
@@ -8742,6 +9614,1206 @@ class BPMFrame(tk.Frame, ThreadSafeUIMixin):
                 if not self._cancel_requested:
                     self.controller.bpm_run_selection = []
 
+# ─── Pipeline (registro diário por trader) ─────────────────────────────────
+# Armazenado em SQLite, na MESMA pasta de rede do dados.json (Depara) —
+# mesmo diretório onde já vive o historico_operacoes.db, mas em arquivo
+# próprio (pipe.db). Segue o mesmo padrão de resiliência: se a rede cair,
+# o registro fica numa fila local e é reenviado quando a conexão voltar.
+
+PIPE_DB_PATH = os.path.join(os.path.dirname(SHARED_TAXAS_PATH), "pipe.db")
+PIPE_PENDING_LOCAL_PATH = os.path.join(
+    tempfile.gettempdir(), "pipe_pendente_local.jsonl")
+PIPE_TRADERS = ["Thiago", "Debora", "Adriana", "Matheus", "Gabriel", "Giovanna"]
+PIPE_MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
+              "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+
+
+def _pipe_month_range(year, month):
+    ini = date(year, month, 1)
+    if month == 12:
+        fim = date(year, 12, 31)
+    else:
+        fim = date(year, month + 1, 1) - timedelta(days=1)
+    return ini, fim
+
+
+def _pipe_week_range(ref):
+    ini = ref - timedelta(days=ref.weekday())  # segunda-feira
+    fim = ini + timedelta(days=6)
+    return ini, fim
+
+
+class PipelineData:
+    _instance = None
+    RETRY_SECONDS = 30
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._available = False
+        self._on_reconnect_callbacks = []
+        self._retry_timer = None
+        self._ensure_schema()
+        if self._available:
+            self._flush_pending_local()
+        else:
+            self._schedule_retry()
+
+    def is_available(self):
+        return self._available
+
+    def on_reconnect(self, callback):
+        self._on_reconnect_callbacks.append(callback)
+
+    def _schedule_retry(self):
+        if self._retry_timer is not None:
+            return
+        self._retry_timer = threading.Timer(self.RETRY_SECONDS, self._retry_tick)
+        self._retry_timer.daemon = True
+        self._retry_timer.start()
+
+    def _retry_tick(self):
+        self._retry_timer = None
+        was_available = self._available
+        self._ensure_schema()
+        if self._available and not was_available:
+            self._flush_pending_local()
+            for cb in list(self._on_reconnect_callbacks):
+                try:
+                    cb()
+                except Exception:
+                    pass
+        if not self._available:
+            self._schedule_retry()
+
+    def _connect(self):
+        conn = sqlite3.connect(PIPE_DB_PATH, timeout=20)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        return conn
+
+    def _ensure_schema(self):
+        try:
+            if not os.path.isdir(os.path.dirname(PIPE_DB_PATH)):
+                self._available = False
+                return
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS pipeline_entries (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        data_report TEXT NOT NULL,
+                        trader TEXT NOT NULL,
+                        cliente TEXT,
+                        cessao TEXT NOT NULL,
+                        volume_centavos INTEGER NOT NULL,
+                        spread REAL,
+                        prazo_medio REAL,
+                        iraroc REAL,
+                        observacao TEXT,
+                        regiao INTEGER,
+                        created_at TEXT NOT NULL,
+                        username TEXT
+                    )
+                """)
+                cols_existentes = {r[1] for r in
+                                    conn.execute("PRAGMA table_info(pipeline_entries)")}
+                if "cliente" not in cols_existentes:
+                    conn.execute("ALTER TABLE pipeline_entries ADD COLUMN cliente TEXT")
+                conn.commit()
+            finally:
+                conn.close()
+            self._available = True
+        except Exception as e:
+            print(f"[pipeline] _ensure_schema falhou: {e}", file=sys.stderr)
+            self._available = False
+
+    _COLS = ("data_report", "trader", "cliente", "cessao", "volume_centavos",
+              "spread", "prazo_medio", "iraroc", "observacao", "regiao",
+              "created_at", "username")
+
+    def add_entry(self, data_report, trader, cliente, cessao, volume_centavos,
+                  spread, prazo_medio, iraroc, observacao, regiao):
+        row = {
+            "data_report": data_report, "trader": trader, "cliente": cliente,
+            "cessao": cessao, "volume_centavos": volume_centavos, "spread": spread,
+            "prazo_medio": prazo_medio, "iraroc": iraroc,
+            "observacao": observacao, "regiao": regiao,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "username": _current_username(),
+        }
+        if not self._available:
+            self._queue_local(row)
+            return False
+        try:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "INSERT INTO pipeline_entries (" + ",".join(self._COLS) +
+                    ") VALUES (" + ",".join("?" * len(self._COLS)) + ")",
+                    tuple(row[c] for c in self._COLS))
+                conn.commit()
+            finally:
+                conn.close()
+            return True
+        except Exception as e:
+            print(f"[pipeline] add_entry falhou: {e}", file=sys.stderr)
+            self._available = False
+            self._queue_local(row)
+            self._schedule_retry()
+            return False
+
+    def _queue_local(self, row):
+        try:
+            with open(PIPE_PENDING_LOCAL_PATH, "a", encoding="utf-8") as f:
+                f.write(_json_mod.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _flush_pending_local(self):
+        if not os.path.isfile(PIPE_PENDING_LOCAL_PATH):
+            return
+        try:
+            with open(PIPE_PENDING_LOCAL_PATH, "r", encoding="utf-8") as f:
+                lines = [l for l in f.read().splitlines() if l.strip()]
+        except Exception:
+            return
+        remaining = []
+        for line in lines:
+            try:
+                row = _json_mod.loads(line)
+                conn = self._connect()
+                conn.execute(
+                    "INSERT INTO pipeline_entries (" + ",".join(self._COLS) +
+                    ") VALUES (" + ",".join("?" * len(self._COLS)) + ")",
+                    tuple(row.get(c) for c in self._COLS))
+                conn.commit()
+                conn.close()
+            except Exception:
+                remaining.append(line)
+        try:
+            if remaining:
+                with open(PIPE_PENDING_LOCAL_PATH, "w", encoding="utf-8") as f:
+                    f.write("\n".join(remaining) + "\n")
+            else:
+                os.remove(PIPE_PENDING_LOCAL_PATH)
+        except Exception:
+            pass
+
+    def entries_between(self, dt_ini, dt_fim, trader=None):
+        if not self._available:
+            return []
+        try:
+            conn = self._connect()
+            try:
+                q = ("SELECT id," + ",".join(self._COLS) +
+                     " FROM pipeline_entries WHERE data_report BETWEEN ? AND ?")
+                params = [dt_ini.isoformat(), dt_fim.isoformat()]
+                if trader and trader != "Todos":
+                    q += " AND trader = ?"
+                    params.append(trader)
+                q += " ORDER BY data_report DESC, id DESC"
+                cur = conn.execute(q, params)
+                cols = ("id",) + self._COLS
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"[pipeline] entries_between falhou: {e}", file=sys.stderr)
+            return []
+
+    def update_entry(self, entry_id, **fields):
+        """Atualiza campos de um lançamento existente pelo id. `fields`
+        aceita qualquer subconjunto de _COLS (exceto created_at/username)."""
+        if not self._available or not fields:
+            return False
+        allowed = [c for c in fields if c in self._COLS]
+        if not allowed:
+            return False
+        try:
+            conn = self._connect()
+            try:
+                set_clause = ",".join(f"{c}=?" for c in allowed)
+                params = [fields[c] for c in allowed] + [entry_id]
+                conn.execute(
+                    f"UPDATE pipeline_entries SET {set_clause} WHERE id=?", params)
+                conn.commit()
+            finally:
+                conn.close()
+            return True
+        except Exception as e:
+            print(f"[pipeline] update_entry falhou: {e}", file=sys.stderr)
+            return False
+
+    def delete_entry(self, entry_id):
+        if not self._available:
+            return False
+        try:
+            conn = self._connect()
+            try:
+                conn.execute("DELETE FROM pipeline_entries WHERE id=?", (entry_id,))
+                conn.commit()
+            finally:
+                conn.close()
+            return True
+        except Exception as e:
+            print(f"[pipeline] delete_entry falhou: {e}", file=sys.stderr)
+            return False
+
+    def summary(self, dt_ini, dt_fim, trader=None):
+        rows = self.entries_between(dt_ini, dt_fim, trader)
+        risco = sum(r["volume_centavos"] for r in rows
+                    if (r["cessao"] or "").upper() == "N")
+        cessao = sum(r["volume_centavos"] for r in rows
+                     if (r["cessao"] or "").upper() == "S")
+        return {"risco": risco, "cessao": cessao, "total": risco + cessao,
+                "count": len(rows)}
+
+    def inconsistencias(self, dt_ini, dt_fim, trader=None):
+        """Aponta lançamentos com dados faltando ou potenciais duplicatas —
+        não bloqueia o uso, só sinaliza para revisão."""
+        rows = self.entries_between(dt_ini, dt_fim, trader)
+        incompletos = [r for r in rows if not r["spread"] or not r["prazo_medio"]
+                        or not r["iraroc"] or not r["regiao"]]
+        vistos, duplicados = {}, []
+        for r in rows:
+            key = (r["data_report"], r["trader"], r["volume_centavos"],
+                   (r["observacao"] or "").strip().lower())
+            if key in vistos:
+                duplicados.append(r)
+            vistos[key] = True
+        return {"incompletos": len(incompletos), "duplicados": len(duplicados)}
+
+
+def _pipe_bind_money_entry(entry, var, initial_cents=0):
+    """Aplica máscara de dinheiro (R$) progressiva ao digitar, mesmo padrão
+    usado no BPM. Retorna um getter/setter de centavos."""
+    digits = [str(initial_cents) if initial_cents else ""]
+
+    def fmt_val():
+        if not digits[0]:
+            var.set("R$ 0,00")
+            return
+        d = Decimal(int(digits[0])) / Decimal("100")
+        var.set(_fmt_brl(d))
+
+    def on_key(e):
+        if e.keysym == "BackSpace":
+            digits[0] = digits[0][:-1]; fmt_val(); return "break"
+        if e.char and e.char.isdigit():
+            digits[0] += e.char; fmt_val(); return "break"
+        if e.keysym in {"Tab", "Left", "Right", "Home", "End"}:
+            return
+        return "break"
+
+    def on_paste(_):
+        try:
+            clip = entry.clipboard_get()
+        except Exception:
+            return "break"
+        d = _parse_brl(clip)
+        if d is None:
+            return "break"
+        digits[0] = str(max(int((d * 100).quantize(Decimal("1"))), 0))
+        fmt_val(); return "break"
+
+    def get_cents():
+        return int(digits[0]) if digits[0] else 0
+
+    def set_cents(cents):
+        digits[0] = str(max(int(cents), 0)) if cents else ""
+        fmt_val()
+
+    entry.bind("<Key>", on_key)
+    entry.bind("<<Paste>>", on_paste)
+    fmt_val()
+    return get_cents, set_cents
+
+
+def _pipe_bind_decimal_entry(entry, var):
+    """Restringe a entrada a dígitos e uma única vírgula decimal."""
+    def on_key(e):
+        if e.keysym in {"Tab", "Left", "Right", "Home", "End", "BackSpace", "Delete"}:
+            return
+        if e.char == "," and "," not in var.get():
+            return
+        if e.char and e.char.isdigit():
+            return
+        return "break"
+    entry.bind("<Key>", on_key)
+
+
+def _pipe_decimal_to_float(raw):
+    s = (raw or "").strip().replace(",", ".")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _pipe_toggle_button(parent, text, command, small=False):
+    """Botão estilo toggle (aba / seleção) cujo hover respeita o estado
+    selecionado, ao contrário de styled_button que sempre volta pra cor
+    'não selecionado' ao tirar o mouse."""
+    pad = (7, 3) if small else (13, 6)
+    btn = tk.Button(parent, text=text, command=command,
+                     bg=C["surface2"], fg=C["ink_muted"],
+                     activebackground=C["accent"], activeforeground=C["bg"],
+                     font=("Segoe UI", 8 if small else 9),
+                     relief="flat", bd=0, padx=pad[0], pady=pad[1], cursor="hand2")
+    btn._pipe_selected = False
+
+    def on_enter(_):
+        if not btn._pipe_selected:
+            btn.configure(bg=C["surface3"], fg=C["ink"])
+
+    def on_leave(_):
+        if not btn._pipe_selected:
+            btn.configure(bg=C["surface2"], fg=C["ink_muted"])
+
+    btn.bind("<Enter>", on_enter)
+    btn.bind("<Leave>", on_leave)
+    return btn
+
+
+def _pipe_set_toggle(btn, selected):
+    btn._pipe_selected = selected
+    if selected:
+        btn.configure(bg=C["accent"], fg=C["bg"])
+    else:
+        btn.configure(bg=C["surface2"], fg=C["ink_muted"])
+
+
+class PipelineFrame(tk.Frame):
+    """Registro diário de pipeline por trader (Risco Sacado x Cessão) e
+    validação/comparação semanal e mensal, incluindo comparativo YoY."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._data = PipelineData.get()
+        self._view = "incluir"
+        self._cessao_val = tk.StringVar(value="N")
+        self._overlay = None
+        self._build()
+        self._data.on_reconnect(lambda: self.after(0, self._refresh_network_state))
+
+    # ── Estrutura geral ──────────────────────────────────────────────
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        tk.Label(hdr, text="Pipeline", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left")
+        tk.Label(hdr, text="  Registro diário por trader — Risco Sacado x Cessão",
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9)).pack(side="left")
+
+        tabs = tk.Frame(self, bg=C["bg"])
+        tabs.pack(fill="x", padx=32, pady=(16, 0))
+        self._btn_incluir = _pipe_toggle_button(tabs, "Incluir dados",
+                                                 lambda: self._switch_view("incluir"))
+        self._btn_incluir.pack(side="left")
+        self._btn_validar = _pipe_toggle_button(tabs, "Validar dados",
+                                                 lambda: self._switch_view("validar"))
+        self._btn_validar.pack(side="left", padx=(8, 0))
+        self._btn_gerenciar = _pipe_toggle_button(tabs, "Gerenciar dados",
+                                                   lambda: self._switch_view("gerenciar"))
+        self._btn_gerenciar.pack(side="left", padx=(8, 0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16, 0))
+
+        self._net_banner = tk.Frame(self, bg=C["err_dim"])
+        tk.Label(self._net_banner,
+                 text="⚠ Sem conexão com a rede — os lançamentos ficam guardados "
+                      "localmente e serão enviados assim que a conexão voltar.",
+                 bg=C["err_dim"], fg=C["err"], font=("Segoe UI", 8, "bold"),
+                 anchor="w", justify="left", wraplength=900).pack(
+                     side="left", fill="x", expand=True, padx=18, pady=8)
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        self._body = self._sf.inner
+        self._body.configure(bg=C["bg"])
+
+        self._incluir_view = tk.Frame(self._body, bg=C["bg"])
+        self._validar_view = tk.Frame(self._body, bg=C["bg"])
+        self._gerenciar_view = tk.Frame(self._body, bg=C["bg"])
+        self._build_incluir(self._incluir_view)
+        self._build_validar(self._validar_view)
+        self._build_gerenciar(self._gerenciar_view)
+        self._switch_view("incluir")
+
+    def _switch_view(self, view):
+        self._view = view
+        for w in (self._incluir_view, self._validar_view, self._gerenciar_view):
+            w.pack_forget()
+        _pipe_set_toggle(self._btn_incluir, view == "incluir")
+        _pipe_set_toggle(self._btn_validar, view == "validar")
+        _pipe_set_toggle(self._btn_gerenciar, view == "gerenciar")
+        if view == "incluir":
+            self._incluir_view.pack(fill="both", expand=True, padx=32, pady=(16, 24))
+            self._refresh_recentes()
+        elif view == "validar":
+            self._validar_view.pack(fill="both", expand=True, padx=32, pady=(16, 24))
+            self._refresh_validar()
+        else:
+            self._gerenciar_view.pack(fill="both", expand=True, padx=32, pady=(16, 24))
+            self._refresh_gerenciar()
+
+    def on_show(self):
+        self._sf.refresh_bindings()
+        self._refresh_network_state()
+
+    def _refresh_network_state(self):
+        if not self.winfo_exists():
+            return
+        if self._data.is_available():
+            self._net_banner.pack_forget()
+        else:
+            self._net_banner.pack(fill="x", padx=0, pady=(0, 0), after=self)
+
+    # ── Aba: Incluir dados ───────────────────────────────────────────
+    def _build_incluir(self, parent):
+        form = card_frame(parent)
+        form.pack(fill="x")
+        body = tk.Frame(form, bg=C["surface"], padx=24, pady=22)
+        body.pack(fill="x")
+        body.columnconfigure(1, weight=1)
+        body.columnconfigure(3, weight=1)
+
+        def label(txt, r, c):
+            tk.Label(body, text=txt, bg=C["surface"], fg=C["ink_muted"],
+                     font=("Segoe UI", 9)).grid(row=r, column=c, sticky="w",
+                                                 padx=(0, 10), pady=8)
+
+        # Data Report
+        label("Data Report", 0, 0)
+        self._var_data = tk.StringVar(value=date.today().strftime("%d/%m/%Y"))
+        styled_entry(body, textvariable=self._var_data, width=14).grid(
+            row=0, column=1, sticky="w", pady=8)
+
+        # Trader
+        label("Trader", 0, 2)
+        self._var_trader = tk.StringVar(value=PIPE_TRADERS[0])
+        cb = ttk.Combobox(body, textvariable=self._var_trader, values=PIPE_TRADERS,
+                           state="readonly", width=18, font=("Segoe UI", 9))
+        cb.grid(row=0, column=3, sticky="w", pady=8)
+
+        # Cliente
+        label("Cliente", 1, 0)
+        self._var_cliente = tk.StringVar(value="")
+        styled_entry(body, textvariable=self._var_cliente, width=40).grid(
+            row=1, column=1, columnspan=3, sticky="we", pady=8)
+
+        # Cessão
+        label("Cessão", 2, 0)
+        cessao_row = tk.Frame(body, bg=C["surface"])
+        cessao_row.grid(row=2, column=1, sticky="w", pady=8)
+        self._btn_cessao_n = _pipe_toggle_button(cessao_row, "Não",
+                                                  lambda: self._set_cessao("N"), small=True)
+        self._btn_cessao_n.pack(side="left")
+        self._btn_cessao_s = _pipe_toggle_button(cessao_row, "Sim",
+                                                  lambda: self._set_cessao("S"), small=True)
+        self._btn_cessao_s.pack(side="left", padx=(6, 0))
+        self._set_cessao("N")
+
+        # Volume
+        label("Volume (R$)", 2, 2)
+        self._var_volume = tk.StringVar(value="R$ 0,00")
+        ent_vol = styled_entry(body, textvariable=self._var_volume, width=18)
+        ent_vol.grid(row=2, column=3, sticky="w", pady=8)
+        self._get_volume_cents, self._set_volume_cents = _pipe_bind_money_entry(
+            ent_vol, self._var_volume)
+
+        # Spread
+        label("Spread (%)", 3, 0)
+        self._var_spread = tk.StringVar(value="")
+        ent_spread = styled_entry(body, textvariable=self._var_spread, width=14)
+        ent_spread.grid(row=3, column=1, sticky="w", pady=8)
+        _pipe_bind_decimal_entry(ent_spread, self._var_spread)
+
+        # Prazo médio
+        label("Prazo médio", 3, 2)
+        self._var_prazo = tk.StringVar(value="")
+        ent_prazo = styled_entry(body, textvariable=self._var_prazo, width=18)
+        ent_prazo.grid(row=3, column=3, sticky="w", pady=8)
+        _pipe_bind_decimal_entry(ent_prazo, self._var_prazo)
+
+        # IRAROC
+        label("IRAROC", 4, 0)
+        self._var_iraroc = tk.StringVar(value="")
+        ent_iraroc = styled_entry(body, textvariable=self._var_iraroc, width=14)
+        ent_iraroc.grid(row=4, column=1, sticky="w", pady=8)
+        _pipe_bind_decimal_entry(ent_iraroc, self._var_iraroc)
+
+        # Região
+        label("Região", 4, 2)
+        self._var_regiao = tk.StringVar(value="")
+        ent_regiao = styled_entry(body, textvariable=self._var_regiao, width=18)
+        ent_regiao.grid(row=4, column=3, sticky="w", pady=8)
+
+        def only_digits_key(e):
+            if e.keysym in {"Tab", "Left", "Right", "Home", "End", "BackSpace", "Delete"}:
+                return
+            if e.char and e.char.isdigit():
+                return
+            return "break"
+        ent_regiao.bind("<Key>", only_digits_key)
+
+        # Observação
+        label("Observação", 5, 0)
+        self._var_obs = tk.StringVar(value="")
+        styled_entry(body, textvariable=self._var_obs, width=50).grid(
+            row=5, column=1, columnspan=3, sticky="we", pady=8)
+
+        foot = tk.Frame(body, bg=C["surface"])
+        foot.grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        styled_button(foot, "Salvar lançamento", self._salvar_entry,
+                      accent=True).pack(side="left")
+        self._msg_lbl = tk.Label(foot, text="", bg=C["surface"], fg=C["ink_muted"],
+                                  font=("Segoe UI", 8))
+        self._msg_lbl.pack(side="left", padx=(12, 0))
+
+        recentes_hdr = tk.Frame(parent, bg=C["bg"])
+        recentes_hdr.pack(fill="x", pady=(20, 6))
+        tk.Label(recentes_hdr, text="Lançamentos recentes", bg=C["bg"], fg=C["ink"],
+                 font=("Segoe UI", 11, "bold")).pack(side="left")
+        self._recentes_wrap = tk.Frame(parent, bg=C["bg"])
+        self._recentes_wrap.pack(fill="x")
+
+    def _set_cessao(self, v):
+        self._cessao_val.set(v)
+        _pipe_set_toggle(self._btn_cessao_n, v == "N")
+        _pipe_set_toggle(self._btn_cessao_s, v == "S")
+
+    def _parse_data_report(self):
+        raw = (self._var_data.get() or "").strip()
+        try:
+            return datetime.strptime(raw, "%d/%m/%Y").date()
+        except ValueError:
+            return None
+
+    def _salvar_entry(self):
+        d = self._parse_data_report()
+        if d is None:
+            self._msg_lbl.configure(text="Data inválida (use dd/mm/aaaa).", fg=C["err"])
+            return
+        cents = self._get_volume_cents()
+        if cents <= 0:
+            self._msg_lbl.configure(text="Informe um volume maior que zero.", fg=C["err"])
+            return
+        trader = self._var_trader.get()
+        if trader not in PIPE_TRADERS:
+            self._msg_lbl.configure(text="Selecione um trader válido.", fg=C["err"])
+            return
+        cliente = (self._var_cliente.get() or "").strip() or None
+        spread = _pipe_decimal_to_float(self._var_spread.get())
+        prazo = _pipe_decimal_to_float(self._var_prazo.get())
+        iraroc = _pipe_decimal_to_float(self._var_iraroc.get())
+        try:
+            regiao = int(self._var_regiao.get()) if self._var_regiao.get().strip() else None
+        except ValueError:
+            regiao = None
+        ok = self._data.add_entry(
+            d.isoformat(), trader, cliente, self._cessao_val.get(), cents, spread,
+            prazo, iraroc, (self._var_obs.get() or "").strip() or None, regiao)
+        if ok:
+            self._msg_lbl.configure(text="Lançamento salvo.", fg=C["ok"])
+        else:
+            self._msg_lbl.configure(
+                text="Sem rede — lançamento guardado localmente e será "
+                     "enviado ao reconectar.", fg=C["warn"])
+        self._set_volume_cents(0)
+        self._var_cliente.set("")
+        self._var_spread.set(""); self._var_prazo.set("")
+        self._var_iraroc.set(""); self._var_regiao.set(""); self._var_obs.set("")
+        self._refresh_network_state()
+        self._refresh_recentes()
+
+    def _refresh_recentes(self):
+        for w in self._recentes_wrap.winfo_children():
+            w.destroy()
+        hoje = date.today()
+        rows = self._data.entries_between(hoje - timedelta(days=13), hoje)[:10]
+        self._render_entry_rows(self._recentes_wrap, rows,
+                                 vazio_msg="Nenhum lançamento nos últimos dias.")
+
+    def _render_entry_rows(self, parent, rows, vazio_msg="Nenhum lançamento encontrado."):
+        if not rows:
+            tk.Label(parent, text=vazio_msg, bg=C["bg"], fg=C["ink_faint"],
+                     font=("Segoe UI", 9)).pack(anchor="w", pady=4)
+            return
+        for r in rows:
+            row_f = tk.Frame(parent, bg=C["surface"], padx=14, pady=8,
+                              highlightthickness=1, highlightbackground=C["hair"])
+            row_f.pack(fill="x", pady=3)
+            d_fmt = datetime.strptime(r["data_report"], "%Y-%m-%d").strftime("%d/%m/%Y")
+            cessao_txt = "Cessão" if (r["cessao"] or "").upper() == "S" else "Risco Sacado"
+            val_txt = _fmt_brl(Decimal(r["volume_centavos"]) / Decimal("100"))
+            cliente_txt = f"  ·  {r['cliente']}" if r.get("cliente") else ""
+            tk.Label(row_f, text=f"{d_fmt}  ·  {r['trader']}{cliente_txt}  ·  {cessao_txt}",
+                     bg=C["surface"], fg=C["ink"], font=("Segoe UI", 9, "bold")).pack(
+                         side="left")
+            tk.Label(row_f, text=val_txt, bg=C["surface"], fg=C["accent"],
+                     font=("Segoe UI", 9, "bold")).pack(side="right")
+            detalhe = []
+            if r["spread"]: detalhe.append(f"Spread {r['spread']}%")
+            if r["prazo_medio"]: detalhe.append(f"Prazo {r['prazo_medio']}")
+            if r["iraroc"]: detalhe.append(f"IRAROC {r['iraroc']}")
+            if r["regiao"]: detalhe.append(f"Região {r['regiao']}")
+            if detalhe:
+                tk.Label(row_f, text="   ·   ".join(detalhe), bg=C["surface"],
+                         fg=C["ink_faint"], font=("Segoe UI", 8)).pack(side="right",
+                                                                        padx=(0, 14))
+
+    # ── Aba: Validar dados ───────────────────────────────────────────
+    def _build_validar(self, parent):
+        filt = card_frame(parent)
+        filt.pack(fill="x")
+        fbody = tk.Frame(filt, bg=C["surface"], padx=24, pady=18)
+        fbody.pack(fill="x")
+
+        row1 = tk.Frame(fbody, bg=C["surface"])
+        row1.pack(fill="x")
+        tk.Label(row1, text="Trader", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        self._var_v_trader = tk.StringVar(value="Todos")
+        ttk.Combobox(row1, textvariable=self._var_v_trader,
+                     values=["Todos"] + PIPE_TRADERS, state="readonly",
+                     width=14, font=("Segoe UI", 9)).pack(side="left", padx=(0, 20))
+
+        tk.Label(row1, text="Período", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        self._var_periodo = tk.StringVar(value="mensal")
+        self._btn_semanal = _pipe_toggle_button(row1, "Semanal",
+                                                 lambda: self._set_periodo("semanal"), small=True)
+        self._btn_semanal.pack(side="left")
+        self._btn_mensal = _pipe_toggle_button(row1, "Mensal",
+                                                lambda: self._set_periodo("mensal"), small=True)
+        self._btn_mensal.pack(side="left", padx=(6, 20))
+
+        tk.Label(row1, text="Comparar com", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        self._var_ano_cmp = tk.StringVar(value=str(date.today().year - 1))
+        styled_entry(row1, textvariable=self._var_ano_cmp, width=6).pack(side="left")
+        tk.Label(row1, text="(ano)", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(side="left", padx=(4, 0))
+
+        row2 = tk.Frame(fbody, bg=C["surface"])
+        row2.pack(fill="x", pady=(12, 0))
+        self._row2 = row2
+
+        self._var_mes = tk.StringVar(
+            value=f"{PIPE_MESES[date.today().month - 1]}/{date.today().year}")
+        self._var_ref_data = tk.StringVar(value=date.today().strftime("%d/%m/%Y"))
+
+        self._mes_lbl = tk.Label(row2, text="Mês", bg=C["surface"], fg=C["ink_muted"],
+                                  font=("Segoe UI", 9))
+        self._mes_cb = ttk.Combobox(
+            row2, textvariable=self._var_mes, state="readonly", width=16,
+            font=("Segoe UI", 9),
+            values=[f"{m}/{date.today().year}" for m in PIPE_MESES] +
+                   [f"{m}/{date.today().year - 1}" for m in PIPE_MESES])
+
+        self._ref_lbl = tk.Label(row2, text="Data de referência (semana)",
+                                  bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9))
+        self._ref_ent = styled_entry(row2, textvariable=self._var_ref_data, width=14)
+
+        styled_button(fbody, "Atualizar", self._refresh_validar,
+                      accent=True).pack(anchor="w", pady=(14, 0))
+
+        self._alert_wrap = tk.Frame(parent, bg=C["bg"])
+        self._alert_wrap.pack(fill="x", pady=(16, 0))
+
+        self._cards_wrap = tk.Frame(parent, bg=C["bg"])
+        self._cards_wrap.pack(fill="x", pady=(16, 0))
+
+        lista_hdr = tk.Frame(parent, bg=C["bg"])
+        lista_hdr.pack(fill="x", pady=(24, 6))
+        tk.Label(lista_hdr, text="Lançamentos do período", bg=C["bg"], fg=C["ink"],
+                 font=("Segoe UI", 11, "bold")).pack(side="left")
+        self._lista_wrap = tk.Frame(parent, bg=C["bg"])
+        self._lista_wrap.pack(fill="x")
+
+        self._set_periodo("mensal")
+
+    def _set_periodo(self, p):
+        self._var_periodo.set(p)
+        if p == "mensal":
+            _pipe_set_toggle(self._btn_mensal, True)
+            _pipe_set_toggle(self._btn_semanal, False)
+            self._ref_lbl.pack_forget(); self._ref_ent.pack_forget()
+            self._mes_lbl.pack(side="left", padx=(0, 8))
+            self._mes_cb.pack(side="left")
+        else:
+            _pipe_set_toggle(self._btn_semanal, True)
+            _pipe_set_toggle(self._btn_mensal, False)
+            self._mes_lbl.pack_forget(); self._mes_cb.pack_forget()
+            self._ref_lbl.pack(side="left", padx=(0, 8))
+            self._ref_ent.pack(side="left")
+
+    def _periodo_atual(self):
+        """Retorna (dt_ini, dt_fim, dt_ini_ant, dt_fim_ant, label) do período
+        selecionado e do mesmo período no ano de comparação escolhido."""
+        try:
+            ano_cmp = int(self._var_ano_cmp.get())
+        except ValueError:
+            ano_cmp = date.today().year - 1
+        if self._var_periodo.get() == "mensal":
+            mes_txt, ano_txt = self._var_mes.get().split("/")
+            ano = int(ano_txt)
+            mes = PIPE_MESES.index(mes_txt) + 1
+            ini, fim = _pipe_month_range(ano, mes)
+            ini_ant, fim_ant = _pipe_month_range(ano_cmp, mes)
+            label = f"{mes_txt}/{ano}"
+            label_ant = f"{mes_txt}/{ano_cmp}"
+        else:
+            try:
+                ref = datetime.strptime(self._var_ref_data.get(), "%d/%m/%Y").date()
+            except ValueError:
+                ref = date.today()
+            ini, fim = _pipe_week_range(ref)
+            ref_ant = ref.replace(year=ano_cmp) if not (ref.month == 2 and ref.day == 29) \
+                else date(ano_cmp, 2, 28)
+            ini_ant, fim_ant = _pipe_week_range(ref_ant)
+            label = f"{ini.strftime('%d/%m')} a {fim.strftime('%d/%m/%Y')}"
+            label_ant = f"{ini_ant.strftime('%d/%m')} a {fim_ant.strftime('%d/%m/%Y')}"
+        return ini, fim, ini_ant, fim_ant, label, label_ant
+
+    def _refresh_validar(self):
+        for w in self._cards_wrap.winfo_children():
+            w.destroy()
+        for w in self._alert_wrap.winfo_children():
+            w.destroy()
+        for w in self._lista_wrap.winfo_children():
+            w.destroy()
+
+        ini, fim, ini_ant, fim_ant, label, label_ant = self._periodo_atual()
+        trader = self._var_v_trader.get()
+
+        atual = self._data.summary(ini, fim, trader)
+        anterior = self._data.summary(ini_ant, fim_ant, trader)
+        equipe_atual = self._data.summary(ini, fim, None)
+        equipe_anterior = self._data.summary(ini_ant, fim_ant, None)
+        inc = self._data.inconsistencias(ini, fim, trader)
+        rows_periodo = self._data.entries_between(ini, fim, trader)
+        self._render_entry_rows(
+            self._lista_wrap, rows_periodo,
+            vazio_msg="Nenhum lançamento no período selecionado.")
+
+        if inc["incompletos"] or inc["duplicados"]:
+            partes = []
+            if inc["incompletos"]:
+                partes.append(f"{inc['incompletos']} lançamento(s) com campos em branco")
+            if inc["duplicados"]:
+                partes.append(f"{inc['duplicados']} possível(is) duplicata(s)")
+            banner = tk.Frame(self._alert_wrap, bg="#3d3520")
+            banner.pack(fill="x")
+            tk.Label(banner, text="⚠ " + "; ".join(partes) + " — vale revisar.",
+                     bg="#3d3520", fg=C["warn"], font=("Segoe UI", 8, "bold"),
+                     anchor="w", justify="left", wraplength=900).pack(
+                         fill="x", padx=16, pady=8)
+
+        def growth(a, b):
+            if b == 0:
+                return None
+            return (a - b) / b * 100
+
+        def gap_para_bater(a, b):
+            """Quanto falta (R$ e %) para o período atual igualar o valor do
+            período anterior (mesmo trecho, ano de comparação)."""
+            if a >= b:
+                return None
+            falta = b - a
+            pct = (falta / a * 100) if a > 0 else None
+            return falta, pct
+
+        grid = tk.Frame(self._cards_wrap, bg=C["bg"])
+        grid.pack(fill="x")
+        for c in range(3):
+            grid.columnconfigure(c, weight=1, uniform="pcards")
+
+        def make_card(r, c, titulo, valor_cents, sub=None, color=None):
+            outer = tk.Frame(grid, bg=C["bg"])
+            outer.grid(row=r, column=c, sticky="nsew", padx=5, pady=5)
+            card = card_frame(outer)
+            card.pack(fill="both", expand=True)
+            body = tk.Frame(card, bg=C["surface"], padx=16, pady=14)
+            body.pack(fill="both", expand=True)
+            tk.Label(body, text=titulo, bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w")
+            tk.Label(body, text=_fmt_brl(Decimal(valor_cents) / Decimal("100")),
+                     bg=C["surface"], fg=color or C["ink"],
+                     font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(4, 0))
+            if sub:
+                tk.Label(body, text=sub, bg=C["surface"], fg=C["ink_muted"],
+                         font=("Segoe UI", 8), justify="left", wraplength=220).pack(
+                             anchor="w", pady=(4, 0))
+
+        titulo_trader = "Todos os traders" if trader == "Todos" else trader
+        make_card(0, 0, f"TOTAL · {label} · {titulo_trader}", atual["total"],
+                   sub=f"{atual['count']} lançamento(s)")
+        make_card(0, 1, "RISCO SACADO", atual["risco"])
+        make_card(0, 2, "CESSÃO", atual["cessao"])
+
+        cresc = growth(atual["total"], anterior["total"])
+        cresc_txt = f"{cresc:+.1f}%" if cresc is not None else "—"
+        cresc_color = C["ok"] if (cresc or 0) >= 0 else C["err"]
+        make_card(1, 0, f"MESMO PERÍODO · {label_ant}", anterior["total"],
+                   sub=f"Crescimento: {cresc_txt}", color=None)
+
+        gap = gap_para_bater(atual["total"], anterior["total"])
+        if gap is None:
+            gap_sub = "Já superou o mesmo período do ano de comparação."
+            gap_val = 0
+        else:
+            falta, pct = gap
+            gap_val = falta
+            gap_sub = (f"Falta {pct:.1f}% sobre o total atual" if pct is not None
+                       else "Total atual é zero")
+        make_card(1, 1, "FALTA PARA IGUALAR", gap_val, sub=gap_sub,
+                   color=C["warn"] if gap_val else C["ok"])
+
+        cresc_lbl = tk.Frame(grid, bg=C["bg"])
+        cresc_lbl.grid(row=1, column=2, sticky="nsew", padx=5, pady=5)
+        cc = card_frame(cresc_lbl); cc.pack(fill="both", expand=True)
+        cb2 = tk.Frame(cc, bg=C["surface"], padx=16, pady=14); cb2.pack(fill="both", expand=True)
+        tk.Label(cb2, text="CRESCIMENTO % (YoY)", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w")
+        tk.Label(cb2, text=cresc_txt, bg=C["surface"], fg=cresc_color,
+                 font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(4, 0))
+
+        if trader != "Todos":
+            tk.Label(self._cards_wrap, text="Time completo (montante)", bg=C["bg"],
+                     fg=C["ink"], font=("Segoe UI", 10, "bold")).pack(
+                         anchor="w", pady=(20, 8))
+            grid2 = tk.Frame(self._cards_wrap, bg=C["bg"])
+            grid2.pack(fill="x")
+            for c in range(3):
+                grid2.columnconfigure(c, weight=1, uniform="pcards2")
+
+            def make_card2(r, c, titulo, valor_cents, sub=None, color=None):
+                outer = tk.Frame(grid2, bg=C["bg"])
+                outer.grid(row=r, column=c, sticky="nsew", padx=5, pady=5)
+                card = card_frame(outer)
+                card.pack(fill="both", expand=True)
+                body = tk.Frame(card, bg=C["surface"], padx=16, pady=14)
+                body.pack(fill="both", expand=True)
+                tk.Label(body, text=titulo, bg=C["surface"], fg=C["ink_faint"],
+                         font=("Segoe UI", 7, "bold")).pack(anchor="w")
+                tk.Label(body, text=_fmt_brl(Decimal(valor_cents) / Decimal("100")),
+                         bg=C["surface"], fg=color or C["ink"],
+                         font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(4, 0))
+                if sub:
+                    tk.Label(body, text=sub, bg=C["surface"], fg=C["ink_muted"],
+                             font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
+
+            cresc_eq = growth(equipe_atual["total"], equipe_anterior["total"])
+            cresc_eq_txt = f"{cresc_eq:+.1f}%" if cresc_eq is not None else "—"
+            make_card2(0, 0, f"TOTAL EQUIPE · {label}", equipe_atual["total"],
+                        sub=f"{equipe_atual['count']} lançamento(s)")
+            make_card2(0, 1, f"EQUIPE · {label_ant}", equipe_anterior["total"],
+                        sub=f"Crescimento: {cresc_eq_txt}")
+            gap_eq = gap_para_bater(equipe_atual["total"], equipe_anterior["total"])
+            if gap_eq is None:
+                make_card2(0, 2, "FALTA (EQUIPE)", 0, sub="Já superou.", color=C["ok"])
+            else:
+                falta_eq, pct_eq = gap_eq
+                sub_eq = (f"Falta {pct_eq:.1f}% sobre o total atual" if pct_eq is not None
+                          else "Total atual é zero")
+                make_card2(0, 2, "FALTA (EQUIPE)", falta_eq, sub=sub_eq, color=C["warn"])
+
+    # ── Aba: Gerenciar dados (editar / excluir) ──────────────────────
+    def _build_gerenciar(self, parent):
+        filt = card_frame(parent)
+        filt.pack(fill="x")
+        fbody = tk.Frame(filt, bg=C["surface"], padx=24, pady=18)
+        fbody.pack(fill="x")
+
+        row1 = tk.Frame(fbody, bg=C["surface"])
+        row1.pack(fill="x")
+        tk.Label(row1, text="Trader", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        self._var_g_trader = tk.StringVar(value="Todos")
+        ttk.Combobox(row1, textvariable=self._var_g_trader,
+                     values=["Todos"] + PIPE_TRADERS, state="readonly",
+                     width=14, font=("Segoe UI", 9)).pack(side="left", padx=(0, 20))
+
+        tk.Label(row1, text="De", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        self._var_g_de = tk.StringVar(
+            value=(date.today() - timedelta(days=30)).strftime("%d/%m/%Y"))
+        styled_entry(row1, textvariable=self._var_g_de, width=12).pack(side="left")
+        tk.Label(row1, text="até", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(10, 8))
+        self._var_g_ate = tk.StringVar(value=date.today().strftime("%d/%m/%Y"))
+        styled_entry(row1, textvariable=self._var_g_ate, width=12).pack(side="left")
+
+        styled_button(fbody, "Buscar", self._refresh_gerenciar,
+                      accent=True).pack(anchor="w", pady=(14, 0))
+
+        self._gerenciar_lista = tk.Frame(parent, bg=C["bg"])
+        self._gerenciar_lista.pack(fill="x", pady=(16, 0))
+
+    def _refresh_gerenciar(self):
+        for w in self._gerenciar_lista.winfo_children():
+            w.destroy()
+        try:
+            de = datetime.strptime(self._var_g_de.get(), "%d/%m/%Y").date()
+        except ValueError:
+            de = date.today() - timedelta(days=30)
+        try:
+            ate = datetime.strptime(self._var_g_ate.get(), "%d/%m/%Y").date()
+        except ValueError:
+            ate = date.today()
+        trader = self._var_g_trader.get()
+        rows = self._data.entries_between(de, ate, trader)
+        if not rows:
+            tk.Label(self._gerenciar_lista, text="Nenhum lançamento encontrado no período.",
+                     bg=C["bg"], fg=C["ink_faint"], font=("Segoe UI", 9)).pack(
+                         anchor="w", pady=4)
+            return
+        for r in rows:
+            self._make_gerenciar_row(r)
+
+    def _make_gerenciar_row(self, r):
+        row_f = tk.Frame(self._gerenciar_lista, bg=C["surface"], padx=14, pady=8,
+                          highlightthickness=1, highlightbackground=C["hair"])
+        row_f.pack(fill="x", pady=3)
+
+        d_fmt = datetime.strptime(r["data_report"], "%Y-%m-%d").strftime("%d/%m/%Y")
+        cessao_txt = "Cessão" if (r["cessao"] or "").upper() == "S" else "Risco Sacado"
+        val_txt = _fmt_brl(Decimal(r["volume_centavos"]) / Decimal("100"))
+        cliente_txt = f"  ·  {r['cliente']}" if r.get("cliente") else ""
+
+        info = tk.Frame(row_f, bg=C["surface"])
+        info.pack(side="left", fill="x", expand=True)
+        tk.Label(info, text=f"{d_fmt}  ·  {r['trader']}{cliente_txt}  ·  {cessao_txt}",
+                 bg=C["surface"], fg=C["ink"], font=("Segoe UI", 9, "bold")).pack(
+                     anchor="w")
+        detalhe = [val_txt]
+        if r["spread"]: detalhe.append(f"Spread {r['spread']}%")
+        if r["prazo_medio"]: detalhe.append(f"Prazo {r['prazo_medio']}")
+        if r["iraroc"]: detalhe.append(f"IRAROC {r['iraroc']}")
+        if r["regiao"]: detalhe.append(f"Região {r['regiao']}")
+        if r["observacao"]: detalhe.append(r["observacao"])
+        tk.Label(info, text="   ·   ".join(detalhe), bg=C["surface"],
+                 fg=C["ink_faint"], font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
+        acoes = tk.Frame(row_f, bg=C["surface"])
+        acoes.pack(side="right")
+
+        edit_btn = tk.Button(acoes, text="✎", command=lambda: self._abrir_editor(r),
+                              bg=C["surface2"], fg=C["warn"],
+                              activebackground=C["warn"], activeforeground=C["bg"],
+                              font=("Segoe UI", 9, "bold"), relief="flat", bd=0,
+                              padx=9, pady=3, cursor="hand2")
+        edit_btn.pack(side="left", padx=(0, 6))
+        edit_btn.bind("<Enter>", lambda _e: edit_btn.configure(bg=C["warn"], fg=C["bg"]))
+        edit_btn.bind("<Leave>", lambda _e: edit_btn.configure(bg=C["surface2"], fg=C["warn"]))
+
+        del_btn = tk.Button(acoes, text="✕", command=lambda: self._confirmar_exclusao(r),
+                             bg=C["surface2"], fg=C["err"],
+                             activebackground=C["err"], activeforeground=C["bg"],
+                             font=("Segoe UI", 9, "bold"), relief="flat", bd=0,
+                             padx=9, pady=3, cursor="hand2")
+        del_btn.pack(side="left")
+        del_btn.bind("<Enter>", lambda _e: del_btn.configure(bg=C["err"], fg=C["bg"]))
+        del_btn.bind("<Leave>", lambda _e: del_btn.configure(bg=C["surface2"], fg=C["err"]))
+
+    # ── Modal de edição/exclusão (overlay centralizado, mesmo padrão do
+    #    OperacoesInvertidoFrame) ───────────────────────────────────────
+    def _abrir_overlay(self):
+        if getattr(self, "_overlay", None) is not None:
+            self._fechar_overlay()
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.bind("<Button-1>", lambda _e: self._fechar_overlay())
+        self._overlay = overlay
+        return overlay
+
+    def _fechar_overlay(self):
+        if getattr(self, "_overlay", None) is not None:
+            self._overlay.destroy()
+            self._overlay = None
+
+    def _confirmar_exclusao(self, r):
+        overlay = self._abrir_overlay()
+        card = tk.Frame(overlay, bg=C["surface"],
+                         highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=420, height=200)
+        card.bind("<Button-1>", lambda _e: "break")
+        pad = tk.Frame(card, bg=C["surface"], padx=26, pady=22)
+        pad.pack(fill="both", expand=True)
+
+        tk.Label(pad, text="Excluir lançamento?", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        d_fmt = datetime.strptime(r["data_report"], "%Y-%m-%d").strftime("%d/%m/%Y")
+        val_txt = _fmt_brl(Decimal(r["volume_centavos"]) / Decimal("100"))
+        tk.Label(pad, text=f"{d_fmt} · {r['trader']} · {val_txt}\nEssa ação não pode "
+                            "ser desfeita.",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
+                 justify="left").pack(anchor="w", pady=(8, 0))
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(20, 0), side="bottom")
+        styled_button(foot, "Cancelar", self._fechar_overlay).pack(side="left")
+
+        def do_delete():
+            self._data.delete_entry(r["id"])
+            self._fechar_overlay()
+            self._refresh_gerenciar()
+
+        styled_button(foot, "Excluir", do_delete, danger=True).pack(side="left", padx=(8, 0))
+
+    def _abrir_editor(self, r):
+        overlay = self._abrir_overlay()
+        card = tk.Frame(overlay, bg=C["surface"],
+                         highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=480, height=560)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=26, pady=22)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text="Editar lançamento", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold")).pack(side="left")
+        styled_button(top, "✕", self._fechar_overlay, small=True).pack(side="right")
+
+        body = tk.Frame(pad, bg=C["surface"])
+        body.pack(fill="both", expand=True, pady=(16, 0))
+        body.columnconfigure(1, weight=1)
+
+        def label(txt, rr):
+            tk.Label(body, text=txt, bg=C["surface"], fg=C["ink_muted"],
+                     font=("Segoe UI", 9)).grid(row=rr, column=0, sticky="w", pady=7,
+                                                 padx=(0, 10))
+
+        d_fmt = datetime.strptime(r["data_report"], "%Y-%m-%d").strftime("%d/%m/%Y")
+
+        label("Data Report", 0)
+        v_data = tk.StringVar(value=d_fmt)
+        styled_entry(body, textvariable=v_data, width=14).grid(
+            row=0, column=1, sticky="w", pady=7)
+
+        label("Trader", 1)
+        v_trader = tk.StringVar(value=r["trader"])
+        ttk.Combobox(body, textvariable=v_trader, values=PIPE_TRADERS,
+                     state="readonly", width=18, font=("Segoe UI", 9)).grid(
+                         row=1, column=1, sticky="w", pady=7)
+
+        label("Cliente", 2)
+        v_cliente = tk.StringVar(value=r.get("cliente") or "")
+        styled_entry(body, textvariable=v_cliente, width=30).grid(
+            row=2, column=1, sticky="we", pady=7)
+
+        label("Cessão", 3)
+        cessao_row = tk.Frame(body, bg=C["surface"])
+        cessao_row.grid(row=3, column=1, sticky="w", pady=7)
+        v_cessao = tk.StringVar(value=(r["cessao"] or "N").upper())
+        btn_n = _pipe_toggle_button(cessao_row, "Não", lambda: set_cessao("N"), small=True)
+        btn_n.pack(side="left")
+        btn_s = _pipe_toggle_button(cessao_row, "Sim", lambda: set_cessao("S"), small=True)
+        btn_s.pack(side="left", padx=(6, 0))
+
+        def set_cessao(v):
+            v_cessao.set(v)
+            _pipe_set_toggle(btn_n, v == "N")
+            _pipe_set_toggle(btn_s, v == "S")
+        set_cessao(v_cessao.get())
+
+        label("Volume (R$)", 4)
+        v_volume = tk.StringVar()
+        ent_vol = styled_entry(body, textvariable=v_volume, width=18)
+        ent_vol.grid(row=4, column=1, sticky="w", pady=7)
+        get_vol_cents, set_vol_cents = _pipe_bind_money_entry(
+            ent_vol, v_volume, initial_cents=r["volume_centavos"])
+
+        label("Spread (%)", 5)
+        v_spread = tk.StringVar(value=("" if r["spread"] is None else
+                                        str(r["spread"]).replace(".", ",")))
+        ent_spread = styled_entry(body, textvariable=v_spread, width=14)
+        ent_spread.grid(row=5, column=1, sticky="w", pady=7)
+        _pipe_bind_decimal_entry(ent_spread, v_spread)
+
+        label("Prazo médio", 6)
+        v_prazo = tk.StringVar(value=("" if r["prazo_medio"] is None else
+                                       str(r["prazo_medio"]).replace(".", ",")))
+        ent_prazo = styled_entry(body, textvariable=v_prazo, width=14)
+        ent_prazo.grid(row=6, column=1, sticky="w", pady=7)
+        _pipe_bind_decimal_entry(ent_prazo, v_prazo)
+
+        label("IRAROC", 7)
+        v_iraroc = tk.StringVar(value=("" if r["iraroc"] is None else
+                                        str(r["iraroc"]).replace(".", ",")))
+        ent_iraroc = styled_entry(body, textvariable=v_iraroc, width=14)
+        ent_iraroc.grid(row=7, column=1, sticky="w", pady=7)
+        _pipe_bind_decimal_entry(ent_iraroc, v_iraroc)
+
+        label("Região", 8)
+        v_regiao = tk.StringVar(value=("" if r["regiao"] is None else str(r["regiao"])))
+        ent_regiao = styled_entry(body, textvariable=v_regiao, width=14)
+        ent_regiao.grid(row=8, column=1, sticky="w", pady=7)
+
+        def only_digits_key(e):
+            if e.keysym in {"Tab", "Left", "Right", "Home", "End", "BackSpace", "Delete"}:
+                return
+            if e.char and e.char.isdigit():
+                return
+            return "break"
+        ent_regiao.bind("<Key>", only_digits_key)
+
+        label("Observação", 9)
+        v_obs = tk.StringVar(value=r.get("observacao") or "")
+        styled_entry(body, textvariable=v_obs, width=30).grid(
+            row=9, column=1, sticky="we", pady=7)
+
+        msg_lbl = tk.Label(pad, text="", bg=C["surface"], fg=C["err"], font=("Segoe UI", 8))
+        msg_lbl.pack(anchor="w", pady=(6, 0))
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(10, 0), side="bottom")
+        styled_button(foot, "Cancelar", self._fechar_overlay).pack(side="left")
+
+        def do_confirm():
+            try:
+                d = datetime.strptime(v_data.get().strip(), "%d/%m/%Y").date()
+            except ValueError:
+                msg_lbl.configure(text="Data inválida (use dd/mm/aaaa)."); return
+            cents = get_vol_cents()
+            if cents <= 0:
+                msg_lbl.configure(text="Informe um volume maior que zero."); return
+            trader = v_trader.get()
+            if trader not in PIPE_TRADERS:
+                msg_lbl.configure(text="Selecione um trader válido."); return
+            try:
+                regiao = int(v_regiao.get()) if v_regiao.get().strip() else None
+            except ValueError:
+                regiao = None
+            self._data.update_entry(
+                r["id"],
+                data_report=d.isoformat(), trader=trader,
+                cliente=(v_cliente.get() or "").strip() or None,
+                cessao=v_cessao.get(), volume_centavos=cents,
+                spread=_pipe_decimal_to_float(v_spread.get()),
+                prazo_medio=_pipe_decimal_to_float(v_prazo.get()),
+                iraroc=_pipe_decimal_to_float(v_iraroc.get()),
+                observacao=(v_obs.get() or "").strip() or None,
+                regiao=regiao)
+            self._fechar_overlay()
+            self._refresh_gerenciar()
+
+        styled_button(foot, "Confirmar", do_confirm, accent=True).pack(
+            side="left", padx=(8, 0))
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -8798,6 +10870,7 @@ class App(tk.Tk):
             (LimitesInvertidoFrame,  "LimitesInvertido"),
             (TaxasInvertidoFrame,    "TaxasInvertido"),
             (HistoricoOperacoesFrame,"HistoricoOperacoes"),
+            (PipelineFrame,          "Pipeline"),
         ]:
             f = Cls(self._content, self)
             self.frames[name] = f
