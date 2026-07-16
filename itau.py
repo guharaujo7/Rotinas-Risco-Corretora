@@ -745,7 +745,6 @@ def build_risco_sacado_email_html(sacado_nome: str, sacado_cnpj: str,
 </table>
 <p>&nbsp;</p>
 <p>&quot;Operação é paga ao Fornecedor na conta indicada.</p>
-<p>Banco Itaú Unibanco S.A - Agência 0911 / Conta 11863-6&quot;</p>
 <p>Lembrando que operações antecipadas/pagas não são passíveis de cancelamento. No bankline terá acesso as notas antecipadas através da Rota - Mais Serviços - Consulta de Notas Negociadas</p>
 <p>&nbsp;</p>
 <p><span style="font-size:16.5pt;font-family:'Itau Display',serif;color:#9A9A9A;font-weight:bold">Bons Negócios,</span></p>
@@ -1677,6 +1676,8 @@ FRAME_LABELS = {
     "AnalisarOperacoes": "Analisar Operações",
     "TaxasInvertido":    "Taxas (Depara)",
     "Pipeline":          "Pipeline",
+    "TaxasPre":          "Taxas Pré",
+    "Ligacoes":          "Ligações",
 }
 
 
@@ -2405,6 +2406,7 @@ class Sidebar(tk.Frame):
         ("BPM",               "⚡",  "BPM"),
         ("OperacoesInvertido","⬡",  "Operações Invertido"),
         ("Pipeline",          "◫",  "Pipeline"),
+        ("TaxasPre",          "◔",  "Taxas Pré"),
     ]
 
     def __init__(self, parent, controller, **kwargs):
@@ -2580,11 +2582,37 @@ class HomeFrame(tk.Frame):
         eyebrow_label(inner, "ROTINAS DE HOJE").pack(anchor="w", padx=44, pady=(0, 8))
 
         self._rot_container = tk.Frame(inner, bg=C["bg"])
-        self._rot_container.pack(fill="x", padx=44, pady=(0, 40))
+        self._rot_container.pack(fill="x", padx=44, pady=(0, 24))
         self._build_rotinas_hoje()
+
+        make_hairline(inner, bg=C["hair"]).pack(fill="x", padx=44, pady=(0, 16))
+        lig_row = tk.Frame(inner, bg=C["bg"])
+        lig_row.pack(fill="x", padx=44, pady=(0, 40))
+        lig_btn = tk.Button(
+            lig_row, text="☎  Ligações", command=lambda: self.controller.show_frame("Ligacoes"),
+            bg=C["bg"], fg=C["ink_muted"], activebackground=C["bg"], activeforeground=C["ink"],
+            font=("Segoe UI", 9), relief="flat", bd=0, padx=0, cursor="hand2")
+        lig_btn.pack(side="left")
+        lig_btn.bind("<Enter>", lambda _e: lig_btn.configure(fg=C["ink"]))
+        lig_btn.bind("<Leave>", lambda _e: lig_btn.configure(fg=C["ink_muted"]))
+        self._lig_hoje_lbl = tk.Label(lig_row, text="", bg=C["bg"], fg=C["ink_faint"],
+                                       font=("Segoe UI", 8))
+        self._lig_hoje_lbl.pack(side="left", padx=(10, 0))
+        self._refresh_ligacoes_hoje()
+
+    def _refresh_ligacoes_hoje(self):
+        try:
+            n = LigacoesData.get().total_dia(date.today().isoformat())
+        except Exception:
+            n = 0
+        if n:
+            self._lig_hoje_lbl.configure(text=f"· {n} ligaç{'ão' if n == 1 else 'ões'} hoje")
+        else:
+            self._lig_hoje_lbl.configure(text="")
 
     def on_show(self):
         self.refresh_rotinas()
+        self._refresh_ligacoes_hoje()
         if not getattr(self, "_market_loop_started", False):
             self._market_loop_started = True
             self._refresh_market_status()
@@ -8042,7 +8070,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         incluidas = [n for n in payload["notas"] if n["incluida"]]
         nome_sacado = group["nome_sacado"]
-        subject = f"RISCO SACADO INVERTIDO - {nome_sacado.upper()} x VIBRA ENERGIA SA"
+        subject = f"RISCO SACADO INVERTIDO - {nome_sacado.upper()}"
         html = build_risco_sacado_email_html(
             sacado_nome=nome_sacado.upper(),
             sacado_cnpj=payload["doc_sacado"],
@@ -10815,6 +10843,1047 @@ class PipelineFrame(tk.Frame):
             side="left", padx=(8, 0))
 
 
+# ─── Taxas Pré (histórico mensal de taxa por cliente/sacado) ──────────────
+# Banco PRÓPRIO (taxas_pre.db), separado do pipe.db e do historico_operacoes.db,
+# na mesma pasta de rede — assim a importação da planilha nunca conflita com
+# os outros módulos. Fonte: abas "RS PADRÃO 2025" / "TAXAS 2026" (categoria
+# "taxas") e "INVERTIDO 2025" / "INVERTIDO 2026" (categoria "invertido") da
+# planilha de Taxas Pré, importada sob demanda (arquivo escolhido pelo usuário).
+
+TAXAS_PRE_DB_PATH = os.path.join(os.path.dirname(SHARED_TAXAS_PATH), "taxas_pre.db")
+TAXAS_PRE_SHEETS = [
+    ("RS PADRÃO 2025", "taxas"),
+    ("TAXAS 2026", "taxas"),
+    ("INVERTIDO 2025", "invertido"),
+    ("INVERTIDO 2026", "invertido"),
+]
+TAXAS_PRE_CATEGORIAS = [("taxas", "Taxas 2026"), ("invertido", "Invertido")]
+_TAXAS_PRE_MES_ABBR_PT = ["jan", "fev", "mar", "abr", "mai", "jun",
+                           "jul", "ago", "set", "out", "nov", "dez"]
+_TAXAS_PRE_MES_NUM = {"jan": 1, "fev": 2, "mar": 3, "abr": 4, "mai": 5, "jun": 6,
+                       "jul": 7, "ago": 8, "set": 9, "out": 10, "nov": 11, "dez": 12}
+
+
+def _taxas_pre_normalize(s):
+    import unicodedata
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
+
+
+def _taxas_pre_parse_mes(v):
+    """Aceita cabeçalho de mês como datetime/date (célula formatada como
+    data) ou texto livre em português ('ABRIL/25', 'Out/26', 'Set/2026').
+    Retorna 'YYYY-MM' ou None se não reconhecer."""
+    if v is None:
+        return None
+    if hasattr(v, "year") and hasattr(v, "month"):
+        return f"{v.year:04d}-{v.month:02d}"
+    if isinstance(v, str):
+        s = _taxas_pre_normalize(v)
+        m = re.search(r"([a-z]+)\D{0,3}(\d{2,4})", s)
+        if not m:
+            return None
+        mes = _TAXAS_PRE_MES_NUM.get(m.group(1)[:3])
+        if not mes:
+            return None
+        ano = int(m.group(2))
+        if ano < 100:
+            ano += 2000
+        return f"{ano:04d}-{mes:02d}"
+    return None
+
+
+def _taxas_pre_mes_label(mes_ref):
+    ano, mes = mes_ref.split("-")
+    return f"{_TAXAS_PRE_MES_ABBR_PT[int(mes) - 1]}/{ano[2:]}"
+
+
+def _taxas_pre_extract_num(raw):
+    """Extrai o primeiro número da célula (texto livre tipo '1,2450%am',
+    'Carbeto 1,0850 / Sicbras 1,11', 'SEM LIMITE'). None quando a célula
+    não traz nenhum valor numérico reconhecível."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        m = re.search(r"[-+]?\d{1,3}(?:[.,]\d+)?", s)
+        if not m:
+            return None
+        try:
+            return float(m.group(0).replace(",", "."))
+        except ValueError:
+            return None
+    return None
+
+
+def _fmt_pct_am(v):
+    if v is None:
+        return "—"
+    return f"{v:.4f}".rstrip("0").rstrip(".") + "%"
+
+
+def importar_planilha_taxas_pre(caminho):
+    """Lê a planilha de Taxas Pré e devolve (linhas, resumo) prontos para
+    upsert — não grava nada sozinha. `linhas` é uma lista de dicts com
+    categoria/cliente/regiao/status/mes_ref/valor_raw/valor_num."""
+    if not OPENPYXL_OK:
+        raise RuntimeError("Biblioteca openpyxl não disponível. Instale com: pip install openpyxl")
+    wb = openpyxl.load_workbook(caminho, data_only=True)
+    linhas, resumo = [], []
+    for sheet_name, categoria in TAXAS_PRE_SHEETS:
+        if sheet_name not in wb.sheetnames:
+            continue
+        ws = wb[sheet_name]
+        header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        col_status = 0
+        col_regiao = next((i for i, h in enumerate(header)
+                            if h and "regi" in str(h).lower()), 1)
+        col_cliente = next((i for i, h in enumerate(header)
+                             if h and ("cliente" in str(h).lower()
+                                       or "sacado" in str(h).lower())), 2)
+        meses_cols = []
+        for i, h in enumerate(header):
+            if i in (col_status, col_regiao, col_cliente):
+                continue
+            mes_ref = _taxas_pre_parse_mes(h)
+            if mes_ref:
+                meses_cols.append((i, mes_ref))
+        n_clientes = 0
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if col_cliente >= len(row):
+                continue
+            cliente = row[col_cliente]
+            if not cliente or not str(cliente).strip():
+                continue
+            cliente = str(cliente).strip()
+            status_raw = row[col_status] if col_status < len(row) else None
+            status = str(status_raw).strip() if status_raw not in (None, "") else None
+            regiao_raw = row[col_regiao] if col_regiao < len(row) else None
+            try:
+                regiao = int(float(regiao_raw)) if regiao_raw not in (None, "") else None
+            except (ValueError, TypeError):
+                regiao = None
+            tinha_valor = False
+            for i, mes_ref in meses_cols:
+                if i >= len(row):
+                    continue
+                valor_raw = row[i]
+                if valor_raw is None or (isinstance(valor_raw, str) and not valor_raw.strip()):
+                    continue
+                tinha_valor = True
+                linhas.append({
+                    "categoria": categoria, "cliente": cliente, "regiao": regiao,
+                    "status": status, "mes_ref": mes_ref,
+                    "valor_raw": str(valor_raw).strip(),
+                    "valor_num": _taxas_pre_extract_num(valor_raw),
+                })
+            if tinha_valor:
+                n_clientes += 1
+        resumo.append({"aba": sheet_name, "categoria": categoria, "clientes": n_clientes})
+    return linhas, resumo
+
+
+class TaxasPreData:
+    _instance = None
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._available = False
+        self._ensure_schema()
+
+    def is_available(self):
+        return self._available
+
+    def _connect(self):
+        conn = sqlite3.connect(TAXAS_PRE_DB_PATH, timeout=20)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        return conn
+
+    def _ensure_schema(self):
+        try:
+            if not os.path.isdir(os.path.dirname(TAXAS_PRE_DB_PATH)):
+                self._available = False
+                return
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS taxas_pre_historico (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        categoria TEXT NOT NULL,
+                        cliente TEXT NOT NULL,
+                        regiao INTEGER,
+                        status TEXT,
+                        mes_ref TEXT NOT NULL,
+                        valor_raw TEXT,
+                        valor_num REAL,
+                        importado_em TEXT NOT NULL
+                    )
+                """)
+                conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_taxas_pre_uniq
+                    ON taxas_pre_historico(categoria, cliente, mes_ref)
+                """)
+                conn.commit()
+            finally:
+                conn.close()
+            self._available = True
+        except Exception as e:
+            print(f"[taxas_pre] _ensure_schema falhou: {e}", file=sys.stderr)
+            self._available = False
+
+    def _upsert_linhas(self, linhas):
+        if not self._available or not linhas:
+            return False
+        agora = datetime.now().isoformat(timespec="seconds")
+        try:
+            conn = self._connect()
+            try:
+                conn.executemany("""
+                    INSERT INTO taxas_pre_historico
+                        (categoria, cliente, regiao, status, mes_ref, valor_raw,
+                         valor_num, importado_em)
+                    VALUES (:categoria, :cliente, :regiao, :status, :mes_ref,
+                             :valor_raw, :valor_num, :importado_em)
+                    ON CONFLICT(categoria, cliente, mes_ref) DO UPDATE SET
+                        regiao=excluded.regiao, status=excluded.status,
+                        valor_raw=excluded.valor_raw, valor_num=excluded.valor_num,
+                        importado_em=excluded.importado_em
+                """, [dict(l, importado_em=agora) for l in linhas])
+                conn.commit()
+            finally:
+                conn.close()
+            return True
+        except Exception as e:
+            print(f"[taxas_pre] _upsert_linhas falhou: {e}", file=sys.stderr)
+            return False
+
+    def salvar_taxa(self, categoria, cliente, regiao, status, mes_ref, valor_raw):
+        """Inclui ou atualiza (upsert) a taxa de um único cliente/mês —
+        usado pelo formulário de inclusão manual na tela."""
+        if not self._available:
+            return {"ok": False, "reason": "Banco de Taxas Pré indisponível (rede fora do ar)."}
+        if not cliente or not cliente.strip():
+            return {"ok": False, "reason": "Informe o cliente."}
+        if not mes_ref:
+            return {"ok": False, "reason": "Mês/ano inválido."}
+        linha = {
+            "categoria": categoria, "cliente": cliente.strip(), "regiao": regiao,
+            "status": (status or "").strip() or None, "mes_ref": mes_ref,
+            "valor_raw": (valor_raw or "").strip() or None,
+            "valor_num": _taxas_pre_extract_num(valor_raw),
+        }
+        if not self._upsert_linhas([linha]):
+            return {"ok": False, "reason": "Falha ao gravar no banco."}
+        return {"ok": True}
+
+    def importar(self, caminho):
+        if not self._available:
+            return {"ok": False, "reason": "Banco de Taxas Pré indisponível (rede fora do ar)."}
+        try:
+            linhas, resumo = importar_planilha_taxas_pre(caminho)
+        except Exception as e:
+            return {"ok": False, "reason": f"Falha ao ler a planilha: {e}"}
+        if not linhas:
+            return {"ok": False, "reason": "Nenhum dado reconhecido nas abas esperadas "
+                                            "(RS PADRÃO 2025 / TAXAS 2026 / INVERTIDO "
+                                            "2025 / INVERTIDO 2026)."}
+        if not self._upsert_linhas(linhas):
+            return {"ok": False, "reason": "Falha ao gravar no banco."}
+        return {"ok": True, "linhas": len(linhas), "resumo": resumo}
+
+    def regioes(self, categoria):
+        if not self._available:
+            return []
+        try:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "SELECT DISTINCT regiao FROM taxas_pre_historico "
+                    "WHERE categoria=? AND regiao IS NOT NULL ORDER BY regiao", (categoria,))
+                return [r[0] for r in cur.fetchall()]
+            finally:
+                conn.close()
+        except Exception:
+            return []
+
+    def clientes(self, categoria, regiao=None, busca=None):
+        if not self._available:
+            return []
+        try:
+            conn = self._connect()
+            try:
+                q = "SELECT DISTINCT cliente, regiao FROM taxas_pre_historico WHERE categoria=?"
+                params = [categoria]
+                if regiao is not None:
+                    q += " AND regiao=?"
+                    params.append(regiao)
+                if busca:
+                    q += " AND cliente LIKE ?"
+                    params.append(f"%{busca}%")
+                q += " ORDER BY cliente"
+                return conn.execute(q, params).fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            return []
+
+    def historico_cliente(self, categoria, cliente):
+        if not self._available:
+            return []
+        try:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "SELECT mes_ref, valor_num, valor_raw, status FROM taxas_pre_historico "
+                    "WHERE categoria=? AND cliente=? ORDER BY mes_ref", (categoria, cliente))
+                return cur.fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            return []
+
+    def resumo_importacao(self, categoria):
+        if not self._available:
+            return None
+        try:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "SELECT COUNT(DISTINCT cliente), MAX(importado_em) FROM "
+                    "taxas_pre_historico WHERE categoria=?", (categoria,))
+                n, ts = cur.fetchone()
+                return {"clientes": n or 0, "importado_em": ts}
+            finally:
+                conn.close()
+        except Exception:
+            return None
+
+
+class TaxasPreFrame(tk.Frame):
+    """Histórico mensal de taxa por cliente/sacado, importado da planilha de
+    Taxas Pré. Duas visões independentes — Taxas 2026 (RS Padrão) e Invertido
+    — cada uma com filtro por região/cliente e gráfico de evolução (reusa o
+    StockLineChart já usado em Analisar Operações)."""
+
+    MAX_SELECIONADOS = 6
+    CORES = ["#4fd1c5", "#f6ad55", "#63b3ed", "#f687b3", "#9f7aea", "#68d391"]
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._data = TaxasPreData.get()
+        self._selecionados = {"taxas": [], "invertido": []}
+        self._ctx = {}
+        self._overlay = None
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        tk.Label(hdr, text="Taxas Pré", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left")
+        tk.Label(hdr, text="  Histórico mensal de taxa por cliente/sacado",
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9)).pack(side="left")
+
+        tabs = tk.Frame(self, bg=C["bg"])
+        tabs.pack(fill="x", padx=32, pady=(16, 0))
+        self._btn_tabs = {}
+        for categoria, titulo in TAXAS_PRE_CATEGORIAS:
+            btn = _pipe_toggle_button(tabs, titulo,
+                                       lambda c=categoria: self._switch_view(c))
+            btn.pack(side="left", padx=(0 if categoria == "taxas" else 8, 0))
+            self._btn_tabs[categoria] = btn
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16, 0))
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        self._body = self._sf.inner
+        self._body.configure(bg=C["bg"])
+
+        self._views = {}
+        for categoria, _titulo in TAXAS_PRE_CATEGORIAS:
+            view = tk.Frame(self._body, bg=C["bg"])
+            self._build_categoria(view, categoria)
+            self._views[categoria] = view
+
+        self._switch_view("taxas")
+
+    def on_show(self):
+        self._sf.refresh_bindings()
+
+    def _switch_view(self, categoria):
+        self._view = categoria
+        for c, v in self._views.items():
+            v.pack_forget()
+            _pipe_set_toggle(self._btn_tabs[c], c == categoria)
+        self._views[categoria].pack(fill="both", expand=True, padx=32, pady=(16, 24))
+        self._refresh_categoria(categoria)
+
+    # ── Construção de cada aba (Taxas 2026 / Invertido) ─────────────────
+    def _build_categoria(self, parent, categoria):
+        ctx = {}
+        self._ctx[categoria] = ctx
+
+        topo = card_frame(parent)
+        topo.pack(fill="x")
+        tbody = tk.Frame(topo, bg=C["surface"], padx=24, pady=18)
+        tbody.pack(fill="x")
+        tk.Label(tbody, text="Incluir / atualizar taxa", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+
+        row1 = tk.Frame(tbody, bg=C["surface"])
+        row1.pack(fill="x", pady=(12, 0))
+        tk.Label(row1, text="Cliente", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        ctx["var_novo_cliente"] = tk.StringVar(value="")
+        ctx["cb_novo_cliente"] = ttk.Combobox(row1, textvariable=ctx["var_novo_cliente"],
+                                               values=[], state="normal", width=32,
+                                               font=("Segoe UI", 9))
+        ctx["cb_novo_cliente"].pack(side="left", padx=(0, 20))
+        tk.Label(row1, text="Região", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        ctx["var_novo_regiao"] = tk.StringVar(value="")
+        ent_reg = styled_entry(row1, textvariable=ctx["var_novo_regiao"], width=6)
+        ent_reg.pack(side="left", padx=(0, 20))
+
+        def only_digits_key(e):
+            if e.keysym in {"Tab", "Left", "Right", "Home", "End", "BackSpace", "Delete"}:
+                return
+            if e.char and e.char.isdigit():
+                return
+            return "break"
+        ent_reg.bind("<Key>", only_digits_key)
+
+        tk.Label(row1, text="Status", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        ctx["var_novo_status"] = tk.StringVar(value="")
+        styled_entry(row1, textvariable=ctx["var_novo_status"], width=10).pack(side="left")
+
+        row2 = tk.Frame(tbody, bg=C["surface"])
+        row2.pack(fill="x", pady=(12, 0))
+        tk.Label(row2, text="Ano", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        ctx["var_ano"] = tk.IntVar(value=date.today().year)
+        styled_button(row2, "◀", lambda c=categoria: self._mudar_ano(c, -1),
+                      small=True).pack(side="left")
+        ctx["ano_lbl"] = tk.Label(row2, text=str(ctx["var_ano"].get()), bg=C["surface"],
+                                   fg=C["ink"], font=("Segoe UI", 9, "bold"), width=5,
+                                   anchor="center")
+        ctx["ano_lbl"].pack(side="left", padx=4)
+        styled_button(row2, "▶", lambda c=categoria: self._mudar_ano(c, 1),
+                      small=True).pack(side="left", padx=(0, 20))
+
+        tk.Label(row2, text="Mês", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        ctx["var_mes"] = tk.StringVar(value=PIPE_MESES[date.today().month - 1])
+        ttk.Combobox(row2, textvariable=ctx["var_mes"], values=PIPE_MESES,
+                     state="readonly", width=12, font=("Segoe UI", 9)).pack(
+                         side="left", padx=(0, 20))
+
+        tk.Label(row2, text="Taxa", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        ctx["var_novo_valor"] = tk.StringVar(value="")
+        styled_entry(row2, textvariable=ctx["var_novo_valor"], width=18).pack(side="left")
+
+        foot = tk.Frame(tbody, bg=C["surface"])
+        foot.pack(fill="x", pady=(14, 0))
+        styled_button(foot, "Salvar taxa", lambda c=categoria: self._salvar_taxa(c),
+                      accent=True).pack(side="left")
+        ctx["status_lbl"] = tk.Label(foot, text="Nenhum lançamento ainda.",
+                                      bg=C["surface"], fg=C["ink_muted"],
+                                      font=("Segoe UI", 8))
+        ctx["status_lbl"].pack(side="left", padx=(14, 0))
+
+        filt = card_frame(parent)
+        filt.pack(fill="x", pady=(12, 0))
+        fbody = tk.Frame(filt, bg=C["surface"], padx=24, pady=16)
+        fbody.pack(fill="x")
+        row1 = tk.Frame(fbody, bg=C["surface"])
+        row1.pack(fill="x")
+        tk.Label(row1, text="Região", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        ctx["var_regiao"] = tk.StringVar(value="Todas")
+        ctx["cb_regiao"] = ttk.Combobox(row1, textvariable=ctx["var_regiao"],
+                                         values=["Todas"], state="readonly",
+                                         width=10, font=("Segoe UI", 9))
+        ctx["cb_regiao"].pack(side="left", padx=(0, 20))
+        ctx["cb_regiao"].bind("<<ComboboxSelected>>",
+                               lambda _e, c=categoria: self._refresh_lista_clientes(c))
+
+        tk.Label(row1, text="Buscar cliente", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        ctx["var_busca"] = tk.StringVar(value="")
+        ent_busca = styled_entry(row1, textvariable=ctx["var_busca"], width=26)
+        ent_busca.pack(side="left")
+        ent_busca.bind("<KeyRelease>", lambda _e, c=categoria: self._refresh_lista_clientes(c))
+
+        tk.Label(fbody, text=f"Selecione até {self.MAX_SELECIONADOS} para comparar "
+                              "na evolução:", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(12, 4))
+        ctx["lista_wrap"] = tk.Frame(fbody, bg=C["surface"])
+        ctx["lista_wrap"].pack(fill="x")
+
+        graf_card = card_frame(parent)
+        graf_card.pack(fill="x", pady=(12, 0))
+        gbody = tk.Frame(graf_card, bg=C["surface"], padx=16, pady=16)
+        gbody.pack(fill="both", expand=True)
+        tk.Label(gbody, text="Evolução mês a mês", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        ctx["chart"] = StockLineChart(gbody, height=240)
+        ctx["chart"].pack(fill="x", pady=(8, 0))
+
+        ctx["cards_wrap"] = tk.Frame(parent, bg=C["bg"])
+        ctx["cards_wrap"].pack(fill="x", pady=(12, 0))
+
+        ctx["detalhe_hdr"] = tk.Label(parent, text="Detalhe (valores originais)",
+                                       bg=C["bg"], fg=C["ink"], font=("Segoe UI", 11, "bold"))
+        ctx["detalhe_wrap"] = tk.Frame(parent, bg=C["bg"])
+
+    def _mudar_ano(self, categoria, delta):
+        ctx = self._ctx[categoria]
+        ctx["var_ano"].set(ctx["var_ano"].get() + delta)
+        ctx["ano_lbl"].configure(text=str(ctx["var_ano"].get()))
+
+    def _salvar_taxa(self, categoria):
+        ctx = self._ctx[categoria]
+        cliente = ctx["var_novo_cliente"].get().strip()
+        if not cliente:
+            ctx["status_lbl"].configure(text="Informe o cliente.", fg=C["err"])
+            return
+        try:
+            regiao = int(ctx["var_novo_regiao"].get()) if ctx["var_novo_regiao"].get().strip() else None
+        except ValueError:
+            regiao = None
+        mes = PIPE_MESES.index(ctx["var_mes"].get()) + 1
+        ano = ctx["var_ano"].get()
+        mes_ref = f"{ano:04d}-{mes:02d}"
+        resultado = self._data.salvar_taxa(
+            categoria, cliente, regiao, ctx["var_novo_status"].get(), mes_ref,
+            ctx["var_novo_valor"].get())
+        if not resultado["ok"]:
+            ctx["status_lbl"].configure(text=f"⚠ {resultado['reason']}", fg=C["err"])
+            return
+        ctx["status_lbl"].configure(
+            text=f"✓ Taxa de {cliente} salva para {_taxas_pre_mes_label(mes_ref)}.",
+            fg=C["ok"])
+        ctx["var_novo_valor"].set("")
+        self._refresh_regioes(categoria)
+        self._refresh_lista_clientes(categoria)
+        self._refresh_cb_clientes(categoria)
+        if cliente in self._selecionados[categoria]:
+            self._refresh_grafico(categoria)
+
+    def _refresh_cb_clientes(self, categoria):
+        ctx = self._ctx[categoria]
+        registros = self._data.clientes(categoria)
+        ctx["cb_novo_cliente"]["values"] = sorted({r[0] for r in registros})
+
+    def _atualizar_status_importacao(self, categoria):
+        info = self._data.resumo_importacao(categoria)
+        ctx = self._ctx[categoria]
+        if info and info["clientes"]:
+            ts = info["importado_em"] or ""
+            ctx["status_lbl"].configure(
+                text=f"{info['clientes']} cliente(s) na base · última atualização {ts}",
+                fg=C["ink_muted"])
+
+    def _refresh_categoria(self, categoria):
+        self._refresh_regioes(categoria)
+        self._refresh_lista_clientes(categoria)
+        self._refresh_cb_clientes(categoria)
+        self._atualizar_status_importacao(categoria)
+        self._refresh_grafico(categoria)
+
+    def _refresh_regioes(self, categoria):
+        ctx = self._ctx[categoria]
+        regioes = self._data.regioes(categoria)
+        valores = ["Todas"] + [str(r) for r in regioes]
+        ctx["cb_regiao"]["values"] = valores
+        if ctx["var_regiao"].get() not in valores:
+            ctx["var_regiao"].set("Todas")
+
+    def _refresh_lista_clientes(self, categoria):
+        ctx = self._ctx[categoria]
+        for w in ctx["lista_wrap"].winfo_children():
+            w.destroy()
+        regiao_txt = ctx["var_regiao"].get()
+        regiao = int(regiao_txt) if regiao_txt not in ("Todas", "") else None
+        busca = ctx["var_busca"].get().strip() or None
+        registros = self._data.clientes(categoria, regiao, busca)
+        if not registros:
+            tk.Label(ctx["lista_wrap"], text="Nenhum cliente encontrado — importe a "
+                                              "planilha ou ajuste o filtro.",
+                     bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 8)).pack(
+                         anchor="w", pady=4)
+            return
+        wrap = tk.Frame(ctx["lista_wrap"], bg=C["surface"])
+        wrap.pack(fill="x")
+        linha = tk.Frame(wrap, bg=C["surface"])
+        linha.pack(fill="x")
+        largura_usada = 0
+        for cliente, regiao_r in registros[:150]:
+            texto = cliente if len(cliente) <= 34 else cliente[:31] + "…"
+            if largura_usada > 60:
+                linha = tk.Frame(wrap, bg=C["surface"])
+                linha.pack(fill="x", pady=(4, 0))
+                largura_usada = 0
+            selecionado = cliente in self._selecionados[categoria]
+            btn = _pipe_toggle_button(
+                linha, texto,
+                lambda cl=cliente, c=categoria: self._toggle_cliente(c, cl), small=True)
+            _pipe_set_toggle(btn, selecionado)
+            btn.pack(side="left", padx=(0, 6))
+            largura_usada += len(texto) + 4
+
+    def _toggle_cliente(self, categoria, cliente):
+        sel = self._selecionados[categoria]
+        if cliente in sel:
+            sel.remove(cliente)
+        elif len(sel) < self.MAX_SELECIONADOS:
+            sel.append(cliente)
+        self._refresh_lista_clientes(categoria)
+        self._refresh_grafico(categoria)
+
+    def _refresh_grafico(self, categoria):
+        ctx = self._ctx[categoria]
+        sel = self._selecionados[categoria]
+        for w in ctx["cards_wrap"].winfo_children():
+            w.destroy()
+        for w in ctx["detalhe_wrap"].winfo_children():
+            w.destroy()
+        ctx["detalhe_hdr"].pack_forget()
+        ctx["detalhe_wrap"].pack_forget()
+
+        if not sel:
+            ctx["chart"].set_data([], [], [], legend=[], y_fmt=_fmt_pct_am)
+            return
+
+        historicos = {cl: self._data.historico_cliente(categoria, cl) for cl in sel}
+        todos_meses = sorted({h[0] for hist in historicos.values() for h in hist})
+        labels = [_taxas_pre_mes_label(m) for m in todos_meses]
+
+        series = []
+        for cl in sel:
+            pontos = {m: v for m, v, _raw, _st in historicos[cl] if v is not None}
+            serie, ultimo = [], None
+            for m in todos_meses:
+                if m in pontos:
+                    ultimo = pontos[m]
+                serie.append(ultimo if ultimo is not None else (pontos.get(m) or 0))
+            series.append(serie)
+
+        ctx["chart"].set_data(labels, series, self.CORES, legend=sel,
+                               y_fmt=_fmt_pct_am, area_idx=0)
+
+        grid = tk.Frame(ctx["cards_wrap"], bg=C["bg"])
+        grid.pack(fill="x")
+        n_col = min(len(sel), 3)
+        for c in range(n_col):
+            grid.columnconfigure(c, weight=1, uniform="taxaspre")
+
+        for idx, cl in enumerate(sel):
+            reais = [(m, v) for m, v, _raw, _st in historicos[cl] if v is not None]
+            outer = tk.Frame(grid, bg=C["bg"])
+            outer.grid(row=idx // 3, column=idx % 3, sticky="nsew", padx=5, pady=5)
+            card = card_frame(outer)
+            card.pack(fill="both", expand=True)
+            body = tk.Frame(card, bg=C["surface"], padx=16, pady=14)
+            body.pack(fill="both", expand=True)
+            texto = cl if len(cl) <= 30 else cl[:27] + "…"
+            tk.Label(body, text=texto, bg=C["surface"], fg=C["ink"],
+                     font=("Segoe UI", 9, "bold"), wraplength=200,
+                     justify="left").pack(anchor="w")
+            if len(reais) >= 2 and reais[0][1]:
+                delta_pct = (reais[-1][1] - reais[0][1]) / abs(reais[0][1]) * 100
+                cor = C["ok"] if delta_pct >= 0 else C["err"]
+                seta = "▲" if delta_pct >= 0 else "▼"
+                tk.Label(body, text=f"{_fmt_pct_am(reais[0][1])} → {_fmt_pct_am(reais[-1][1])}",
+                         bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 8)).pack(
+                             anchor="w", pady=(6, 0))
+                tk.Label(body, text=f"{seta} {abs(delta_pct):.1f}%", bg=C["surface"],
+                         fg=cor, font=("Segoe UI", 13, "bold")).pack(anchor="w", pady=(2, 0))
+            elif reais:
+                tk.Label(body, text=f"Único valor: {_fmt_pct_am(reais[0][1])}",
+                         bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 8)).pack(
+                             anchor="w", pady=(6, 0))
+            else:
+                tk.Label(body, text="Sem valor numérico reconhecido no período.",
+                         bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 8)).pack(
+                             anchor="w", pady=(6, 0))
+
+        if len(sel) <= 3:
+            ctx["detalhe_hdr"].pack(anchor="w", pady=(20, 6))
+            ctx["detalhe_wrap"].pack(fill="x")
+            for cl in sel:
+                bloco = tk.Frame(ctx["detalhe_wrap"], bg=C["surface"], padx=14, pady=10,
+                                  highlightthickness=1, highlightbackground=C["hair"])
+                bloco.pack(fill="x", pady=3)
+                tk.Label(bloco, text=cl, bg=C["surface"], fg=C["ink"],
+                         font=("Segoe UI", 9, "bold")).pack(anchor="w")
+                linhas_txt = "   ·   ".join(
+                    f"{_taxas_pre_mes_label(m)}: {raw}"
+                    for m, _v, raw, _st in historicos[cl])
+                tk.Label(bloco, text=linhas_txt or "Sem lançamentos.", bg=C["surface"],
+                         fg=C["ink_faint"], font=("Segoe UI", 8), wraplength=900,
+                         justify="left").pack(anchor="w", pady=(4, 0))
+
+
+# ─── Ligações (contador diário de ligações) ────────────────────────────────
+# Banco próprio (ligacoes.db), na mesma pasta de rede dos demais módulos —
+# não interfere em nada do Pipeline/Taxas Pré/Histórico.
+
+LIGACOES_DB_PATH = os.path.join(os.path.dirname(SHARED_TAXAS_PATH), "ligacoes.db")
+
+
+class LigacoesData:
+    _instance = None
+    RETRY_SECONDS = 30
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._available = False
+        self._retry_timer = None
+        self._ensure_schema()
+        if not self._available:
+            self._schedule_retry()
+
+    def is_available(self):
+        return self._available
+
+    def _schedule_retry(self):
+        if self._retry_timer is None:
+            self._retry_timer = threading.Timer(self.RETRY_SECONDS, self._retry_tick)
+            self._retry_timer.daemon = True
+            self._retry_timer.start()
+
+    def _retry_tick(self):
+        self._retry_timer = None
+        self._ensure_schema()
+        if not self._available:
+            self._schedule_retry()
+
+    def _connect(self):
+        conn = sqlite3.connect(LIGACOES_DB_PATH, timeout=20)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        return conn
+
+    def _ensure_schema(self):
+        try:
+            if not os.path.isdir(os.path.dirname(LIGACOES_DB_PATH)):
+                self._available = False
+                return
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS ligacoes_registros (
+                        data TEXT PRIMARY KEY,
+                        quantidade INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL,
+                        username TEXT
+                    )
+                """)
+                conn.commit()
+            finally:
+                conn.close()
+            self._available = True
+        except Exception as e:
+            print(f"[ligacoes] _ensure_schema falhou: {e}", file=sys.stderr)
+            self._available = False
+
+    def adicionar(self, data_iso, delta):
+        if not self._available or delta == 0:
+            return False
+        try:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO ligacoes_registros (data, quantidade, updated_at, username)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(data) DO UPDATE SET
+                        quantidade = MAX(quantidade + ?, 0),
+                        updated_at = excluded.updated_at
+                """, (data_iso, max(delta, 0), datetime.now().isoformat(timespec="seconds"),
+                      _current_username(), delta))
+                conn.commit()
+            finally:
+                conn.close()
+            return True
+        except Exception as e:
+            print(f"[ligacoes] adicionar falhou: {e}", file=sys.stderr)
+            return False
+
+    def total_dia(self, data_iso):
+        if not self._available:
+            return 0
+        try:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "SELECT quantidade FROM ligacoes_registros WHERE data=?", (data_iso,))
+                row = cur.fetchone()
+                return row[0] if row else 0
+            finally:
+                conn.close()
+        except Exception:
+            return 0
+
+    def serie(self, dt_ini, dt_fim):
+        """Lista [(data_iso, quantidade), ...] com todos os dias do intervalo,
+        preenchendo com 0 os dias sem registro."""
+        valores = {}
+        if self._available:
+            try:
+                conn = self._connect()
+                try:
+                    cur = conn.execute(
+                        "SELECT data, quantidade FROM ligacoes_registros "
+                        "WHERE data BETWEEN ? AND ?", (dt_ini.isoformat(), dt_fim.isoformat()))
+                    valores = dict(cur.fetchall())
+                finally:
+                    conn.close()
+            except Exception as e:
+                print(f"[ligacoes] serie falhou: {e}", file=sys.stderr)
+        out, d = [], dt_ini
+        while d <= dt_fim:
+            out.append((d.isoformat(), valores.get(d.isoformat(), 0)))
+            d += timedelta(days=1)
+        return out
+
+    def total_periodo(self, dt_ini, dt_fim):
+        return sum(q for _d, q in self.serie(dt_ini, dt_fim))
+
+
+class LigacoesFrame(tk.Frame):
+    """Contador diário de ligações — botão rápido (+1), inclusão manual de
+    quantidade por dia, histórico com gráfico (semanal/mensal) e indicador
+    de crescimento frente ao período equivalente anterior."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._data = LigacoesData.get()
+        self._periodo = "semanal"
+        self._ref_data = date.today()
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        tk.Label(hdr, text="Ligações", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left")
+        styled_button(hdr, "← Voltar",
+                      lambda: self.controller.show_frame("Home")).pack(side="right")
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(14, 0))
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        body = self._sf.inner
+        body.configure(bg=C["bg"])
+        wrap = tk.Frame(body, bg=C["bg"])
+        wrap.pack(fill="both", expand=True, padx=32, pady=(20, 24))
+
+        contador = card_frame(wrap)
+        contador.pack(fill="x")
+        cbody = tk.Frame(contador, bg=C["surface"], padx=24, pady=20)
+        cbody.pack(fill="x")
+        esquerda = tk.Frame(cbody, bg=C["surface"])
+        esquerda.pack(side="left")
+        tk.Label(esquerda, text="HOJE", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        self._total_hoje_lbl = tk.Label(esquerda, text="0", bg=C["surface"],
+                                         fg=C["ink"], font=("Segoe UI", 26, "bold"))
+        self._total_hoje_lbl.pack(anchor="w")
+        styled_button(cbody, "+1  Registrar ligação", self._registrar_uma,
+                      accent=True).pack(side="right")
+
+        manual = card_frame(wrap)
+        manual.pack(fill="x", pady=(12, 0))
+        mbody = tk.Frame(manual, bg=C["surface"], padx=24, pady=16)
+        mbody.pack(fill="x")
+        tk.Label(mbody, text="Incluir quantidade em um dia", bg=C["surface"],
+                 fg=C["ink"], font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        row = tk.Frame(mbody, bg=C["surface"])
+        row.pack(fill="x", pady=(10, 0))
+        tk.Label(row, text="Data", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        self._var_data_manual = tk.StringVar(value=date.today().strftime("%d/%m/%Y"))
+        styled_entry(row, textvariable=self._var_data_manual, width=12).pack(
+            side="left", padx=(0, 20))
+        tk.Label(row, text="Quantidade", bg=C["surface"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        self._var_qtd_manual = tk.StringVar(value="")
+        ent_qtd = styled_entry(row, textvariable=self._var_qtd_manual, width=8)
+        ent_qtd.pack(side="left", padx=(0, 20))
+
+        def only_digits_key(e):
+            if e.keysym in {"Tab", "Left", "Right", "Home", "End", "BackSpace", "Delete"}:
+                return
+            if e.char and e.char.isdigit():
+                return
+            return "break"
+        ent_qtd.bind("<Key>", only_digits_key)
+        styled_button(row, "Adicionar", self._adicionar_manual, accent=True).pack(side="left")
+        self._msg_lbl = tk.Label(mbody, text="", bg=C["surface"], fg=C["ink_muted"],
+                                  font=("Segoe UI", 8))
+        self._msg_lbl.pack(anchor="w", pady=(8, 0))
+
+        filt = tk.Frame(wrap, bg=C["bg"])
+        filt.pack(fill="x", pady=(20, 8))
+        tk.Label(filt, text="Histórico", bg=C["bg"], fg=C["ink"],
+                 font=("Segoe UI", 11, "bold")).pack(side="left")
+        self._btn_semanal = _pipe_toggle_button(filt, "Semanal",
+                                                 lambda: self._set_periodo("semanal"), small=True)
+        self._btn_semanal.pack(side="left", padx=(20, 0))
+        self._btn_mensal = _pipe_toggle_button(filt, "Mensal",
+                                                lambda: self._set_periodo("mensal"), small=True)
+        self._btn_mensal.pack(side="left", padx=(6, 0))
+        styled_button(filt, "◀", lambda: self._mudar_ref(-1), small=True).pack(
+            side="left", padx=(20, 0))
+        self._ref_lbl = tk.Label(filt, text="", bg=C["bg"], fg=C["ink_muted"],
+                                  font=("Segoe UI", 9))
+        self._ref_lbl.pack(side="left", padx=6)
+        styled_button(filt, "▶", lambda: self._mudar_ref(1), small=True).pack(side="left")
+
+        graf = card_frame(wrap)
+        graf.pack(fill="x")
+        gbody = tk.Frame(graf, bg=C["surface"], padx=16, pady=16)
+        gbody.pack(fill="both", expand=True)
+        self._chart = MiniBarChart(gbody, height=180)
+        self._chart.pack(fill="x")
+
+        self._resumo_wrap = tk.Frame(wrap, bg=C["bg"])
+        self._resumo_wrap.pack(fill="x", pady=(12, 0))
+
+        self._set_periodo("semanal")
+
+    def on_show(self):
+        self._sf.refresh_bindings()
+        self._total_hoje_lbl.configure(
+            text=str(self._data.total_dia(date.today().isoformat())))
+        self._refresh_historico()
+
+    def _registrar_uma(self):
+        self._data.adicionar(date.today().isoformat(), 1)
+        self._total_hoje_lbl.configure(
+            text=str(self._data.total_dia(date.today().isoformat())))
+        self._refresh_historico()
+
+    def _adicionar_manual(self):
+        try:
+            d = datetime.strptime(self._var_data_manual.get().strip(), "%d/%m/%Y").date()
+        except ValueError:
+            self._msg_lbl.configure(text="Data inválida (use dd/mm/aaaa).", fg=C["err"])
+            return
+        try:
+            qtd = int(self._var_qtd_manual.get())
+        except ValueError:
+            self._msg_lbl.configure(text="Informe uma quantidade válida.", fg=C["err"])
+            return
+        if qtd <= 0:
+            self._msg_lbl.configure(text="Quantidade deve ser maior que zero.", fg=C["err"])
+            return
+        self._data.adicionar(d.isoformat(), qtd)
+        self._msg_lbl.configure(
+            text=f"{qtd} ligação(ões) adicionada(s) em {d.strftime('%d/%m/%Y')}.", fg=C["ok"])
+        self._var_qtd_manual.set("")
+        if d == date.today():
+            self._total_hoje_lbl.configure(
+                text=str(self._data.total_dia(date.today().isoformat())))
+        self._refresh_historico()
+
+    def _set_periodo(self, p):
+        self._periodo = p
+        _pipe_set_toggle(self._btn_semanal, p == "semanal")
+        _pipe_set_toggle(self._btn_mensal, p == "mensal")
+        self._refresh_historico()
+
+    def _mudar_ref(self, delta):
+        if self._periodo == "semanal":
+            self._ref_data += timedelta(weeks=delta)
+        else:
+            mes, ano = self._ref_data.month, self._ref_data.year
+            mes += delta
+            while mes > 12:
+                mes -= 12; ano += 1
+            while mes < 1:
+                mes += 12; ano -= 1
+            dia = min(self._ref_data.day, 28)
+            self._ref_data = date(ano, mes, dia)
+        self._refresh_historico()
+
+    def _intervalo_atual(self):
+        if self._periodo == "semanal":
+            ini, fim = _pipe_week_range(self._ref_data)
+            ini_ant, fim_ant = ini - timedelta(days=7), fim - timedelta(days=7)
+            label = f"{ini.strftime('%d/%m')} a {fim.strftime('%d/%m/%Y')}"
+        else:
+            ini, fim = _pipe_month_range(self._ref_data.year, self._ref_data.month)
+            mes_ant, ano_ant = self._ref_data.month - 1, self._ref_data.year
+            if mes_ant < 1:
+                mes_ant, ano_ant = 12, ano_ant - 1
+            ini_ant, fim_ant = _pipe_month_range(ano_ant, mes_ant)
+            label = f"{PIPE_MESES[self._ref_data.month - 1]}/{self._ref_data.year}"
+        return ini, fim, ini_ant, fim_ant, label
+
+    def _refresh_historico(self):
+        ini, fim, ini_ant, fim_ant, label = self._intervalo_atual()
+        self._ref_lbl.configure(text=label)
+
+        serie_atual = self._data.serie(ini, fim)
+        labels = [datetime.strptime(d, "%Y-%m-%d").strftime("%d/%m") for d, _q in serie_atual]
+        valores = [q for _d, q in serie_atual]
+        self._chart.set_data(labels, [valores], [C["accent"]])
+
+        total_atual = sum(valores)
+        total_anterior = self._data.total_periodo(ini_ant, fim_ant)
+        media_dia = total_atual / max(len(serie_atual), 1)
+
+        for w in self._resumo_wrap.winfo_children():
+            w.destroy()
+        grid = tk.Frame(self._resumo_wrap, bg=C["bg"])
+        grid.pack(fill="x")
+        for c in range(3):
+            grid.columnconfigure(c, weight=1, uniform="lig")
+
+        def card(c, titulo, valor_txt, cor=None):
+            outer = tk.Frame(grid, bg=C["bg"])
+            outer.grid(row=0, column=c, sticky="nsew", padx=5, pady=5)
+            cf = card_frame(outer); cf.pack(fill="both", expand=True)
+            b = tk.Frame(cf, bg=C["surface"], padx=16, pady=14); b.pack(fill="both", expand=True)
+            tk.Label(b, text=titulo, bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w")
+            tk.Label(b, text=valor_txt, bg=C["surface"], fg=cor or C["ink"],
+                     font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(4, 0))
+
+        card(0, "TOTAL NO PERÍODO", str(total_atual))
+        card(1, "MÉDIA POR DIA", f"{media_dia:.1f}")
+
+        if total_anterior == 0:
+            cresc_txt, cor = ("—" if total_atual == 0 else "novo"), C["ink_muted"]
+        else:
+            cresc = (total_atual - total_anterior) / total_anterior * 100
+            cor = C["ok"] if cresc >= 0 else C["err"]
+            seta = "▲" if cresc >= 0 else "▼"
+            cresc_txt = f"{seta} {abs(cresc):.1f}%"
+        card(2, "VS. PERÍODO ANTERIOR", cresc_txt, cor)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -10872,6 +11941,8 @@ class App(tk.Tk):
             (TaxasInvertidoFrame,    "TaxasInvertido"),
             (HistoricoOperacoesFrame,"HistoricoOperacoes"),
             (PipelineFrame,          "Pipeline"),
+            (TaxasPreFrame,          "TaxasPre"),
+            (LigacoesFrame,          "Ligacoes"),
         ]:
             f = Cls(self._content, self)
             self.frames[name] = f
