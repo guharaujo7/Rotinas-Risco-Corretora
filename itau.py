@@ -3744,6 +3744,41 @@ class HistoricoOperacoesData:
         self._available = False
         return False
 
+    def atualizar_spread(self, operacao_id: str, spread) -> bool:
+        """Grava/edita manualmente o spread (%) de uma operação já
+        confirmada — usado para completar o histórico de operações
+        antigas que ficaram sem spread calculado automaticamente.
+        `spread` pode ser uma string/decimal ou None (para limpar)."""
+        if not self._network_reachable():
+            self._available = False
+            return False
+        tentativas = 3
+        ultimo_erro = None
+        valor_str = (str(spread).strip() if spread not in (None, "") else None)
+        for tentativa in range(1, tentativas + 1):
+            try:
+                conn = self._connect()
+                conn.execute(
+                    "UPDATE operacoes SET spread=? WHERE id=?",
+                    (valor_str, operacao_id))
+                conn.commit()
+                conn.close()
+                self._available = True
+                return True
+            except sqlite3.OperationalError as e:
+                ultimo_erro = e
+                if "locked" in str(e).lower() and tentativa < tentativas:
+                    time.sleep(0.5 * tentativa)
+                    continue
+                break
+            except Exception as e:
+                ultimo_erro = e
+                break
+        print(f"[historico] atualizar_spread falhou após {tentativas} tentativa(s): "
+              f"{ultimo_erro}", file=sys.stderr)
+        self._available = False
+        return False
+
     # ── Notas rejeitadas (alertas recusados na triagem) ────────────────────
     @staticmethod
     def _rejeitada_dedup_key(cnpj_sacado, nf, valor, data_vencimento, motivo):
@@ -6337,14 +6372,19 @@ class MiniBarChart(tk.Canvas):
     """Gráfico de barras minimalista (Canvas puro), no estilo visual do app.
     Aceita uma ou duas séries sobrepostas (para Montante x Líquido)."""
 
-    def __init__(self, parent, height=150, **kwargs):
+    def __init__(self, parent, height=150, value_fmt=None, **kwargs):
         super().__init__(parent, height=height, bg=C["surface"],
                          highlightthickness=0, bd=0, **kwargs)
         self._labels = []
         self._series = []
         self._colors = []
         self._legend = []
+        self._bar_hitboxes = []  # (x0, y0, x1, y1, label, valor, serie_idx)
+        self._value_fmt = value_fmt or (lambda v: f"{v:g}")
+        self._tooltip = None
         self.bind("<Configure>", lambda _e: self._redraw())
+        self.bind("<Motion>", self._on_motion)
+        self.bind("<Leave>", self._on_leave)
 
     def set_data(self, labels, series, colors, legend=None):
         """series: lista de listas de floats (mesma cardinalidade de labels)."""
@@ -6354,8 +6394,49 @@ class MiniBarChart(tk.Canvas):
         self._legend = legend or []
         self._redraw()
 
+    def _on_motion(self, e):
+        for (x0, y0, x1, y1, label, valor, _si) in self._bar_hitboxes:
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                self._show_tooltip(e.x_root, e.y_root, label, valor)
+                return
+        self._hide_tooltip()
+
+    def _on_leave(self, _e=None):
+        self._hide_tooltip()
+
+    def _show_tooltip(self, x_root, y_root, label, valor):
+        txt = f"{label}: {self._value_fmt(valor)}"
+        if self._tooltip is None:
+            self._tooltip = tk.Toplevel(self)
+            self._tooltip.overrideredirect(True)
+            try:
+                self._tooltip.attributes("-topmost", True)
+            except Exception:
+                pass
+            self._tt_lbl = tk.Label(
+                self._tooltip, text=txt, bg=C["ink"], fg=C["surface"],
+                font=("Segoe UI", 8), padx=6, pady=3)
+            self._tt_lbl.pack()
+        else:
+            self._tt_lbl.configure(text=txt)
+        self._tooltip.geometry(f"+{x_root + 12}+{y_root + 14}")
+        self._tooltip.deiconify()
+
+    def _hide_tooltip(self):
+        if self._tooltip is not None:
+            self._tooltip.withdraw()
+
+    def destroy(self):
+        if self._tooltip is not None:
+            try:
+                self._tooltip.destroy()
+            except Exception:
+                pass
+        super().destroy()
+
     def _redraw(self, _e=None):
         self.delete("all")
+        self._bar_hitboxes = []
         w = max(self.winfo_width(), 1)
         h = max(self.winfo_height(), 1)
         if not self._labels or not self._series or not self._series[0]:
@@ -6395,6 +6476,11 @@ class MiniBarChart(tk.Canvas):
                 color = self._colors[si % len(self._colors)]
                 self.create_rectangle(bx0, y0, bx0 + bar_w - 2, y1,
                                       fill=color, outline="")
+                # área de detecção do mouse: usa a barra toda, mas garante
+                # altura mínima (para valores 0 ainda serem "hover-áveis")
+                hit_y0 = min(y0, y1 - 6)
+                self._bar_hitboxes.append(
+                    (bx0, hit_y0, bx0 + bar_w - 2, y1, label, val, si))
             # rótulo do eixo x — só mostra a cada N para não poluir
             step = max(1, n // 8)
             if i % step == 0 or i == n - 1:
@@ -7218,10 +7304,18 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         origem = r.get("arquivo_origem") or "—"
         usuario = r.get("usuario") or "—"
         confirmado_em = _hist_fmt_hora(r.get("data_hora", ""))
-        tk.Label(meta, text=f"CNPJ: {cnpj}   ·   Taxa vigente: {taxa}%   ·   "
+
+        meta_row = tk.Frame(meta, bg=C["surface2"])
+        meta_row.pack(fill="x")
+        tk.Label(meta_row, text=f"CNPJ: {cnpj}   ·   Taxa vigente: {taxa}%   ·   "
                              f"Spread: {spread_txt}   ·   "
                              f"Confirmado por {usuario} em {confirmado_em}",
-                 bg=C["surface2"], fg=C["ink_faint"], font=("Segoe UI", 8)).pack(anchor="w")
+                 bg=C["surface2"], fg=C["ink_faint"], font=("Segoe UI", 8)).pack(
+                 side="left", anchor="w")
+        styled_button(
+            meta_row, "Editar spread",
+            lambda rr=r: self._abrir_editar_spread(rr),
+            small=True).pack(side="right")
         tk.Label(meta, text=f"Planilha de origem: {origem}",
                  bg=C["surface2"], fg=C["ink_faint"], font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
 
@@ -7260,6 +7354,72 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             tk.Label(nrow, text=incl_txt, bg=C["surface2"], fg=incl_color,
                      font=("Segoe UI", 8), anchor="w").grid(row=0, column=5, sticky="ew", pady=2)
         tk.Frame(box, bg=C["surface2"], height=6).pack(fill="x")
+
+    def _abrir_editar_spread(self, r):
+        """Modal para incluir/editar manualmente o spread de uma operação
+        já confirmada — pensado para completar retroativamente dias em
+        que o spread não ficou registrado automaticamente."""
+        op_id = r["id"]
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Spread — {r.get('cliente', '')}")
+        dlg.configure(bg=C["surface"])
+        dlg.geometry("360x230")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        pad = tk.Frame(dlg, bg=C["surface"], padx=24, pady=20)
+        pad.pack(fill="both", expand=True)
+
+        tk.Label(pad, text=r.get("cliente", ""), bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(pad, text=f"Operação de {_hist_fmt_dia(r.get('data_dia', ''))}",
+                 bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 8)).pack(
+                 anchor="w", pady=(2, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 14))
+
+        tk.Label(pad, text="SPREAD (%)", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w")
+        spread_atual = r.get("spread") or ""
+        spread_var = tk.StringVar(value=str(spread_atual))
+        entry = styled_entry(pad, textvariable=spread_var, width=14)
+        entry.configure(font=("Segoe UI", 14, "bold"))
+        entry.pack(anchor="w", pady=(6, 0))
+        entry.focus_set()
+        entry.selection_range(0, "end")
+
+        hint_lbl = tk.Label(pad, text="Formato: 1,35  •  2,00  •  1,43  (use vírgula)",
+                            bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 7))
+        hint_lbl.pack(anchor="w", pady=(6, 0))
+
+        err_lbl = tk.Label(pad, text="", bg=C["surface"], fg=C["err"],
+                           font=("Segoe UI", 8))
+        err_lbl.pack(anchor="w", pady=(4, 0))
+
+        def _valido(txt):
+            txt = (txt or "").strip()
+            return bool(re.fullmatch(r"\d{1,3}(,\d{1,4})?", txt))
+
+        def _salvar():
+            txt = spread_var.get().strip()
+            if not _valido(txt):
+                err_lbl.configure(
+                    text="Formato inválido. Use vírgula, ex.: 1,35")
+                return
+            ok = self._data.atualizar_spread(op_id, txt)
+            if not ok:
+                err_lbl.configure(
+                    text="Sem conexão com a rede. Não foi possível salvar agora.")
+                return
+            dlg.destroy()
+            self._reload()
+
+        btn_row = tk.Frame(pad, bg=C["surface"])
+        btn_row.pack(fill="x", pady=(18, 0))
+        styled_button(btn_row, "Cancelar", dlg.destroy).pack(side="left")
+        styled_button(btn_row, "Salvar", _salvar, accent=True).pack(side="right")
+
+        entry.bind("<Return>", lambda _e: _salvar())
 
     # ── Exportação ──────────────────────────────────────────────────────
     def _exportar_excel(self):
@@ -11764,7 +11924,9 @@ class LigacoesFrame(tk.Frame):
         graf.pack(fill="x")
         gbody = tk.Frame(graf, bg=C["surface"], padx=16, pady=16)
         gbody.pack(fill="both", expand=True)
-        self._chart = MiniBarChart(gbody, height=180)
+        self._chart = MiniBarChart(
+            gbody, height=180,
+            value_fmt=lambda v: f"{int(v)} ligaç{'ão' if int(v) == 1 else 'ões'}")
         self._chart.pack(fill="x")
 
         self._resumo_wrap = tk.Frame(wrap, bg=C["bg"])
