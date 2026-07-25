@@ -745,6 +745,7 @@ def build_risco_sacado_email_html(sacado_nome: str, sacado_cnpj: str,
 </table>
 <p>&nbsp;</p>
 <p>&quot;Operação é paga ao Fornecedor na conta indicada.</p>
+<p>Banco Itaú Unibanco S.A - Agência 0911 / Conta 11863-6.&quot;</p>
 <p>Lembrando que operações antecipadas/pagas não são passíveis de cancelamento. No bankline terá acesso as notas antecipadas através da Rota - Mais Serviços - Consulta de Notas Negociadas</p>
 <p>&nbsp;</p>
 <p><span style="font-size:16.5pt;font-family:'Itau Display',serif;color:#9A9A9A;font-weight:bold">Bons Negócios,</span></p>
@@ -3926,11 +3927,38 @@ class HistoricoOperacoesData:
             cols = ["id", "cliente", "cnpj_sacado", "trader", "nf", "valor",
                     "data_vencimento", "prazo_dias", "motivo", "data_hora",
                     "data_dia", "usuario", "arquivo_origem"]
-            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-            conn.close()
-            return rows
         except Exception:
             return []
+
+    def excluir_notas_rejeitadas(self, ids):
+        """Remove uma ou mais notas rejeitadas do histórico (por id)."""
+        ids = [i for i in (ids or []) if i is not None]
+        if not ids or not self._network_reachable():
+            return False
+        try:
+            conn = self._connect()
+            ph = ",".join(["?"] * len(ids))
+            conn.execute(f"DELETE FROM notas_rejeitadas WHERE id IN ({ph})", ids)
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    def atualizar_motivo_rejeitada(self, id_, motivo):
+        """Atualiza o motivo da recusa de uma nota rejeitada já registrada."""
+        if id_ is None or not self._network_reachable():
+            return False
+        try:
+            conn = self._connect()
+            conn.execute(
+                "UPDATE notas_rejeitadas SET motivo=? WHERE id=?",
+                (motivo or "", id_))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
 
     # ── Leitura para a tela de Histórico ───────────────────────────────────
     def listar_operacoes(self, *, cliente=None, trader=None, status=None,
@@ -6970,10 +6998,48 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
     def _render_rejeitadas(self, parent):
         rows = self._rejeitadas_rows
+        if not hasattr(self, "_rej_selected_ids"):
+            self._rej_selected_ids = set()
+        self._rej_selected_ids &= {r["id"] for r in rows}
+
         info_row = tk.Frame(parent, bg=C["bg"])
         info_row.pack(fill="x", pady=(0, 12))
         tk.Label(info_row, text=f"{len(rows)} nota(s) rejeitada(s) na triagem de alertas",
-                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9)).pack(anchor="w")
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9)).pack(
+                     side="left", anchor="w")
+
+        bulk_lbl = tk.Label(info_row, text="", bg=C["bg"], fg=C["ink_muted"],
+                             font=("Segoe UI", 8))
+        bulk_lbl.pack(side="right", padx=(0, 10))
+
+        def _excluir_selecionadas():
+            ids = list(self._rej_selected_ids)
+            if not ids:
+                return
+            if not messagebox.askyesno(
+                "Excluir notas rejeitadas",
+                f"Excluir {len(ids)} nota(s) rejeitada(s) do histórico? "
+                "Esta ação não pode ser desfeita.",
+                parent=self.controller):
+                return
+            ok = self._data.excluir_notas_rejeitadas(ids)
+            if not ok:
+                messagebox.showerror(
+                    "Erro", "Não foi possível excluir agora (rede indisponível). "
+                    "Tente novamente em instantes.", parent=self.controller)
+                return
+            self._rej_selected_ids.clear()
+            self._reload()
+
+        btn_excluir = styled_button(info_row, "Excluir selecionadas", _excluir_selecionadas,
+                                     danger=True, small=True)
+        btn_excluir.pack(side="right")
+
+        def _refresh_bulk_bar():
+            n = len(self._rej_selected_ids)
+            bulk_lbl.configure(text=f"{n} selecionada(s)" if n else "")
+            btn_excluir.configure(state="normal" if n else "disabled")
+        _refresh_bulk_bar()
 
         card = card_frame(parent)
         card.pack(fill="both", expand=True)
@@ -6982,13 +7048,14 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         hdr = tk.Frame(pad, bg=C["surface2"])
         hdr.pack(fill="x")
-        cols = [("Cliente", 3), ("Trader", 1), ("NF", 1), ("Valor", 2),
-                ("Vencimento", 1), ("Data análise", 1), ("Motivo", 4)]
+        cols = [("", 0), ("Cliente", 3), ("Trader", 1), ("NF", 1), ("Valor", 2),
+                ("Vencimento", 1), ("Data análise", 1), ("Motivo", 4), ("", 0)]
         for i, (txt, wgt) in enumerate(cols):
             hdr.columnconfigure(i, weight=wgt, uniform="rtbl")
-            tk.Label(hdr, text=txt, bg=C["surface2"], fg=C["ink_faint"],
-                     font=("Segoe UI", 8, "bold"), anchor="w").grid(
-                     row=0, column=i, sticky="ew", padx=8, pady=6)
+            if txt:
+                tk.Label(hdr, text=txt, bg=C["surface2"], fg=C["ink_faint"],
+                         font=("Segoe UI", 8, "bold"), anchor="w").grid(
+                         row=0, column=i, sticky="ew", padx=8, pady=6)
 
         if not rows:
             tk.Label(pad, text="Nenhuma nota rejeitada encontrada para os filtros atuais.",
@@ -7004,6 +7071,21 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             line.pack(fill="x")
             for i, (_t, wgt) in enumerate(cols):
                 line.columnconfigure(i, weight=wgt, uniform="rtbl")
+
+            var = tk.BooleanVar(value=r["id"] in self._rej_selected_ids)
+
+            def _on_toggle(rid=r["id"], v=var):
+                if v.get():
+                    self._rej_selected_ids.add(rid)
+                else:
+                    self._rej_selected_ids.discard(rid)
+                _refresh_bulk_bar()
+
+            tk.Checkbutton(
+                line, variable=var, bg=C["surface"], activebackground=C["surface"],
+                highlightthickness=0, bd=0, selectcolor=C["surface2"],
+                command=_on_toggle).grid(row=0, column=0, sticky="w", padx=(8, 0))
+
             vals = [
                 r.get("cliente") or "—",
                 r.get("trader") or "—",
@@ -7012,13 +7094,76 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                 _fmt_date_short(r.get("data_vencimento")),
                 _hist_fmt_dia(r.get("data_dia") or ""),
             ]
-            for i, v in enumerate(vals):
+            for i, v in enumerate(vals, start=1):
                 tk.Label(line, text=v, bg=C["surface"], fg=C["ink"],
                          font=("Segoe UI", 9), anchor="w", wraplength=140,
                          justify="left").grid(row=0, column=i, sticky="new", padx=8, pady=8)
             tk.Label(line, text=r.get("motivo") or "—", bg=C["surface"], fg=C["warn"],
                      font=("Segoe UI", 8), anchor="w", justify="left",
-                     wraplength=280).grid(row=0, column=6, sticky="new", padx=8, pady=8)
+                     wraplength=260).grid(row=0, column=7, sticky="new", padx=8, pady=8)
+
+            edit_btn = tk.Button(
+                line, text="✎", command=lambda row=r: self._abrir_editor_motivo(row),
+                bg=C["surface2"], fg=C["warn"],
+                activebackground=C["warn"], activeforeground=C["bg"],
+                font=("Segoe UI", 9, "bold"), relief="flat", bd=0,
+                padx=9, pady=3, cursor="hand2")
+            edit_btn.grid(row=0, column=8, sticky="ne", padx=8, pady=8)
+            edit_btn.bind("<Enter>", lambda _e, b=edit_btn: b.configure(bg=C["warn"], fg=C["bg"]))
+            edit_btn.bind("<Leave>", lambda _e, b=edit_btn: b.configure(bg=C["surface2"], fg=C["warn"]))
+
+    def _abrir_editor_motivo(self, row):
+        """Modal simples para editar o motivo de recusa de uma nota rejeitada."""
+        if getattr(self, "_motivo_overlay", None) is not None:
+            return
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._motivo_overlay = overlay
+
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=460, height=280)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=24, pady=20)
+        pad.pack(fill="both", expand=True)
+
+        tk.Label(pad, text="Editar motivo da recusa", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        tk.Label(pad, text=f"{row.get('cliente') or '—'} · NF {row.get('nf') or '—'}",
+                 bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 8)).pack(
+                     anchor="w", pady=(2, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(12, 10))
+
+        txt = tk.Text(pad, height=6, bg=C["surface2"], fg=C["ink"],
+                      insertbackground=C["ink"], relief="flat", bd=0,
+                      font=("Segoe UI", 9), wrap="word", padx=10, pady=8)
+        txt.pack(fill="both", expand=True)
+        txt.insert("1.0", row.get("motivo") or "")
+
+        def _fechar():
+            try:
+                overlay.destroy()
+            except Exception:
+                pass
+            self._motivo_overlay = None
+
+        def _salvar():
+            novo_motivo = txt.get("1.0", "end").strip()
+            ok = self._data.atualizar_motivo_rejeitada(row.get("id"), novo_motivo)
+            if not ok:
+                messagebox.showerror(
+                    "Erro", "Não foi possível salvar agora (rede indisponível). "
+                    "Tente novamente em instantes.", parent=self.controller)
+                return
+            _fechar()
+            self._reload()
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(12, 0))
+        styled_button(foot, "Cancelar", _fechar, small=True).pack(side="left")
+        styled_button(foot, "Salvar", _salvar, accent=True, small=True).pack(side="right")
 
 
     def _render_resumo(self, parent):
@@ -7657,21 +7802,27 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
     def _make_group_card(self, group, row, col):
         bg = C["surface"]
+        rejeitado = bool(group.get("rejeitado"))
         outer = tk.Frame(self._grid, bg=C["bg"])
         outer.grid(row=row, column=col, sticky="new", padx=5, pady=5)
 
         card = tk.Frame(outer, bg=bg, highlightthickness=1,
-                        highlightbackground=C["hair"], bd=0)
+                        highlightbackground=C["err"] if rejeitado else C["hair"], bd=0)
         card.pack(fill="x")
-        top_bar = tk.Frame(card, bg=C["ok"], height=2)
+        top_bar = tk.Frame(card, bg=C["err"] if rejeitado else C["ok"], height=2)
         top_bar.pack(fill="x")
 
         body = tk.Frame(card, bg=bg, padx=14, pady=12)
         body.pack(fill="x")
 
-        tk.Label(body, text=group["nome_sacado"], bg=bg, fg=C["ink"],
+        tk.Label(body, text=group["nome_sacado"], bg=bg,
+                 fg=C["ink_muted"] if rejeitado else C["ink"],
                  font=("Segoe UI", 9, "bold"), wraplength=170,
                  justify="center").pack()
+
+        if rejeitado:
+            tk.Label(body, text=f"⚠ Rejeitado — {group['count']} nota(s) excluída(s)",
+                     bg=bg, fg=C["err"], font=("Segoe UI", 7, "bold")).pack(pady=(4, 0))
 
         doc_sacado_card = group.get("doc_sacado") or ""
         ja_hoje = None
@@ -7686,14 +7837,17 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         info = tk.Frame(body, bg=bg)
         info.pack(pady=(10, 0), fill="x")
-        liquido, completo = self._calc_valor_liquido_group(group)
-        linhas = [
-            ("Notas", str(group["count"]), False),
-            ("Montante", group["valor_total"], True),
-        ]
-        if liquido is not None:
-            liq_txt = _fmt_brl(liquido) + ("" if completo else " *")
-            linhas.append(("Líquido", liq_txt, True))
+        if rejeitado:
+            linhas = [("Notas excluídas", str(group["count"]), False)]
+        else:
+            liquido, completo = self._calc_valor_liquido_group(group)
+            linhas = [
+                ("Notas", str(group["count"]), False),
+                ("Montante", group["valor_total"], True),
+            ]
+            if liquido is not None:
+                liq_txt = _fmt_brl(liquido) + ("" if completo else " *")
+                linhas.append(("Líquido", liq_txt, True))
         for label, value, accent in linhas:
             row_f = tk.Frame(info, bg=bg)
             row_f.pack(fill="x", pady=(0, 3))
@@ -7706,6 +7860,13 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         btn_row = tk.Frame(body, bg=bg)
         btn_row.pack(fill="x", pady=(12, 0))
+
+        if rejeitado:
+            styled_button(btn_row, "Detalhes / Reincluir →",
+                          lambda k=group["nome_sacado"]: self._open_detalhes(k),
+                          accent=True, small=True).pack(side="right")
+            return {"outer": outer, "lim_btn": None, "group": group}
+
         status, label = self._evaluate_group_limite(group)
         lim_btn = styled_button_limite(
             btn_row, label,
@@ -8047,10 +8208,30 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
     def _find_group(self, nome_sacado):
         key = _normalize_sacado_key(nome_sacado)
-        for g in self._groups:
+        for g in list(self._groups) + list(getattr(self, "_ghost_groups", [])):
             if _normalize_sacado_key(g["nome_sacado"]) == key:
                 return g
         return None
+
+    def _build_visible_and_ghost_groups(self, all_ops):
+        """Agrupa as ops visíveis normalmente. Sacados cujas notas foram
+        todas excluídas não somem da tela: viram um 'grupo fantasma' com
+        selo 'Rejeitado', para que o usuário ainda os veja e possa
+        reincluir notas a partir do Detalhes."""
+        excluded = getattr(self, "_excluded_uids", set())
+        visible_ops = [op for op in all_ops if op.get("uid") not in excluded]
+        visible_groups = _group_invertido_ops(visible_ops)
+        visible_keys = {self._group_limite_key(g) for g in visible_groups}
+
+        excluded_ops = [op for op in all_ops if op.get("uid") in excluded]
+        excluded_groups = _group_invertido_ops(excluded_ops)
+        ghosts = []
+        for g in excluded_groups:
+            if self._group_limite_key(g) in visible_keys:
+                continue
+            g["rejeitado"] = True
+            ghosts.append(g)
+        return visible_groups, ghosts
 
     def _bind_modal_scroll(self, widgets, sf):
         def _mw(event):
@@ -8078,6 +8259,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         self._detail_overlay = overlay
         self._detail_key = self._group_limite_key(group)
         self._detail_nome = group["nome_sacado"]
+        self._detail_selected_uids = set()
 
         card = tk.Frame(overlay, bg=C["surface"],
                         highlightthickness=1, highlightbackground=C["hair"])
@@ -8230,7 +8412,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         incluidas = [n for n in payload["notas"] if n["incluida"]]
         nome_sacado = group["nome_sacado"]
-        subject = f"RISCO SACADO INVERTIDO - {nome_sacado.upper()}"
+        subject = f"RISCO SACADO INVERTIDO - {nome_sacado.upper()} x VIBRA ENERGIA SA"
         html = build_risco_sacado_email_html(
             sacado_nome=nome_sacado.upper(),
             sacado_cnpj=payload["doc_sacado"],
@@ -8506,7 +8688,17 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             self._detail_status_lbl.configure(text="")
             self._detail_status_lbl.pack_forget()
 
+        self._detail_check_vars = {}
+
+        def _on_check_toggle(uid, var):
+            if var.get():
+                self._detail_selected_uids.add(uid)
+            else:
+                self._detail_selected_uids.discard(uid)
+            _refresh_bulk_bar()
+
         def _nota_card(op, included):
+            uid = op["uid"]
             item = tk.Frame(list_outer, bg=C["surface2"],
                             highlightthickness=1,
                             highlightbackground=C["hair"] if included else C["err"])
@@ -8516,6 +8708,14 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             line = tk.Frame(item, bg=C["surface2"], padx=12, pady=8)
             line.pack(fill="x")
             scroll_targets.append(line)
+
+            var = tk.BooleanVar(value=uid in self._detail_selected_uids)
+            self._detail_check_vars[uid] = var
+            chk = tk.Checkbutton(
+                line, variable=var, bg=C["surface2"], activebackground=C["surface2"],
+                highlightthickness=0, bd=0, selectcolor=C["surface"],
+                command=lambda u=uid, v=var: _on_check_toggle(u, v))
+            chk.pack(side="left", padx=(0, 8))
 
             prazo_txt = f"{op['prazo']}d" if op.get("prazo") else "—"
             campos = [
@@ -8544,21 +8744,87 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                     line, "Incluir", lambda o=op: self._toggle_nota(o, exclude=False),
                     accent=True, small=True).pack(side="right")
 
-        def _col_header():
+        def _col_header(uids_secao):
             head = tk.Frame(list_outer, bg=C["surface"])
             head.pack(fill="x", padx=12, pady=(0, 2))
             scroll_targets.append(head)
+            todos_marcados = bool(uids_secao) and all(
+                u in self._detail_selected_uids for u in uids_secao)
+            hdr_var = tk.BooleanVar(value=todos_marcados)
+
+            def _toggle_all(uids=uids_secao, v=hdr_var):
+                if v.get():
+                    self._detail_selected_uids.update(uids)
+                else:
+                    self._detail_selected_uids.difference_update(uids)
+                self._render_detalhes_list()
+
+            tk.Checkbutton(
+                head, variable=hdr_var, bg=C["surface"], activebackground=C["surface"],
+                highlightthickness=0, bd=0, selectcolor=C["surface2"],
+                command=_toggle_all).pack(side="left", padx=(0, 8))
             for txt, w_ in (("NF", 9), ("VALOR", 12), ("INCLUSÃO", 9),
                             ("VENCIMENTO", 9), ("PRAZO", 5)):
                 tk.Label(head, text=txt, bg=C["surface"], fg=C["ink_faint"],
                          font=("Segoe UI", 6, "bold"), width=w_, anchor="w").pack(side="left")
+
+        bulk_bar = tk.Frame(list_outer, bg=C["surface"])
+        bulk_lbl = tk.Label(bulk_bar, text="", bg=C["surface"], fg=C["ink_muted"],
+                             font=("Segoe UI", 8))
+        bulk_lbl.pack(side="left")
+
+        def _selected_included():
+            return [op for op in incluidas if op["uid"] in self._detail_selected_uids]
+
+        def _selected_excluded():
+            return [op for op in excluidas if op["uid"] in self._detail_selected_uids]
+
+        def _bulk_exclude():
+            ops = _selected_included()
+            if not ops:
+                return
+            if not messagebox.askyesno(
+                "Excluir notas selecionadas",
+                f"Excluir {len(ops)} nota(s) selecionada(s) do montante deste cliente?",
+                parent=self.controller):
+                return
+            self._toggle_nota_bulk(ops, exclude=True)
+
+        def _bulk_include():
+            ops = _selected_excluded()
+            if not ops:
+                return
+            self._toggle_nota_bulk(ops, exclude=False)
+
+        btn_excl = styled_button(bulk_bar, "Excluir selecionadas", _bulk_exclude,
+                                  danger=True, small=True)
+        btn_incl = styled_button(bulk_bar, "Incluir selecionadas", _bulk_include,
+                                  accent=True, small=True)
+        btn_incl.pack(side="right")
+        btn_excl.pack(side="right", padx=(0, 6))
+
+        def _refresh_bulk_bar():
+            n_incl = len(_selected_included())
+            n_excl = len(_selected_excluded())
+            n_total = n_incl + n_excl
+            if n_total:
+                bulk_lbl.configure(text=f"{n_total} nota(s) selecionada(s)")
+            else:
+                bulk_lbl.configure(text="")
+            btn_excl.configure(state="normal" if n_incl else "disabled")
+            btn_incl.configure(state="normal" if n_excl else "disabled")
+
+        if todas:
+            bulk_bar.pack(fill="x", pady=(0, 8))
+            scroll_targets.append(bulk_bar)
+        _refresh_bulk_bar()
 
         if incluidas:
             tk.Label(list_outer, text=f"NO MONTANTE ({len(incluidas)})", bg=C["surface"],
                      fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(
                          anchor="w", pady=(0, 6))
             scroll_targets.append(list_outer)
-            _col_header()
+            _col_header([op["uid"] for op in incluidas])
         for op in incluidas:
             _nota_card(op, included=True)
 
@@ -8566,7 +8832,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             tk.Label(list_outer, text=f"EXCLUÍDAS / DISPONÍVEIS ({len(excluidas)})",
                      bg=C["surface"], fg=C["ink_faint"],
                      font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(14, 6))
-            _col_header()
+            _col_header([op["uid"] for op in excluidas])
             for op in excluidas:
                 _nota_card(op, included=False)
 
@@ -8601,16 +8867,29 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         self._render_detalhes_list()
         self._rebuild_group_cards()
 
+    def _toggle_nota_bulk(self, ops, exclude):
+        """Inclui ou exclui várias notas de uma vez (seleção múltipla)."""
+        uids = {op["uid"] for op in ops}
+        if not uids:
+            return
+        if exclude:
+            self._excluded_uids |= uids
+        else:
+            self._excluded_uids -= uids
+        self._detail_selected_uids.difference_update(uids)
+        self._render_detalhes_list()
+        self._rebuild_group_cards()
+
     def _rebuild_group_cards(self):
-        excluded = self._excluded_uids
-        visible_ops = [op for op in self._all_ops if op["uid"] not in excluded]
-        groups = _group_invertido_ops(visible_ops)
+        groups, ghosts = self._build_visible_and_ghost_groups(self._all_ops)
         self._groups = groups
+        self._ghost_groups = ghosts
+        display_groups = groups + ghosts
         for w in self._grid.winfo_children():
             w.destroy()
         self._cards = []
         self._limit_btns = {}
-        if not groups:
+        if not display_groups:
             empty = tk.Frame(self._grid, bg=C["bg"])
             empty.grid(row=0, column=0, columnspan=3, sticky="ew", pady=24)
             tk.Label(empty, text="Nenhuma operação encontrada na planilha.",
@@ -8618,13 +8897,15 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                      font=("Segoe UI", 10)).pack()
             self._sub_lbl.configure(text="0 grupo(s) · 0 nota(s)")
             return
-        for idx, group in enumerate(groups):
+        for idx, group in enumerate(display_groups):
             row, col = divmod(idx, 3)
             self._cards.append(self._make_group_card(group, row, col))
         total_notas = sum(g["count"] for g in groups)
-        self._sub_lbl.configure(
-            text=(f"{len(groups)} grupo(s) · {total_notas} nota(s) · "
-                  f"{os.path.basename(self._last_path or '')}"))
+        sub_txt = (f"{len(groups)} grupo(s) · {total_notas} nota(s) · "
+                   f"{os.path.basename(self._last_path or '')}")
+        if ghosts:
+            sub_txt += f" · {len(ghosts)} sacado(s) rejeitado(s)"
+        self._sub_lbl.configure(text=sub_txt)
 
     def _close_alerts_modal(self):
         if self._alert_overlay is not None:
@@ -8886,6 +9167,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                 pass
             self._detail_overlay = None
         self._detail_key = None
+        self._detail_selected_uids = set()
 
     def _render_results(self, ops):
         self._stop_loading_anim()
@@ -8893,24 +9175,27 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         for w in self._grid.winfo_children():
             w.destroy()
         self._cards = []
-        excluded = getattr(self, "_excluded_uids", set())
-        visible_ops = [op for op in ops if op.get("uid") not in excluded]
-        groups = _group_invertido_ops(visible_ops)
+        self._all_ops = ops
+        groups, ghosts = self._build_visible_and_ghost_groups(ops)
         self._groups = groups
-        if not groups:
+        self._ghost_groups = ghosts
+        display_groups = groups + ghosts
+        if not display_groups:
             empty = tk.Frame(self._grid, bg=C["bg"])
             empty.grid(row=0, column=0, columnspan=3, sticky="ew", pady=24)
             tk.Label(empty, text="Nenhuma operação encontrada na planilha.",
                      bg=C["bg"], fg=C["ink_muted"],
                      font=("Segoe UI", 10)).pack()
             return
-        for idx, group in enumerate(groups):
+        for idx, group in enumerate(display_groups):
             row, col = divmod(idx, 3)
             self._cards.append(self._make_group_card(group, row, col))
         total_notas = sum(g["count"] for g in groups)
-        self._sub_lbl.configure(
-            text=(f"{len(groups)} grupo(s) · {total_notas} nota(s) · "
-                  f"{os.path.basename(self._last_path or '')}"))
+        sub_txt = (f"{len(groups)} grupo(s) · {total_notas} nota(s) · "
+                   f"{os.path.basename(self._last_path or '')}")
+        if ghosts:
+            sub_txt += f" · {len(ghosts)} sacado(s) rejeitado(s)"
+        self._sub_lbl.configure(text=sub_txt)
         self._limit_btns = {}
         for card in self._cards:
             if card.get("lim_btn") and card.get("group"):
@@ -12014,7 +12299,13 @@ class LigacoesFrame(tk.Frame):
 
         total_atual = sum(valores)
         total_anterior = self._data.total_periodo(ini_ant, fim_ant)
-        media_dia = total_atual / max(len(serie_atual), 1)
+        # Média por dia considera apenas dias úteis (seg-sex); finais de
+        # semana continuam aparecendo no gráfico, mas não entram na média.
+        valores_uteis = [
+            q for d_iso, q in serie_atual
+            if datetime.strptime(d_iso, "%Y-%m-%d").weekday() < 5
+        ]
+        media_dia = sum(valores_uteis) / max(len(valores_uteis), 1)
 
         for w in self._resumo_wrap.winfo_children():
             w.destroy()
