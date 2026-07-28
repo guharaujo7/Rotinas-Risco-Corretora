@@ -1,4 +1,4 @@
-import os, sys, re, random, struct, tkinter as tk, threading, time, tempfile, shutil, webbrowser, ctypes, json as _json_mod, uuid as _uuid_mod, queue, base64, sqlite3, io
+import os, sys, re, random, struct, tkinter as tk, threading, time, tempfile, shutil, webbrowser, ctypes, json as _json_mod, uuid as _uuid_mod, queue, base64, sqlite3, io, csv, unicodedata
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from tkinter import ttk, filedialog, messagebox, font as tkfont
 from datetime import datetime, date, timedelta
@@ -981,7 +981,97 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
 # MIRROR_CLIENTS, já usado para o limite compartilhado.
 
 
-def get_emails_por_cliente(nome_sacado: str) -> dict:
+def _clean_email_list(raw: str) -> str:
+    """Normaliza uma lista de e-mails vinda da planilha (separadores
+    inconsistentes: ';', ';;', espaços) para 'a@x; b@y; c@z'."""
+    if not raw:
+        return ""
+    partes = [p.strip() for p in str(raw).replace(",", ";").split(";")]
+    return "; ".join(p for p in partes if p)
+
+
+_BK_TH_STYLE = ("border:solid windowtext 1.0pt; background:#B4C6E7; "
+                "padding:4pt; font-family:Calibri,sans-serif; font-size:11pt; "
+                "font-weight:bold; color:black; text-align:center")
+_BK_TD_STYLE = ("border:solid windowtext 1.0pt; padding:4pt; "
+                "font-family:Calibri,sans-serif; font-size:11pt; color:black; "
+                "text-align:center")
+_BK_TOTAL_STYLE = ("border:solid windowtext 1.0pt; background:yellow; padding:4pt; "
+                    "font-family:Calibri,sans-serif; font-size:11pt; font-weight:bold; "
+                    "color:black; text-align:center")
+
+
+def build_braskem_email_html(cedente_cnpj: str, sacado_nome: str,
+                              sacado_cnpj: str, notas: list, taxa_str: str) -> str:
+    """Monta o HTML das notas para a Braskem no mesmo layout do modelo
+    padrão (CNPJ CEDENTE, RAZAO SOCIAL SACADO, CNPJ SACADO, NOTA,
+    VENCIMENTO, VALOR, VALOR LÍQUIDO, TX), com uma linha por nota e uma
+    linha de total ao final — montante bruto e, ao lado, o líquido,
+    destacados em amarelo como no modelo. Cada item de `notas` deve
+    conter: nf, data_vencimento, valor_raw, valor_liquido (Decimal ou
+    None)."""
+    cedente_cnpj_fmt = _fmt_cnpj(cedente_cnpj)
+    sacado_cnpj_fmt = _fmt_cnpj(sacado_cnpj)
+
+    total_bruto = Decimal("0")
+    total_liq = Decimal("0")
+    linhas_html = []
+    for op in notas:
+        vf = op.get("valor_raw") or Decimal("0")
+        vl = op.get("valor_liquido")
+        total_bruto += vf
+        if vl is not None:
+            total_liq += vl
+        linhas_html.append(f"""
+<tr>
+  <td style="{_BK_TD_STYLE}">{cedente_cnpj_fmt}</td>
+  <td style="{_BK_TD_STYLE}">{sacado_nome}</td>
+  <td style="{_BK_TD_STYLE}">{sacado_cnpj_fmt}</td>
+  <td style="{_BK_TD_STYLE}">{op.get('nf') or '—'}</td>
+  <td style="{_BK_TD_STYLE}">{op.get('data_vencimento') or '—'}</td>
+  <td style="{_BK_TD_STYLE}">{_fmt_brl(vf)}</td>
+  <td style="{_BK_TD_STYLE}">{_fmt_brl(vl) if vl is not None else '—'}</td>
+  <td style="{_BK_TD_STYLE}">{taxa_str or '—'}</td>
+</tr>""")
+
+    total_html = f"""
+<tr>
+  <td style="{_BK_TD_STYLE}"><b>TOTAL</b></td>
+  <td style="{_BK_TD_STYLE}"></td>
+  <td style="{_BK_TD_STYLE}"></td>
+  <td style="{_BK_TD_STYLE}"></td>
+  <td style="{_BK_TD_STYLE}"></td>
+  <td style="{_BK_TOTAL_STYLE}">R$ {_fmt_brl(total_bruto)}</td>
+  <td style="{_BK_TOTAL_STYLE}">R$ {_fmt_brl(total_liq)}</td>
+  <td style="{_BK_TD_STYLE}"></td>
+</tr>"""
+
+    return f"""<html><head><meta charset="utf-8"></head>
+<body lang="PT-BR" style="font-family:Calibri,sans-serif; color:#000000">
+<p>Seguem as notas disponibilizadas nesta data para a Braskem.</p>
+<table border="0" cellspacing="0" cellpadding="0" width="948"
+       style="width:711.0pt; border-collapse:collapse">
+<tbody>
+<tr>
+  <td style="{_BK_TH_STYLE}">CNPJ CEDENTE</td>
+  <td style="{_BK_TH_STYLE}">RAZAO SOCIAL SACADO</td>
+  <td style="{_BK_TH_STYLE}">CNPJ SACADO</td>
+  <td style="{_BK_TH_STYLE}">NOTA</td>
+  <td style="{_BK_TH_STYLE}">VENCIMENTO</td>
+  <td style="{_BK_TH_STYLE}">VALOR</td>
+  <td style="{_BK_TH_STYLE}">VALOR LÍQUIDO</td>
+  <td style="{_BK_TH_STYLE}">TX (% AM LINEAR)</td>
+</tr>
+{''.join(linhas_html)}
+{total_html}
+</tbody>
+</table>
+<p>&nbsp;</p>
+<p style="font-family:Calibri; font-size:9pt; color:#000000; margin:5pt">Corporativo | Interno</p>
+</body></html>"""
+
+
+
     """Retorna {"para": [...], "cc": [...]} para o cliente (Risco Sacado
     Invertido), ou listas vazias se não houver mapeamento. Usa o mesmo
     casamento tolerante (aliases + palavras-chave) do trader/prazo, e
@@ -1676,7 +1766,10 @@ FRAME_LABELS = {
     "LimitesInvertido":  "Limites Invertido",
     "AnalisarOperacoes": "Analisar Operações",
     "TaxasInvertido":    "Taxas (Depara)",
-    "Pipeline":          "Pipeline",
+    "Braskem":           "Braskem",
+    "AnalisarBraskem":   "Analisar Operações — Braskem",
+    "TaxasBraskem":      "Taxas (Depara) — Braskem",
+    "HistoricoBraskem":  "Histórico — Braskem",
     "TaxasPre":          "Taxas Pré",
     "Ligacoes":          "Ligações",
 }
@@ -2406,7 +2499,7 @@ class Sidebar(tk.Frame):
         ("Share",             "⊕",  "Cadastro Share"),
         ("BPM",               "⚡",  "BPM"),
         ("OperacoesInvertido","⬡",  "Operações Invertido"),
-        ("Pipeline",          "◫",  "Pipeline"),
+        ("Braskem",           "◫",  "Braskem"),
         ("TaxasPre",          "◔",  "Taxas Pré"),
     ]
 
@@ -3335,6 +3428,489 @@ def calcular_spread_sacado(notas, taxa_alvo_str):
 
     return {"ok": True, "spread": spread, "taxa_media": taxa_media,
             "notas_usadas": len(linhas), "convergiu": convergiu}
+
+
+# ─── Braskem (Analisar Operações, Depara e Histórico) ──────────────────────
+# Módulo separado do Operações Invertido. O Depara aqui não tem validade
+# mensal (fica sempre vigente até ser atualizado manualmente ou por nova
+# importação da planilha de clientes/taxas).
+SHARED_BRASKEM_TAXAS_PATH = os.path.join(
+    os.path.dirname(SHARED_TAXAS_PATH), "braskem_taxas.json")
+BRASKEM_DB_PATH = os.path.join(
+    os.path.dirname(SHARED_TAXAS_PATH), "braskem_operacoes.db")
+BRASKEM_PENDING_LOCAL_PATH = os.path.join(
+    tempfile.gettempdir(), "braskem_pendente_local.jsonl")
+
+
+def _norm_txt(s):
+    s = str(s or "")
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return s.strip().lower()
+
+
+def _braskem_find_header(rows, required):
+    """Procura, nas primeiras linhas, a linha de cabeçalho que contenha
+    todas as colunas obrigatórias (comparação por substring, sem acento)."""
+    for i, row in enumerate(rows[:15]):
+        if not row:
+            continue
+        norm = [_norm_txt(c) for c in row]
+        if all(any(req in cell for cell in norm) for req in required):
+            cols = {}
+            for req in required:
+                for j, cell in enumerate(norm):
+                    if req in cell:
+                        cols[req] = j
+                        break
+            return i, cols
+    return None, None
+
+
+def _parse_braskem_solution(rows):
+    """Formato 'Solution': Doc Sacado, Nome Sacado, Doc Cedente, Nome
+    Cedente, Número, Valor, Data Inclusão, Data Vencimento, Prazo, ..."""
+    header_i, cols = _braskem_find_header(
+        rows, ["doc sacado", "nome sacado", "numero", "valor",
+               "data vencimento", "prazo"])
+    if header_i is None:
+        return []
+    ops = []
+    for row in rows[header_i + 1:]:
+        if not row:
+            continue
+
+        def _cell(key, row=row):
+            idx = cols.get(key)
+            if idx is None or idx >= len(row):
+                return None
+            return row[idx]
+
+        nome = str(_cell("nome sacado") or "").strip()
+        if not nome:
+            continue
+        ops.append({
+            "uid": len(ops),
+            "doc_sacado": only_digits(str(_cell("doc sacado") or "")),
+            "doc_cedente": (only_digits(str(_cell("doc cedente") or ""))
+                            if "doc cedente" in cols else ""),
+            "nome_sacado": nome,
+            "nf": str(_cell("numero") or "").strip(),
+            "valor_raw": _valor_to_decimal(_cell("valor")),
+            "valor": _fmt_valor_cell(_cell("valor")),
+            "data_inclusao": _fmt_date_short(_cell("data inclusao")),
+            "data_vencimento": _fmt_date_short(_cell("data vencimento")),
+            "prazo": str(_cell("prazo") if _cell("prazo") is not None else "").strip(),
+            "origem_formato": "solution",
+        })
+    return ops
+
+
+def _parse_braskem_nova(rows):
+    """Formato 'Nova Plataforma': Status, CNPJ Sacado, Nome Sacado, ...,
+    NF, Valor NF, Valor Líquido, Data Vencimento, ..., Data Operação. Só
+    entram notas com Status ACTIVE. Prazo é calculado (vencimento - operação)
+    quando a planilha não traz um prazo pronto."""
+    header_i, cols = _braskem_find_header(
+        rows, ["status", "cnpj sacado", "nome sacado", "nf", "valor nf",
+               "data vencimento", "data operacao"])
+    if header_i is None:
+        return []
+    ops = []
+    for row in rows[header_i + 1:]:
+        if not row:
+            continue
+
+        def _cell(key, row=row):
+            idx = cols.get(key)
+            if idx is None or idx >= len(row):
+                return None
+            return row[idx]
+
+        status = str(_cell("status") or "").strip().upper()
+        if status and status != "ACTIVE":
+            continue
+        nome = str(_cell("nome sacado") or "").strip()
+        if not nome:
+            continue
+        data_op = _cell("data operacao")
+        data_venc = _cell("data vencimento")
+        prazo = ""
+        try:
+            d_op = data_op if isinstance(data_op, (date, datetime)) else _parse_data_curta(str(data_op or ""))
+            d_vc = data_venc if isinstance(data_venc, (date, datetime)) else _parse_data_curta(str(data_venc or ""))
+            if d_op and d_vc:
+                d_op = d_op.date() if isinstance(d_op, datetime) else d_op
+                d_vc = d_vc.date() if isinstance(d_vc, datetime) else d_vc
+                prazo = str((d_vc - d_op).days)
+        except Exception:
+            prazo = ""
+        ops.append({
+            "uid": len(ops),
+            "doc_sacado": only_digits(str(_cell("cnpj sacado") or "")),
+            "doc_cedente": (only_digits(str(_cell("cnpj fornecedor") or ""))
+                            if "cnpj fornecedor" in cols else ""),
+            "nome_sacado": nome,
+            "nf": str(_cell("nf") or "").strip(),
+            "valor_raw": _valor_to_decimal(_cell("valor nf")),
+            "valor": _fmt_valor_cell(_cell("valor nf")),
+            "data_inclusao": _fmt_date_short(data_op),
+            "data_vencimento": _fmt_date_short(data_venc),
+            "prazo": prazo,
+            "origem_formato": "nova_plataforma",
+        })
+    return ops
+
+
+def _parse_braskem_planilha(path):
+    """Lê um arquivo de operações Braskem em qualquer um dos dois formatos
+    conhecidos (Solution ou Nova Plataforma), como .xlsx ou .csv."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".csv":
+        conteudo = None
+        for enc in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
+            try:
+                with open(path, "r", encoding=enc, newline="") as f:
+                    conteudo = f.read()
+                break
+            except Exception:
+                continue
+        if conteudo is None:
+            raise RuntimeError("Não foi possível ler o arquivo CSV (encoding).")
+        sample = conteudo[:4096]
+        try:
+            delim = csv.Sniffer().sniff(sample, delimiters=";,").delimiter
+        except Exception:
+            delim = ";" if sample.count(";") > sample.count(",") else ","
+        reader = csv.reader(io.StringIO(conteudo), delimiter=delim)
+        rows = [row for row in reader]
+        ops = _parse_braskem_nova(rows)
+        for i, op in enumerate(ops):
+            op["uid"] = i
+        return ops
+
+    if not OPENPYXL_OK:
+        raise RuntimeError("Biblioteca openpyxl não disponível. Instale com: pip install openpyxl")
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        all_ops = []
+        for ws in wb.worksheets:
+            rows = list(ws.iter_rows(values_only=True))
+            if not rows:
+                continue
+            header_i, _c = _braskem_find_header(rows, ["nome sacado"])
+            if header_i is None:
+                continue
+            norm_header = [_norm_txt(c) for c in rows[header_i]]
+            if any("doc sacado" in c for c in norm_header):
+                all_ops.extend(_parse_braskem_solution(rows))
+            elif any("cnpj sacado" in c for c in norm_header):
+                all_ops.extend(_parse_braskem_nova(rows))
+        for i, op in enumerate(all_ops):
+            op["uid"] = i
+        return all_ops
+    finally:
+        wb.close()
+
+
+class BraskemTaxasData:
+    """Depara de clientes Braskem: taxa pré (editável na tela), prazo
+    convencionado (máximo) e spread mínimo a.a. (ambos vindos da planilha
+    de clientes, respeitados como regra de alerta), além dos e-mails de
+    aprovação/cc. Sem validade mensal — permanece vigente até ser
+    atualizado (a nota fica em uso por alguns dias após o faturamento)."""
+
+    _instance = None
+    RETRY_SECONDS = 30
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._clientes = {}  # cnpj (só dígitos) -> dict
+        self._available = False
+        self._on_reconnect_callbacks = []
+        self._retry_timer = None
+        self._try_load()
+        if not self._available:
+            self._schedule_retry()
+
+    def is_available(self):
+        return self._available
+
+    def on_reconnect(self, callback):
+        self._on_reconnect_callbacks.append(callback)
+
+    def _schedule_retry(self):
+        if self._retry_timer is not None:
+            return
+        self._retry_timer = threading.Timer(self.RETRY_SECONDS, self._retry_tick)
+        self._retry_timer.daemon = True
+        self._retry_timer.start()
+
+    def _retry_tick(self):
+        self._retry_timer = None
+        was_available = self._available
+        self._try_load()
+        if self._available and not was_available:
+            for cb in list(self._on_reconnect_callbacks):
+                try:
+                    cb()
+                except Exception:
+                    pass
+        if not self._available:
+            self._schedule_retry()
+
+    def _network_reachable(self):
+        try:
+            return os.path.isdir(os.path.dirname(SHARED_BRASKEM_TAXAS_PATH))
+        except Exception:
+            return False
+
+    def _try_load(self):
+        if not self._network_reachable():
+            self._available = False
+            return
+        try:
+            if os.path.isfile(SHARED_BRASKEM_TAXAS_PATH):
+                with open(SHARED_BRASKEM_TAXAS_PATH, "r", encoding="utf-8") as f:
+                    conteudo = f.read().strip()
+                if conteudo:
+                    try:
+                        data = _json_mod.loads(conteudo)
+                    except Exception:
+                        data = {}
+                    self._clientes = data.get("clientes", {})
+                else:
+                    self._clientes = {}
+            self._available = True
+        except Exception:
+            self._available = False
+
+    def save(self):
+        if not self._network_reachable():
+            self._available = False
+            self._schedule_retry()
+            return False
+        try:
+            with open(SHARED_BRASKEM_TAXAS_PATH, "w", encoding="utf-8") as f:
+                _json_mod.dump({"clientes": self._clientes}, f,
+                                ensure_ascii=False, indent=2)
+            self._available = True
+            return True
+        except Exception:
+            self._available = False
+            self._schedule_retry()
+            return False
+
+    def all_clientes(self):
+        return dict(self._clientes)
+
+    def get_cliente(self, cnpj):
+        return self._clientes.get(only_digits(cnpj or ""))
+
+    def set_taxa(self, cnpj, taxa_pre):
+        cnpj = only_digits(cnpj or "")
+        if cnpj not in self._clientes:
+            return False
+        self._clientes[cnpj]["taxa_pre"] = str(taxa_pre)
+        return self.save()
+
+    def importar_planilha(self, path):
+        """Importa/atualiza clientes a partir da planilha padrão de
+        clientes Braskem (RAZAO SOCIAL SACADO, CNPJ SACADO, Prazo Conv.,
+        Spread Mín. a.a., Taxa Pré a.m., Para, Cc). Mantém a taxa já
+        editada manualmente se o cliente já existir e a planilha não
+        alterar a taxa pré (a taxa é o único campo pensado para edição
+        manual recorrente)."""
+        if not OPENPYXL_OK:
+            raise RuntimeError("Biblioteca openpyxl não disponível.")
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            ws = wb.active
+            rows = list(ws.iter_rows(values_only=True))
+        finally:
+            wb.close()
+        header_i, cols = _braskem_find_header(
+            rows, ["cnpj sacado", "prazo conv", "spread min", "taxa pre"])
+        if header_i is None:
+            raise RuntimeError(
+                "Não encontrei as colunas esperadas (CNPJ SACADO, Prazo "
+                "Conv., Spread Mín., Taxa Pré) na planilha.")
+        importados = 0
+        for row in rows[header_i + 1:]:
+            if not row:
+                continue
+
+            def _cell(key, row=row):
+                idx = cols.get(key)
+                if idx is None or idx >= len(row):
+                    return None
+                return row[idx]
+
+            razao_idx = None
+            for j, h in enumerate(rows[header_i]):
+                if "razao" in _norm_txt(h):
+                    razao_idx = j
+                    break
+            nome = str((row[razao_idx] if razao_idx is not None and razao_idx < len(row) else "") or "").strip()
+            cnpj = only_digits(str(_cell("cnpj sacado") or ""))
+            if not cnpj or not nome:
+                continue
+            self._clientes[cnpj] = {
+                "nome": nome,
+                "cnpj": cnpj,
+                "prazo_max": _cell("prazo conv"),
+                "spread_min": _cell("spread min"),
+                "taxa_pre": str(_cell("taxa pre") or ""),
+                "email_para": str(_cell("para") or "") if "para" in cols else "",
+                "email_cc": str(_cell("cc") or "") if "cc" in cols else "",
+            }
+            importados += 1
+        ok = self.save()
+        return importados if ok else -importados
+
+
+class BraskemHistoricoData:
+    """Histórico de notas enviadas para a Braskem. Diferente do histórico
+    de Invertido, aqui não existem alertas nem notas recusadas — apenas
+    as notas efetivamente enviadas, uma linha por nota."""
+
+    _instance = None
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._available = False
+        self._ensure_schema()
+
+    def _network_reachable(self):
+        try:
+            return os.path.isdir(os.path.dirname(BRASKEM_DB_PATH))
+        except Exception:
+            return False
+
+    def _connect(self):
+        conn = sqlite3.connect(BRASKEM_DB_PATH, timeout=20)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        return conn
+
+    def _ensure_schema(self):
+        if not self._network_reachable():
+            self._available = False
+            return
+        try:
+            conn = self._connect()
+            conn.execute("""CREATE TABLE IF NOT EXISTS notas_enviadas (
+                                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                                cliente         TEXT NOT NULL,
+                                cnpj_sacado     TEXT,
+                                nf              TEXT,
+                                valor           TEXT,
+                                data_vencimento TEXT,
+                                prazo_dias      INTEGER,
+                                spread          TEXT,
+                                data_hora       TEXT NOT NULL,
+                                data_dia        TEXT NOT NULL,
+                                usuario         TEXT,
+                                arquivo_origem  TEXT
+                            )""")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bk_dia ON notas_enviadas(data_dia)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bk_cliente ON notas_enviadas(cliente)")
+            conn.commit()
+            conn.close()
+            self._available = True
+        except Exception:
+            self._available = False
+
+    def is_available(self):
+        return self._available
+
+    def registrar_notas(self, *, cliente, cnpj_sacado, notas, spread,
+                         arquivo_origem):
+        if not notas:
+            return True
+        now = datetime.now()
+        usuario = _current_username()
+        payload = [
+            (cliente, cnpj_sacado, n.get("nf"), str(n.get("valor")),
+             n.get("data_vencimento"), n.get("prazo_dias"),
+             str(spread) if spread is not None else None,
+             now.isoformat(timespec="seconds"), now.date().isoformat(),
+             usuario, arquivo_origem)
+            for n in notas
+        ]
+        if not self._network_reachable():
+            self._available = False
+            self._queue_local(payload)
+            return False
+        try:
+            conn = self._connect()
+            conn.executemany(
+                """INSERT INTO notas_enviadas
+                   (cliente, cnpj_sacado, nf, valor, data_vencimento,
+                    prazo_dias, spread, data_hora, data_dia, usuario,
+                    arquivo_origem)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""", payload)
+            conn.commit()
+            conn.close()
+            self._available = True
+            return True
+        except Exception:
+            self._available = False
+            self._queue_local(payload)
+            return False
+
+    def _queue_local(self, payload):
+        try:
+            with open(BRASKEM_PENDING_LOCAL_PATH, "a", encoding="utf-8") as f:
+                for p in payload:
+                    f.write(_json_mod.dumps(p, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def listar_notas(self, *, cliente=None, data_de=None, data_ate=None,
+                      busca=None):
+        if not self._network_reachable():
+            return []
+        try:
+            conn = self._connect()
+            clauses, params = [], []
+            if data_de:
+                clauses.append("data_dia >= ?"); params.append(data_de)
+            if data_ate:
+                clauses.append("data_dia <= ?"); params.append(data_ate)
+            if cliente:
+                ph = ",".join(["?"] * len(cliente))
+                clauses.append(f"cliente IN ({ph})")
+                params.extend(cliente)
+            if busca:
+                b = f"%{busca.strip()}%"
+                clauses.append("(cnpj_sacado LIKE ? OR nf LIKE ?)")
+                params.extend([b, b])
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            cur = conn.execute(
+                f"""SELECT id, cliente, cnpj_sacado, nf, valor,
+                           data_vencimento, prazo_dias, spread, data_hora,
+                           data_dia, usuario, arquivo_origem
+                    FROM notas_enviadas {where}
+                    ORDER BY data_hora DESC""", params)
+            cols = ["id", "cliente", "cnpj_sacado", "nf", "valor",
+                    "data_vencimento", "prazo_dias", "spread", "data_hora",
+                    "data_dia", "usuario", "arquivo_origem"]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            conn.close()
+            return rows
+        except Exception:
+            return []
 
 
 # ─── Histórico de Operações (Risco Sacado Invertido) ───────────────────────
@@ -7051,7 +7627,10 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         cols = [("", 0), ("Cliente", 3), ("Trader", 1), ("NF", 1), ("Valor", 2),
                 ("Vencimento", 1), ("Data análise", 1), ("Motivo", 4), ("", 0)]
         for i, (txt, wgt) in enumerate(cols):
-            hdr.columnconfigure(i, weight=wgt, uniform="rtbl")
+            if wgt:
+                hdr.columnconfigure(i, weight=wgt, uniform="rtbl")
+            else:
+                hdr.columnconfigure(i, weight=0, minsize=34)
             if txt:
                 tk.Label(hdr, text=txt, bg=C["surface2"], fg=C["ink_faint"],
                          font=("Segoe UI", 8, "bold"), anchor="w").grid(
@@ -7070,7 +7649,10 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             line = tk.Frame(row_wrap, bg=C["surface"])
             line.pack(fill="x")
             for i, (_t, wgt) in enumerate(cols):
-                line.columnconfigure(i, weight=wgt, uniform="rtbl")
+                if wgt:
+                    line.columnconfigure(i, weight=wgt, uniform="rtbl")
+                else:
+                    line.columnconfigure(i, weight=0, minsize=34)
 
             var = tk.BooleanVar(value=r["id"] in self._rej_selected_ids)
 
@@ -7634,8 +8216,735 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                                  parent=self.controller)
 
 
-class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
-    """Exibe as operações importadas de uma planilha .xlsx, agrupadas por sacado."""
+class BraskemFrame(tk.Frame):
+    """Hub do módulo Braskem: Analisar Operações, Depara (taxa por
+    cliente) e Histórico de notas enviadas."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._xlsx_path = None
+        self._overlay = None
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=44, pady=(36, 0))
+        eyebrow_label(hdr, "MESA DE OPERAÇÕES").pack(anchor="w")
+        tk.Label(hdr, text="Braskem", bg=C["bg"], fg=C["ink"],
+                 font=("Segoe UI", 22, "bold")).pack(anchor="w", pady=(6, 0))
+        tk.Label(hdr, text="Escolha uma ferramenta para continuar.",
+                 bg=C["bg"], fg=C["ink_muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", pady=(20, 0))
+
+        body = tk.Frame(self, bg=C["bg"])
+        body.pack(fill="both", expand=True, padx=44, pady=(32, 0))
+        for c in range(3):
+            body.columnconfigure(c, weight=1, uniform="opc")
+
+        make_hub_option_card(
+            body, 0, 0, "▤", "Analisar Operações",
+            "Importe uma planilha (.xlsx ou .csv) com as notas para análise.",
+            self._open_analisar_overlay, "#5a9e72")
+        make_hub_option_card(
+            body, 0, 1, "⇄", "Taxas (Depara)",
+            "Taxa pré por cliente. Sem vencimento mensal — permanece "
+            "vigente até ser atualizada.",
+            lambda: self.controller.show_frame("TaxasBraskem"), "#c4a832")
+        make_hub_option_card(
+            body, 0, 2, "▦", "Histórico",
+            "Notas já enviadas para a Braskem, com gráfico ao longo do tempo.",
+            lambda: self.controller.show_frame("HistoricoBraskem"), "#8b72c9")
+
+    def on_show(self):
+        pass
+
+    # ── Overlay: seleção de arquivo ─────────────────────────────────────
+    def _open_analisar_overlay(self):
+        if self._overlay is not None:
+            return
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.bind("<Button-1>", lambda _e: self._close_overlay())
+        self._overlay = overlay
+
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=460, height=320)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=26, pady=22)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text="Analisar Operações — Braskem", bg=C["surface"],
+                 fg=C["ink"], font=("Segoe UI", 13, "bold")).pack(side="left")
+        styled_button(top, "✕", self._close_overlay, small=True).pack(side="right")
+
+        tk.Label(pad, text="Selecione a planilha (Solution .xlsx, ou Nova "
+                            "Plataforma .xlsx/.csv) com as notas.",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
+                 wraplength=400, justify="left").pack(anchor="w", pady=(10, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(16, 0))
+
+        drop = tk.Frame(pad, bg=C["surface2"], highlightthickness=1,
+                        highlightbackground=C["hair"])
+        drop.pack(fill="x", pady=(16, 0))
+        inner_drop = tk.Frame(drop, bg=C["surface2"], pady=24)
+        inner_drop.pack(fill="x")
+
+        has_file = bool(self._xlsx_path)
+        icon_lbl = tk.Label(inner_drop, text=("✓" if has_file else "▤"),
+                            bg=C["surface2"],
+                            fg=(C["ok"] if has_file else C["ink_faint"]),
+                            font=("Segoe UI", 20))
+        icon_lbl.pack()
+        file_lbl = tk.Label(inner_drop,
+                            text=(os.path.basename(self._xlsx_path) if has_file
+                                  else "Nenhum arquivo selecionado"),
+                            bg=C["surface2"],
+                            fg=(C["ink"] if has_file else C["ink_muted"]),
+                            font=("Segoe UI", 9))
+        file_lbl.pack(pady=(8, 0))
+        self._overlay_file_lbl = file_lbl
+        self._overlay_icon_lbl = icon_lbl
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(20, 0))
+        self._overlay_action_btn = styled_button(
+            foot, ("Analisar" if has_file else "Selecionar arquivo…"),
+            self._overlay_action_click, accent=True)
+        self._overlay_action_btn.pack(side="left")
+        self._overlay_remove_btn = styled_button(
+            foot, "Remover arquivo", self._remove_xlsx, danger=True, small=True)
+        if has_file:
+            self._overlay_remove_btn.pack(side="left", padx=(8, 0))
+        self._overlay_ready = has_file
+        styled_button(foot, "Cancelar", self._close_overlay).pack(side="right")
+
+    def _overlay_action_click(self):
+        if self._overlay_ready:
+            self._start_analyze()
+        else:
+            self._pick_arquivo()
+
+    def _remove_xlsx(self):
+        self._xlsx_path = None
+        self._overlay_ready = False
+        if hasattr(self, "_overlay_file_lbl") and self._overlay_file_lbl.winfo_exists():
+            self._overlay_file_lbl.configure(text="Nenhum arquivo selecionado", fg=C["ink_muted"])
+            self._overlay_icon_lbl.configure(text="▤", fg=C["ink_faint"])
+        if hasattr(self, "_overlay_remove_btn") and self._overlay_remove_btn.winfo_exists():
+            self._overlay_remove_btn.pack_forget()
+        btn = getattr(self, "_overlay_action_btn", None)
+        if btn is not None and btn.winfo_exists():
+            btn.configure(text="Selecionar arquivo…", command=self._overlay_action_click)
+
+    def _pick_arquivo(self):
+        p = filedialog.askopenfilename(
+            title="Selecionar planilha de operações Braskem",
+            filetypes=[("Planilha ou CSV", "*.xlsx *.csv"),
+                       ("Planilha Excel", "*.xlsx"), ("CSV", "*.csv")])
+        if not p:
+            return
+        self._xlsx_path = p
+        if hasattr(self, "_overlay_file_lbl") and self._overlay_file_lbl.winfo_exists():
+            self._overlay_file_lbl.configure(text=os.path.basename(p), fg=C["ink"])
+            self._overlay_icon_lbl.configure(text="✓", fg=C["ok"])
+        if hasattr(self, "_overlay_remove_btn") and self._overlay_remove_btn.winfo_exists():
+            self._overlay_remove_btn.pack(side="left", padx=(8, 0))
+        btn = getattr(self, "_overlay_action_btn", None)
+        if btn is not None and btn.winfo_exists():
+            btn.configure(text="Analisar", command=self._start_analyze)
+        self._overlay_ready = True
+
+    def _start_analyze(self):
+        if not self._xlsx_path:
+            return
+        self.controller.braskem_xlsx_path = self._xlsx_path
+        self._close_overlay()
+        self.controller.show_frame("AnalisarBraskem")
+
+    def _close_overlay(self):
+        if self._overlay is not None:
+            try:
+                self._overlay.destroy()
+            except Exception:
+                pass
+            self._overlay = None
+
+
+class TaxasBraskemFrame(tk.Frame):
+    """Depara de clientes Braskem — a taxa pré é editável na tela; prazo
+    máximo e spread mínimo vêm da planilha de clientes e são somente-
+    leitura aqui (servem de regra para os alertas de Analisar Operações).
+    Sem validade mensal."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._data = BraskemTaxasData.get()
+        self._cards = {}
+        self._build()
+        self._data.on_reconnect(self._on_data_reconnect)
+
+    def _on_data_reconnect(self):
+        try:
+            self.after(0, self._refresh_network_state)
+        except Exception:
+            pass
+
+    def _refresh_network_state(self):
+        if not self.winfo_exists():
+            return
+        disponivel = self._data.is_available()
+        if disponivel:
+            self._net_banner.pack_forget()
+        else:
+            self._net_banner.pack(fill="x", padx=0, pady=(0, 0), after=self._hairline_top)
+        if hasattr(self, "_grid"):
+            self._setup_cards()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        styled_button(hdr, "← Voltar",
+                      lambda: self.controller.show_frame("Braskem")).pack(side="left")
+        tk.Label(hdr, text="Taxas (Depara) — Braskem", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left", padx=(14, 0))
+        styled_button(hdr, "Importar planilha de clientes…",
+                      self._importar_planilha, accent=True).pack(side="right")
+
+        sub = tk.Frame(self, bg=C["bg"])
+        sub.pack(fill="x", padx=32)
+        tk.Label(sub, text="Taxa pré editável por cliente, sem vencimento mensal "
+                            "(a nota segue em uso por alguns dias após o "
+                            "faturamento). Prazo máximo e spread mínimo vêm da "
+                            "planilha de clientes e são respeitados na análise.",
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9),
+                 wraplength=900, justify="left").pack(anchor="w", pady=(4, 0))
+
+        self._hairline_top = make_hairline(self, bg=C["hair"])
+        self._hairline_top.pack(fill="x", padx=0, pady=(16, 0))
+
+        self._net_banner = tk.Frame(self, bg=C["err_dim"])
+        tk.Label(
+            self._net_banner,
+            text="⚠ Sem conexão com a rede — não é possível ler ou salvar as "
+                 "taxas agora. Tentando reconectar automaticamente…",
+            bg=C["err_dim"], fg=C["err"], font=("Segoe UI", 8, "bold"),
+            anchor="w", justify="left", wraplength=900,
+        ).pack(side="left", fill="x", expand=True, padx=18, pady=8)
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        self._grid_outer = self._sf.inner
+        self._grid_outer.configure(bg=C["bg"])
+
+        self._grid = tk.Frame(self._grid_outer, bg=C["bg"])
+        self._grid.pack(padx=32, pady=(16, 24), fill="x")
+        for c in range(3):
+            self._grid.columnconfigure(c, weight=1, uniform="tcards")
+
+    def on_show(self):
+        self._sf.refresh_bindings()
+        self._refresh_network_state()
+
+    def _importar_planilha(self):
+        p = filedialog.askopenfilename(
+            title="Selecionar planilha de clientes Braskem",
+            filetypes=[("Planilha Excel", "*.xlsx")])
+        if not p:
+            return
+        try:
+            n = self._data.importar_planilha(p)
+        except Exception as e:
+            messagebox.showerror("Importar", f"Falha ao importar: {e}",
+                                 parent=self.controller)
+            return
+        if n < 0:
+            messagebox.showerror(
+                "Importar", "A planilha foi lida, mas não foi possível "
+                "salvar agora (rede indisponível).", parent=self.controller)
+            return
+        messagebox.showinfo("Importar", f"{n} cliente(s) importado(s)/atualizado(s).",
+                            parent=self.controller)
+        self._refresh_network_state()
+
+    def _setup_cards(self):
+        for w in self._grid.winfo_children():
+            w.destroy()
+        self._cards = {}
+        clientes = sorted(self._data.all_clientes().values(),
+                          key=lambda c: c.get("nome") or "")
+        if not clientes:
+            empty = tk.Frame(self._grid, bg=C["bg"])
+            empty.grid(row=0, column=0, columnspan=3, sticky="ew", pady=24)
+            tk.Label(empty, text="Nenhum cliente importado ainda. Use "
+                                  "\"Importar planilha de clientes…\".",
+                     bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 10)).pack()
+            return
+        for idx, cli in enumerate(clientes):
+            row, col = divmod(idx, 3)
+            self._make_card(cli, row, col)
+
+    def _make_card(self, cli, row, col):
+        bg = C["surface"]
+        card = tk.Frame(self._grid, bg=bg, highlightthickness=1,
+                        highlightbackground=C["hair"])
+        card.grid(row=row, column=col, sticky="new", padx=5, pady=5)
+        body = tk.Frame(card, bg=bg, padx=14, pady=12)
+        body.pack(fill="x")
+
+        tk.Label(body, text=cli.get("nome") or "—", bg=bg, fg=C["ink"],
+                 font=("Segoe UI", 9, "bold"), wraplength=220,
+                 justify="left").pack(anchor="w")
+        tk.Label(body, text=_fmt_cnpj(cli.get("cnpj") or ""), bg=bg,
+                 fg=C["ink_faint"], font=("Segoe UI", 7)).pack(anchor="w", pady=(2, 8))
+
+        info = tk.Frame(body, bg=bg)
+        info.pack(fill="x")
+        linhas = [
+            ("Prazo máx.", f"{cli.get('prazo_max') or '—'}d"),
+            ("Spread mín. a.a.", f"{cli.get('spread_min') or '—'}%"),
+        ]
+        for label, value in linhas:
+            row_f = tk.Frame(info, bg=bg)
+            row_f.pack(fill="x", pady=(0, 3))
+            tk.Label(row_f, text=label, bg=bg, fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold"), width=14, anchor="w").pack(side="left")
+            tk.Label(row_f, text=value, bg=bg, fg=C["ink_muted"],
+                     font=("Segoe UI", 8), anchor="w").pack(side="left")
+
+        taxa_row = tk.Frame(body, bg=bg)
+        taxa_row.pack(fill="x", pady=(8, 0))
+        tk.Label(taxa_row, text="Taxa pré a.m.", bg=bg, fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w")
+        taxa_var = tk.StringVar(value=str(cli.get("taxa_pre") or ""))
+        ent = styled_entry(taxa_row, textvariable=taxa_var, width=10)
+        ent.pack(side="left", pady=(4, 0))
+        tk.Label(taxa_row, text="%", bg=bg, fg=C["ink_muted"],
+                 font=("Segoe UI", 8)).pack(side="left", padx=(4, 0))
+
+        def _salvar(cnpj=cli.get("cnpj"), var=taxa_var):
+            ok = self._data.set_taxa(cnpj, var.get().strip())
+            if not ok:
+                messagebox.showerror(
+                    "Salvar", "Não foi possível salvar agora (rede "
+                    "indisponível).", parent=self.controller)
+
+        styled_button(taxa_row, "Salvar", _salvar, accent=True,
+                      small=True).pack(side="right")
+
+        self._cards[cli.get("cnpj")] = card
+
+
+class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
+    """Exibe as notas importadas de uma planilha Braskem (.xlsx ou .csv),
+    agrupadas por sacado, com alertas de prazo máximo e spread mínimo
+    conforme o Depara. Sem fluxo de rejeição — a confirmação envia todas
+    as notas do grupo para o Histórico."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._taxas = BraskemTaxasData.get()
+        self._all_ops = []
+        self._groups = []
+        self._last_path = None
+        self._worker_running = False
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        styled_button(hdr, "← Voltar",
+                      lambda: self.controller.show_frame("Braskem")).pack(side="left")
+        tk.Label(hdr, text="Analisar Operações — Braskem", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left", padx=(14, 0))
+        styled_button(hdr, "Analisar outro arquivo…",
+                      self._reanalisar, accent=True).pack(side="right")
+
+        self._sub_lbl = tk.Label(self, text="", bg=C["bg"], fg=C["ink_muted"],
+                                 font=("Segoe UI", 9))
+        self._sub_lbl.pack(anchor="w", padx=32, pady=(2, 0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", pady=(16, 0))
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        self._grid_outer = self._sf.inner
+        self._grid_outer.configure(bg=C["bg"])
+        self._grid = tk.Frame(self._grid_outer, bg=C["bg"])
+        self._grid.pack(padx=32, pady=(16, 24), fill="x")
+        for c in range(3):
+            self._grid.columnconfigure(c, weight=1, uniform="bcards")
+
+    def on_show(self):
+        self._sf.refresh_bindings()
+        path = getattr(self.controller, "braskem_xlsx_path", None)
+        if path and path != self._last_path and not self._worker_running:
+            self._last_path = path
+            self._carregar(path)
+
+    def _reanalisar(self):
+        self.controller.braskem_xlsx_path = None
+        self.controller.show_frame("Braskem")
+
+    def _carregar(self, path):
+        self._worker_running = True
+        for w in self._grid.winfo_children():
+            w.destroy()
+        loading = tk.Frame(self._grid, bg=C["bg"])
+        loading.grid(row=0, column=0, columnspan=3, sticky="ew", pady=24)
+        tk.Label(loading, text="◐ Lendo planilha…", bg=C["bg"], fg=C["ok"],
+                 font=("Segoe UI", 11, "bold")).pack()
+
+        def _worker():
+            try:
+                ops = _parse_braskem_planilha(path)
+                err = None
+            except Exception as e:
+                ops, err = [], str(e)
+            self._ui(lambda: self._on_loaded(ops, err))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_loaded(self, ops, err):
+        self._worker_running = False
+        if err:
+            messagebox.showerror("Analisar Operações", f"Falha ao ler o arquivo: {err}",
+                                 parent=self.controller)
+        self._all_ops = ops
+        self._rebuild_group_cards()
+
+    def _rebuild_group_cards(self):
+        groups = _group_invertido_ops(self._all_ops)
+        for g in groups:
+            g["_braskem"] = self._avaliar_grupo(g)
+        self._groups = groups
+        for w in self._grid.winfo_children():
+            w.destroy()
+        if not groups:
+            empty = tk.Frame(self._grid, bg=C["bg"])
+            empty.grid(row=0, column=0, columnspan=3, sticky="ew", pady=24)
+            tk.Label(empty, text="Nenhuma nota encontrada na planilha.",
+                     bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 10)).pack()
+            self._sub_lbl.configure(text="0 grupo(s) · 0 nota(s)")
+            return
+        for idx, group in enumerate(groups):
+            row, col = divmod(idx, 3)
+            self._make_group_card(group, row, col)
+        total_notas = sum(g["count"] for g in groups)
+        self._sub_lbl.configure(
+            text=(f"{len(groups)} grupo(s) · {total_notas} nota(s) · "
+                  f"{os.path.basename(self._last_path or '')}"))
+
+    def _avaliar_grupo(self, group):
+        """Confere o grupo contra o Depara: prazo máximo por nota e
+        spread mínimo (calculado com a mesma lógica do Invertido)."""
+        cli = self._taxas.get_cliente(group.get("doc_sacado") or "")
+        alerts = []
+        if not cli:
+            return {"cliente": None, "alerts": ["Cliente sem Depara cadastrado"],
+                    "spread": None}
+        prazo_max = cli.get("prazo_max")
+        notas_excedentes = 0
+        if prazo_max:
+            try:
+                prazo_max_i = int(float(prazo_max))
+                for n in group["notas"]:
+                    p = _invertido_parse_prazo_days(n.get("prazo"))
+                    if p is not None and p > prazo_max_i:
+                        notas_excedentes += 1
+            except Exception:
+                pass
+        if notas_excedentes:
+            alerts.append(f"{notas_excedentes} nota(s) acima do prazo máximo "
+                          f"({prazo_max}d)")
+
+        spread_result = None
+        spread_min = cli.get("spread_min")
+        taxa_pre = cli.get("taxa_pre")
+        if taxa_pre:
+            spread_result = calcular_spread_sacado(group["notas"], taxa_pre)
+            if spread_result.get("ok") and spread_min:
+                try:
+                    if spread_result["spread"] < Decimal(str(spread_min).replace(",", ".")):
+                        alerts.append(
+                            f"Spread calculado ({spread_result['spread']}%) abaixo "
+                            f"do mínimo ({spread_min}% a.a.)")
+                except Exception:
+                    pass
+        else:
+            alerts.append("Sem taxa pré parametrizada no Depara")
+
+        return {"cliente": cli, "alerts": alerts,
+                "spread": spread_result.get("spread") if spread_result and spread_result.get("ok") else None}
+
+    def _make_group_card(self, group, row, col):
+        bg = C["surface"]
+        info_bk = group.get("_braskem", {})
+        has_alert = bool(info_bk.get("alerts"))
+        outer = tk.Frame(self._grid, bg=C["bg"])
+        outer.grid(row=row, column=col, sticky="new", padx=5, pady=5)
+        card = tk.Frame(outer, bg=bg, highlightthickness=1,
+                        highlightbackground=C["warn"] if has_alert else C["hair"])
+        card.pack(fill="x")
+        top_bar = tk.Frame(card, bg=C["warn"] if has_alert else C["ok"], height=2)
+        top_bar.pack(fill="x")
+
+        body = tk.Frame(card, bg=bg, padx=14, pady=12)
+        body.pack(fill="x")
+        tk.Label(body, text=group["nome_sacado"], bg=bg, fg=C["ink"],
+                 font=("Segoe UI", 9, "bold"), wraplength=220,
+                 justify="center").pack()
+
+        info = tk.Frame(body, bg=bg)
+        info.pack(pady=(10, 0), fill="x")
+        linhas = [("Notas", str(group["count"])), ("Montante", group["valor_total"])]
+        if info_bk.get("spread") is not None:
+            linhas.append(("Spread calc.", f"{info_bk['spread']}%"))
+        for label, value in linhas:
+            row_f = tk.Frame(info, bg=bg)
+            row_f.pack(fill="x", pady=(0, 3))
+            tk.Label(row_f, text=label, bg=bg, fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold"), width=10, anchor="w").pack(side="left")
+            tk.Label(row_f, text=value, bg=bg, fg=C["ok"],
+                     font=("Segoe UI", 8, "bold"), anchor="w").pack(
+                         side="left", fill="x", expand=True)
+
+        if has_alert:
+            for a in info_bk["alerts"]:
+                tk.Label(body, text=f"⚠ {a}", bg=bg, fg=C["warn"],
+                         font=("Segoe UI", 7, "bold"), wraplength=220,
+                         justify="left", anchor="w").pack(anchor="w", pady=(6, 0))
+
+        btn_row = tk.Frame(body, bg=bg)
+        btn_row.pack(fill="x", pady=(12, 0))
+        styled_button(btn_row, "Confirmar envio",
+                      lambda g=group: self._confirmar_envio(g),
+                      accent=True, small=True).pack(side="right")
+
+    def _confirmar_envio(self, group):
+        info_bk = group.get("_braskem", {})
+        if info_bk.get("alerts"):
+            aviso = "\n".join(f"• {a}" for a in info_bk["alerts"])
+            if not messagebox.askyesno(
+                "Confirmar envio",
+                f"{group['nome_sacado']} tem alerta(s):\n{aviso}\n\n"
+                "Confirmar o envio mesmo assim?",
+                parent=self.controller):
+                return
+
+        cli = info_bk.get("cliente") or {}
+        taxa_str = cli.get("taxa_pre") or ""
+        notas_hist = []
+        notas_email = []
+        for n in group["notas"]:
+            prazo_dias = _invertido_parse_prazo_days(n.get("prazo"))
+            valor_raw = n.get("valor_raw", Decimal("0"))
+            valor_liquido = None
+            if taxa_str and prazo_dias is not None:
+                try:
+                    valor_liquido = calcular_valor_liquido(valor_raw, taxa_str, prazo_dias)
+                except Exception:
+                    valor_liquido = None
+            notas_hist.append({
+                "nf": n.get("nf"), "valor": valor_raw,
+                "data_vencimento": n.get("data_vencimento"),
+                "prazo_dias": prazo_dias,
+            })
+            notas_email.append({
+                "nf": n.get("nf"), "data_vencimento": n.get("data_vencimento"),
+                "valor_raw": valor_raw, "valor_liquido": valor_liquido,
+            })
+
+        hist = BraskemHistoricoData.get()
+        ok = hist.registrar_notas(
+            cliente=group["nome_sacado"], cnpj_sacado=group.get("doc_sacado") or "",
+            notas=notas_hist, spread=info_bk.get("spread"),
+            arquivo_origem=os.path.basename(self._last_path or ""))
+        if not ok:
+            messagebox.showwarning(
+                "Confirmar envio", "Sem conexão com a rede agora — o envio "
+                "ficou pendente e será reenviado quando a conexão voltar.",
+                parent=self.controller)
+        else:
+            messagebox.showinfo("Confirmar envio",
+                                f"{len(notas_hist)} nota(s) de {group['nome_sacado']} "
+                                "enviada(s) para o histórico.",
+                                parent=self.controller)
+
+        # Abre o e-mail (mesmo modelo/layout da mesa) já preenchido, com os
+        # destinatários "Para"/"Cc" cadastrados no Depara para este cliente.
+        to = _clean_email_list(cli.get("email_para"))
+        cc = _clean_email_list(cli.get("email_cc"))
+        if to or cc:
+            subject = f"Notas para Antecipação - Risco Sacado Braskem - {group['nome_sacado'].upper()}"
+            html = build_braskem_email_html(
+                cedente_cnpj=group.get("doc_cedente") or "",
+                sacado_nome=group["nome_sacado"].upper(),
+                sacado_cnpj=group.get("doc_sacado") or "",
+                notas=notas_email, taxa_str=taxa_str)
+            try:
+                enviar_email_outlook_risco_sacado(subject, html, to=to, cc=cc)
+            except Exception as e:
+                messagebox.showwarning(
+                    "E-mail", f"Não foi possível abrir o e-mail no Outlook: {e}",
+                    parent=self.controller)
+
+        self._all_ops = [op for op in self._all_ops
+                         if _normalize_sacado_key(op["nome_sacado"])
+                         != _normalize_sacado_key(group["nome_sacado"])]
+        self._rebuild_group_cards()
+
+
+class HistoricoBraskemFrame(tk.Frame, ThreadSafeUIMixin):
+    """Histórico de notas enviadas para a Braskem — sem alertas nem
+    notas recusadas, apenas o que foi efetivamente enviado, com
+    resumo e gráfico ao longo do tempo."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._data = BraskemHistoricoData.get()
+        self._rows = []
+        self._busca_var = tk.StringVar()
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        styled_button(hdr, "← Voltar",
+                      lambda: self.controller.show_frame("Braskem")).pack(side="left")
+        tk.Label(hdr, text="Histórico — Braskem", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left", padx=(14, 0))
+
+        sub = tk.Frame(self, bg=C["bg"])
+        sub.pack(fill="x", padx=32)
+        tk.Label(sub, text="Notas enviadas para a Braskem. Consulta somente-leitura.",
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9)).pack(
+                     anchor="w", pady=(4, 0))
+
+        bar = tk.Frame(self, bg=C["bg"])
+        bar.pack(fill="x", padx=32, pady=(10, 0))
+        entry = styled_entry(bar, textvariable=self._busca_var, width=26)
+        entry.pack(side="left")
+        entry.bind("<Return>", lambda _e: self._reload())
+        styled_button(bar, "Buscar", self._reload, small=True).pack(side="left", padx=(6, 0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16, 0))
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        self._content = tk.Frame(self._sf.inner, bg=C["bg"])
+        self._content.pack(fill="both", expand=True, padx=32, pady=(16, 24))
+
+    def on_show(self):
+        self._sf.refresh_bindings()
+        self._reload()
+
+    def _reload(self):
+        busca = self._busca_var.get().strip() or None
+        self._rows = self._data.listar_notas(busca=busca)
+        self._render()
+
+    def _render(self):
+        for w in self._content.winfo_children():
+            w.destroy()
+        rows = self._rows
+
+        montante_total = sum(
+            (_valor_to_decimal(r["valor"]) for r in rows), Decimal("0"))
+        row1 = tk.Frame(self._content, bg=C["bg"])
+        row1.pack(fill="x", pady=(0, 16))
+        for c in range(2):
+            row1.columnconfigure(c, weight=1, uniform="resumo")
+        for i, (label, value, color) in enumerate([
+            ("Montante total enviado", _fmt_brl(montante_total), C["accent"]),
+            ("Nº de notas enviadas", str(len(rows)), C["ok"]),
+        ]):
+            c1 = card_frame(row1)
+            c1.grid(row=0, column=i, sticky="nsew", padx=(0, 8) if i == 0 else 0)
+            p1 = tk.Frame(c1, bg=C["surface"], padx=16, pady=12)
+            p1.pack(fill="both", expand=True)
+            tk.Label(p1, text=label, bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w")
+            tk.Label(p1, text=value, bg=C["surface"], fg=color,
+                     font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(4, 0))
+
+        por_dia = {}
+        for r in rows:
+            d = r["data_dia"]
+            por_dia.setdefault(d, Decimal("0"))
+            por_dia[d] += _valor_to_decimal(r["valor"])
+        dias_ord = sorted(por_dia.keys())
+        labels = [_hist_fmt_dia(d)[:5] for d in dias_ord]
+        serie = [float(por_dia[d]) for d in dias_ord]
+
+        card2 = card_frame(self._content)
+        card2.pack(fill="x", pady=(0, 16))
+        p2 = tk.Frame(card2, bg=C["surface"], padx=14, pady=10)
+        p2.pack(fill="both", expand=True)
+        tk.Label(p2, text="Montante enviado ao longo do tempo", bg=C["surface"],
+                 fg=C["ink_muted"], font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        chart = StockLineChart(p2, height=200)
+        chart.pack(fill="x", pady=(6, 0))
+        chart.set_data(labels, [serie], [C["ok"]])
+
+        card3 = card_frame(self._content)
+        card3.pack(fill="both", expand=True)
+        pad = tk.Frame(card3, bg=C["surface"], padx=4, pady=4)
+        pad.pack(fill="both", expand=True)
+
+        hdr = tk.Frame(pad, bg=C["surface2"])
+        hdr.pack(fill="x")
+        cols = [("Cliente", 3), ("NF", 1), ("Valor", 2), ("Vencimento", 1),
+                ("Prazo", 1), ("Spread", 1), ("Data envio", 1)]
+        for i, (txt, wgt) in enumerate(cols):
+            hdr.columnconfigure(i, weight=wgt, uniform="btbl")
+            tk.Label(hdr, text=txt, bg=C["surface2"], fg=C["ink_faint"],
+                     font=("Segoe UI", 8, "bold"), anchor="w").grid(
+                     row=0, column=i, sticky="ew", padx=8, pady=6)
+
+        if not rows:
+            tk.Label(pad, text="Nenhuma nota enviada encontrada.",
+                     bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 9)).pack(
+                     anchor="w", padx=8, pady=20)
+            return
+
+        for r in rows:
+            row_wrap = tk.Frame(pad, bg=C["bg"])
+            row_wrap.pack(fill="x")
+            make_hairline(row_wrap, bg=C["hair"]).pack(fill="x")
+            line = tk.Frame(row_wrap, bg=C["surface"])
+            line.pack(fill="x")
+            for i, (_t, wgt) in enumerate(cols):
+                line.columnconfigure(i, weight=wgt, uniform="btbl")
+            vals = [
+                r.get("cliente") or "—",
+                r.get("nf") or "—",
+                _fmt_brl_from_raw(r.get("valor") or "0"),
+                _fmt_date_short(r.get("data_vencimento")),
+                f"{r['prazo_dias']}d" if r.get("prazo_dias") is not None else "—",
+                f"{r['spread']}%" if r.get("spread") else "—",
+                _hist_fmt_dia(r.get("data_dia") or ""),
+            ]
+            for i, v in enumerate(vals):
+                tk.Label(line, text=v, bg=C["surface"], fg=C["ink"],
+                         font=("Segoe UI", 9), anchor="w", wraplength=140,
+                         justify="left").grid(row=0, column=i, sticky="new", padx=8, pady=8)
+
+
+
 
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
@@ -10088,1206 +11397,6 @@ class BPMFrame(tk.Frame, ThreadSafeUIMixin):
                 if not self._cancel_requested:
                     self.controller.bpm_run_selection = []
 
-# ─── Pipeline (registro diário por trader) ─────────────────────────────────
-# Armazenado em SQLite, na MESMA pasta de rede do dados.json (Depara) —
-# mesmo diretório onde já vive o historico_operacoes.db, mas em arquivo
-# próprio (pipe.db). Segue o mesmo padrão de resiliência: se a rede cair,
-# o registro fica numa fila local e é reenviado quando a conexão voltar.
-
-PIPE_DB_PATH = os.path.join(os.path.dirname(SHARED_TAXAS_PATH), "pipe.db")
-PIPE_PENDING_LOCAL_PATH = os.path.join(
-    tempfile.gettempdir(), "pipe_pendente_local.jsonl")
-PIPE_TRADERS = ["Thiago", "Debora", "Adriana", "Matheus", "Gabriel", "Giovanna"]
-PIPE_MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
-              "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
-
-
-def _pipe_month_range(year, month):
-    ini = date(year, month, 1)
-    if month == 12:
-        fim = date(year, 12, 31)
-    else:
-        fim = date(year, month + 1, 1) - timedelta(days=1)
-    return ini, fim
-
-
-def _pipe_week_range(ref):
-    ini = ref - timedelta(days=ref.weekday())  # segunda-feira
-    fim = ini + timedelta(days=6)
-    return ini, fim
-
-
-class PipelineData:
-    _instance = None
-    RETRY_SECONDS = 30
-
-    @classmethod
-    def get(cls):
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    def __init__(self):
-        self._available = False
-        self._on_reconnect_callbacks = []
-        self._retry_timer = None
-        self._ensure_schema()
-        if self._available:
-            self._flush_pending_local()
-        else:
-            self._schedule_retry()
-
-    def is_available(self):
-        return self._available
-
-    def on_reconnect(self, callback):
-        self._on_reconnect_callbacks.append(callback)
-
-    def _schedule_retry(self):
-        if self._retry_timer is not None:
-            return
-        self._retry_timer = threading.Timer(self.RETRY_SECONDS, self._retry_tick)
-        self._retry_timer.daemon = True
-        self._retry_timer.start()
-
-    def _retry_tick(self):
-        self._retry_timer = None
-        was_available = self._available
-        self._ensure_schema()
-        if self._available and not was_available:
-            self._flush_pending_local()
-            for cb in list(self._on_reconnect_callbacks):
-                try:
-                    cb()
-                except Exception:
-                    pass
-        if not self._available:
-            self._schedule_retry()
-
-    def _connect(self):
-        conn = sqlite3.connect(PIPE_DB_PATH, timeout=20)
-        conn.execute("PRAGMA journal_mode=DELETE")
-        return conn
-
-    def _ensure_schema(self):
-        try:
-            if not os.path.isdir(os.path.dirname(PIPE_DB_PATH)):
-                self._available = False
-                return
-            conn = self._connect()
-            try:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS pipeline_entries (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        data_report TEXT NOT NULL,
-                        trader TEXT NOT NULL,
-                        cliente TEXT,
-                        cessao TEXT NOT NULL,
-                        volume_centavos INTEGER NOT NULL,
-                        spread REAL,
-                        prazo_medio REAL,
-                        iraroc REAL,
-                        observacao TEXT,
-                        regiao INTEGER,
-                        created_at TEXT NOT NULL,
-                        username TEXT
-                    )
-                """)
-                cols_existentes = {r[1] for r in
-                                    conn.execute("PRAGMA table_info(pipeline_entries)")}
-                if "cliente" not in cols_existentes:
-                    conn.execute("ALTER TABLE pipeline_entries ADD COLUMN cliente TEXT")
-                conn.commit()
-            finally:
-                conn.close()
-            self._available = True
-        except Exception as e:
-            print(f"[pipeline] _ensure_schema falhou: {e}", file=sys.stderr)
-            self._available = False
-
-    _COLS = ("data_report", "trader", "cliente", "cessao", "volume_centavos",
-              "spread", "prazo_medio", "iraroc", "observacao", "regiao",
-              "created_at", "username")
-
-    def add_entry(self, data_report, trader, cliente, cessao, volume_centavos,
-                  spread, prazo_medio, iraroc, observacao, regiao):
-        row = {
-            "data_report": data_report, "trader": trader, "cliente": cliente,
-            "cessao": cessao, "volume_centavos": volume_centavos, "spread": spread,
-            "prazo_medio": prazo_medio, "iraroc": iraroc,
-            "observacao": observacao, "regiao": regiao,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "username": _current_username(),
-        }
-        if not self._available:
-            self._queue_local(row)
-            return False
-        try:
-            conn = self._connect()
-            try:
-                conn.execute(
-                    "INSERT INTO pipeline_entries (" + ",".join(self._COLS) +
-                    ") VALUES (" + ",".join("?" * len(self._COLS)) + ")",
-                    tuple(row[c] for c in self._COLS))
-                conn.commit()
-            finally:
-                conn.close()
-            return True
-        except Exception as e:
-            print(f"[pipeline] add_entry falhou: {e}", file=sys.stderr)
-            self._available = False
-            self._queue_local(row)
-            self._schedule_retry()
-            return False
-
-    def _queue_local(self, row):
-        try:
-            with open(PIPE_PENDING_LOCAL_PATH, "a", encoding="utf-8") as f:
-                f.write(_json_mod.dumps(row, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-
-    def _flush_pending_local(self):
-        if not os.path.isfile(PIPE_PENDING_LOCAL_PATH):
-            return
-        try:
-            with open(PIPE_PENDING_LOCAL_PATH, "r", encoding="utf-8") as f:
-                lines = [l for l in f.read().splitlines() if l.strip()]
-        except Exception:
-            return
-        remaining = []
-        for line in lines:
-            try:
-                row = _json_mod.loads(line)
-                conn = self._connect()
-                conn.execute(
-                    "INSERT INTO pipeline_entries (" + ",".join(self._COLS) +
-                    ") VALUES (" + ",".join("?" * len(self._COLS)) + ")",
-                    tuple(row.get(c) for c in self._COLS))
-                conn.commit()
-                conn.close()
-            except Exception:
-                remaining.append(line)
-        try:
-            if remaining:
-                with open(PIPE_PENDING_LOCAL_PATH, "w", encoding="utf-8") as f:
-                    f.write("\n".join(remaining) + "\n")
-            else:
-                os.remove(PIPE_PENDING_LOCAL_PATH)
-        except Exception:
-            pass
-
-    def entries_between(self, dt_ini, dt_fim, trader=None):
-        if not self._available:
-            return []
-        try:
-            conn = self._connect()
-            try:
-                q = ("SELECT id," + ",".join(self._COLS) +
-                     " FROM pipeline_entries WHERE data_report BETWEEN ? AND ?")
-                params = [dt_ini.isoformat(), dt_fim.isoformat()]
-                if trader and trader != "Todos":
-                    q += " AND trader = ?"
-                    params.append(trader)
-                q += " ORDER BY data_report DESC, id DESC"
-                cur = conn.execute(q, params)
-                cols = ("id",) + self._COLS
-                return [dict(zip(cols, r)) for r in cur.fetchall()]
-            finally:
-                conn.close()
-        except Exception as e:
-            print(f"[pipeline] entries_between falhou: {e}", file=sys.stderr)
-            return []
-
-    def update_entry(self, entry_id, **fields):
-        """Atualiza campos de um lançamento existente pelo id. `fields`
-        aceita qualquer subconjunto de _COLS (exceto created_at/username)."""
-        if not self._available or not fields:
-            return False
-        allowed = [c for c in fields if c in self._COLS]
-        if not allowed:
-            return False
-        try:
-            conn = self._connect()
-            try:
-                set_clause = ",".join(f"{c}=?" for c in allowed)
-                params = [fields[c] for c in allowed] + [entry_id]
-                conn.execute(
-                    f"UPDATE pipeline_entries SET {set_clause} WHERE id=?", params)
-                conn.commit()
-            finally:
-                conn.close()
-            return True
-        except Exception as e:
-            print(f"[pipeline] update_entry falhou: {e}", file=sys.stderr)
-            return False
-
-    def delete_entry(self, entry_id):
-        if not self._available:
-            return False
-        try:
-            conn = self._connect()
-            try:
-                conn.execute("DELETE FROM pipeline_entries WHERE id=?", (entry_id,))
-                conn.commit()
-            finally:
-                conn.close()
-            return True
-        except Exception as e:
-            print(f"[pipeline] delete_entry falhou: {e}", file=sys.stderr)
-            return False
-
-    def summary(self, dt_ini, dt_fim, trader=None):
-        rows = self.entries_between(dt_ini, dt_fim, trader)
-        risco = sum(r["volume_centavos"] for r in rows
-                    if (r["cessao"] or "").upper() == "N")
-        cessao = sum(r["volume_centavos"] for r in rows
-                     if (r["cessao"] or "").upper() == "S")
-        return {"risco": risco, "cessao": cessao, "total": risco + cessao,
-                "count": len(rows)}
-
-    def inconsistencias(self, dt_ini, dt_fim, trader=None):
-        """Aponta lançamentos com dados faltando ou potenciais duplicatas —
-        não bloqueia o uso, só sinaliza para revisão."""
-        rows = self.entries_between(dt_ini, dt_fim, trader)
-        incompletos = [r for r in rows if not r["spread"] or not r["prazo_medio"]
-                        or not r["iraroc"] or not r["regiao"]]
-        vistos, duplicados = {}, []
-        for r in rows:
-            key = (r["data_report"], r["trader"], r["volume_centavos"],
-                   (r["observacao"] or "").strip().lower())
-            if key in vistos:
-                duplicados.append(r)
-            vistos[key] = True
-        return {"incompletos": len(incompletos), "duplicados": len(duplicados)}
-
-
-def _pipe_bind_money_entry(entry, var, initial_cents=0):
-    """Aplica máscara de dinheiro (R$) progressiva ao digitar, mesmo padrão
-    usado no BPM. Retorna um getter/setter de centavos."""
-    digits = [str(initial_cents) if initial_cents else ""]
-
-    def fmt_val():
-        if not digits[0]:
-            var.set("R$ 0,00")
-            return
-        d = Decimal(int(digits[0])) / Decimal("100")
-        var.set(_fmt_brl(d))
-
-    def on_key(e):
-        if e.keysym == "BackSpace":
-            digits[0] = digits[0][:-1]; fmt_val(); return "break"
-        if e.char and e.char.isdigit():
-            digits[0] += e.char; fmt_val(); return "break"
-        if e.keysym in {"Tab", "Left", "Right", "Home", "End"}:
-            return
-        return "break"
-
-    def on_paste(_):
-        try:
-            clip = entry.clipboard_get()
-        except Exception:
-            return "break"
-        d = _parse_brl(clip)
-        if d is None:
-            return "break"
-        digits[0] = str(max(int((d * 100).quantize(Decimal("1"))), 0))
-        fmt_val(); return "break"
-
-    def get_cents():
-        return int(digits[0]) if digits[0] else 0
-
-    def set_cents(cents):
-        digits[0] = str(max(int(cents), 0)) if cents else ""
-        fmt_val()
-
-    entry.bind("<Key>", on_key)
-    entry.bind("<<Paste>>", on_paste)
-    fmt_val()
-    return get_cents, set_cents
-
-
-def _pipe_bind_decimal_entry(entry, var):
-    """Restringe a entrada a dígitos e uma única vírgula decimal."""
-    def on_key(e):
-        if e.keysym in {"Tab", "Left", "Right", "Home", "End", "BackSpace", "Delete"}:
-            return
-        if e.char == "," and "," not in var.get():
-            return
-        if e.char and e.char.isdigit():
-            return
-        return "break"
-    entry.bind("<Key>", on_key)
-
-
-def _pipe_decimal_to_float(raw):
-    s = (raw or "").strip().replace(",", ".")
-    if not s:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def _pipe_toggle_button(parent, text, command, small=False):
-    """Botão estilo toggle (aba / seleção) cujo hover respeita o estado
-    selecionado, ao contrário de styled_button que sempre volta pra cor
-    'não selecionado' ao tirar o mouse."""
-    pad = (7, 3) if small else (13, 6)
-    btn = tk.Button(parent, text=text, command=command,
-                     bg=C["surface2"], fg=C["ink_muted"],
-                     activebackground=C["accent"], activeforeground=C["bg"],
-                     font=("Segoe UI", 8 if small else 9),
-                     relief="flat", bd=0, padx=pad[0], pady=pad[1], cursor="hand2")
-    btn._pipe_selected = False
-
-    def on_enter(_):
-        if not btn._pipe_selected:
-            btn.configure(bg=C["surface3"], fg=C["ink"])
-
-    def on_leave(_):
-        if not btn._pipe_selected:
-            btn.configure(bg=C["surface2"], fg=C["ink_muted"])
-
-    btn.bind("<Enter>", on_enter)
-    btn.bind("<Leave>", on_leave)
-    return btn
-
-
-def _pipe_set_toggle(btn, selected):
-    btn._pipe_selected = selected
-    if selected:
-        btn.configure(bg=C["accent"], fg=C["bg"])
-    else:
-        btn.configure(bg=C["surface2"], fg=C["ink_muted"])
-
-
-class PipelineFrame(tk.Frame):
-    """Registro diário de pipeline por trader (Risco Sacado x Cessão) e
-    validação/comparação semanal e mensal, incluindo comparativo YoY."""
-
-    def __init__(self, parent, controller):
-        super().__init__(parent, bg=C["bg"])
-        self.controller = controller
-        self._data = PipelineData.get()
-        self._view = "incluir"
-        self._cessao_val = tk.StringVar(value="N")
-        self._overlay = None
-        self._build()
-        self._data.on_reconnect(lambda: self.after(0, self._refresh_network_state))
-
-    # ── Estrutura geral ──────────────────────────────────────────────
-    def _build(self):
-        hdr = tk.Frame(self, bg=C["bg"])
-        hdr.pack(fill="x", padx=32, pady=(24, 0))
-        tk.Label(hdr, text="Pipeline", bg=C["bg"], fg=C["ink"],
-                 font=("Georgia", 18, "bold")).pack(side="left")
-        tk.Label(hdr, text="  Registro diário por trader — Risco Sacado x Cessão",
-                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9)).pack(side="left")
-
-        tabs = tk.Frame(self, bg=C["bg"])
-        tabs.pack(fill="x", padx=32, pady=(16, 0))
-        self._btn_incluir = _pipe_toggle_button(tabs, "Incluir dados",
-                                                 lambda: self._switch_view("incluir"))
-        self._btn_incluir.pack(side="left")
-        self._btn_validar = _pipe_toggle_button(tabs, "Validar dados",
-                                                 lambda: self._switch_view("validar"))
-        self._btn_validar.pack(side="left", padx=(8, 0))
-        self._btn_gerenciar = _pipe_toggle_button(tabs, "Gerenciar dados",
-                                                   lambda: self._switch_view("gerenciar"))
-        self._btn_gerenciar.pack(side="left", padx=(8, 0))
-
-        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16, 0))
-
-        self._net_banner = tk.Frame(self, bg=C["err_dim"])
-        tk.Label(self._net_banner,
-                 text="⚠ Sem conexão com a rede — os lançamentos ficam guardados "
-                      "localmente e serão enviados assim que a conexão voltar.",
-                 bg=C["err_dim"], fg=C["err"], font=("Segoe UI", 8, "bold"),
-                 anchor="w", justify="left", wraplength=900).pack(
-                     side="left", fill="x", expand=True, padx=18, pady=8)
-
-        self._sf = ScrollableFrame(self, bg=C["bg"])
-        self._sf.pack(fill="both", expand=True)
-        self._sf.link_wheel(self)
-        self._body = self._sf.inner
-        self._body.configure(bg=C["bg"])
-
-        self._incluir_view = tk.Frame(self._body, bg=C["bg"])
-        self._validar_view = tk.Frame(self._body, bg=C["bg"])
-        self._gerenciar_view = tk.Frame(self._body, bg=C["bg"])
-        self._build_incluir(self._incluir_view)
-        self._build_validar(self._validar_view)
-        self._build_gerenciar(self._gerenciar_view)
-        self._switch_view("incluir")
-
-    def _switch_view(self, view):
-        self._view = view
-        for w in (self._incluir_view, self._validar_view, self._gerenciar_view):
-            w.pack_forget()
-        _pipe_set_toggle(self._btn_incluir, view == "incluir")
-        _pipe_set_toggle(self._btn_validar, view == "validar")
-        _pipe_set_toggle(self._btn_gerenciar, view == "gerenciar")
-        if view == "incluir":
-            self._incluir_view.pack(fill="both", expand=True, padx=32, pady=(16, 24))
-            self._refresh_recentes()
-        elif view == "validar":
-            self._validar_view.pack(fill="both", expand=True, padx=32, pady=(16, 24))
-            self._refresh_validar()
-        else:
-            self._gerenciar_view.pack(fill="both", expand=True, padx=32, pady=(16, 24))
-            self._refresh_gerenciar()
-
-    def on_show(self):
-        self._sf.refresh_bindings()
-        self._refresh_network_state()
-
-    def _refresh_network_state(self):
-        if not self.winfo_exists():
-            return
-        if self._data.is_available():
-            self._net_banner.pack_forget()
-        else:
-            self._net_banner.pack(fill="x", padx=0, pady=(0, 0), after=self)
-
-    # ── Aba: Incluir dados ───────────────────────────────────────────
-    def _build_incluir(self, parent):
-        form = card_frame(parent)
-        form.pack(fill="x")
-        body = tk.Frame(form, bg=C["surface"], padx=24, pady=22)
-        body.pack(fill="x")
-        body.columnconfigure(1, weight=1)
-        body.columnconfigure(3, weight=1)
-
-        def label(txt, r, c):
-            tk.Label(body, text=txt, bg=C["surface"], fg=C["ink_muted"],
-                     font=("Segoe UI", 9)).grid(row=r, column=c, sticky="w",
-                                                 padx=(0, 10), pady=8)
-
-        # Data Report
-        label("Data Report", 0, 0)
-        self._var_data = tk.StringVar(value=date.today().strftime("%d/%m/%Y"))
-        styled_entry(body, textvariable=self._var_data, width=14).grid(
-            row=0, column=1, sticky="w", pady=8)
-
-        # Trader
-        label("Trader", 0, 2)
-        self._var_trader = tk.StringVar(value=PIPE_TRADERS[0])
-        cb = ttk.Combobox(body, textvariable=self._var_trader, values=PIPE_TRADERS,
-                           state="readonly", width=18, font=("Segoe UI", 9))
-        cb.grid(row=0, column=3, sticky="w", pady=8)
-
-        # Cliente
-        label("Cliente", 1, 0)
-        self._var_cliente = tk.StringVar(value="")
-        styled_entry(body, textvariable=self._var_cliente, width=40).grid(
-            row=1, column=1, columnspan=3, sticky="we", pady=8)
-
-        # Cessão
-        label("Cessão", 2, 0)
-        cessao_row = tk.Frame(body, bg=C["surface"])
-        cessao_row.grid(row=2, column=1, sticky="w", pady=8)
-        self._btn_cessao_n = _pipe_toggle_button(cessao_row, "Não",
-                                                  lambda: self._set_cessao("N"), small=True)
-        self._btn_cessao_n.pack(side="left")
-        self._btn_cessao_s = _pipe_toggle_button(cessao_row, "Sim",
-                                                  lambda: self._set_cessao("S"), small=True)
-        self._btn_cessao_s.pack(side="left", padx=(6, 0))
-        self._set_cessao("N")
-
-        # Volume
-        label("Volume (R$)", 2, 2)
-        self._var_volume = tk.StringVar(value="R$ 0,00")
-        ent_vol = styled_entry(body, textvariable=self._var_volume, width=18)
-        ent_vol.grid(row=2, column=3, sticky="w", pady=8)
-        self._get_volume_cents, self._set_volume_cents = _pipe_bind_money_entry(
-            ent_vol, self._var_volume)
-
-        # Spread
-        label("Spread (%)", 3, 0)
-        self._var_spread = tk.StringVar(value="")
-        ent_spread = styled_entry(body, textvariable=self._var_spread, width=14)
-        ent_spread.grid(row=3, column=1, sticky="w", pady=8)
-        _pipe_bind_decimal_entry(ent_spread, self._var_spread)
-
-        # Prazo médio
-        label("Prazo médio", 3, 2)
-        self._var_prazo = tk.StringVar(value="")
-        ent_prazo = styled_entry(body, textvariable=self._var_prazo, width=18)
-        ent_prazo.grid(row=3, column=3, sticky="w", pady=8)
-        _pipe_bind_decimal_entry(ent_prazo, self._var_prazo)
-
-        # IRAROC
-        label("IRAROC", 4, 0)
-        self._var_iraroc = tk.StringVar(value="")
-        ent_iraroc = styled_entry(body, textvariable=self._var_iraroc, width=14)
-        ent_iraroc.grid(row=4, column=1, sticky="w", pady=8)
-        _pipe_bind_decimal_entry(ent_iraroc, self._var_iraroc)
-
-        # Região
-        label("Região", 4, 2)
-        self._var_regiao = tk.StringVar(value="")
-        ent_regiao = styled_entry(body, textvariable=self._var_regiao, width=18)
-        ent_regiao.grid(row=4, column=3, sticky="w", pady=8)
-
-        def only_digits_key(e):
-            if e.keysym in {"Tab", "Left", "Right", "Home", "End", "BackSpace", "Delete"}:
-                return
-            if e.char and e.char.isdigit():
-                return
-            return "break"
-        ent_regiao.bind("<Key>", only_digits_key)
-
-        # Observação
-        label("Observação", 5, 0)
-        self._var_obs = tk.StringVar(value="")
-        styled_entry(body, textvariable=self._var_obs, width=50).grid(
-            row=5, column=1, columnspan=3, sticky="we", pady=8)
-
-        foot = tk.Frame(body, bg=C["surface"])
-        foot.grid(row=6, column=0, columnspan=4, sticky="w", pady=(10, 0))
-        styled_button(foot, "Salvar lançamento", self._salvar_entry,
-                      accent=True).pack(side="left")
-        self._msg_lbl = tk.Label(foot, text="", bg=C["surface"], fg=C["ink_muted"],
-                                  font=("Segoe UI", 8))
-        self._msg_lbl.pack(side="left", padx=(12, 0))
-
-        recentes_hdr = tk.Frame(parent, bg=C["bg"])
-        recentes_hdr.pack(fill="x", pady=(20, 6))
-        tk.Label(recentes_hdr, text="Lançamentos recentes", bg=C["bg"], fg=C["ink"],
-                 font=("Segoe UI", 11, "bold")).pack(side="left")
-        self._recentes_wrap = tk.Frame(parent, bg=C["bg"])
-        self._recentes_wrap.pack(fill="x")
-
-    def _set_cessao(self, v):
-        self._cessao_val.set(v)
-        _pipe_set_toggle(self._btn_cessao_n, v == "N")
-        _pipe_set_toggle(self._btn_cessao_s, v == "S")
-
-    def _parse_data_report(self):
-        raw = (self._var_data.get() or "").strip()
-        try:
-            return datetime.strptime(raw, "%d/%m/%Y").date()
-        except ValueError:
-            return None
-
-    def _salvar_entry(self):
-        d = self._parse_data_report()
-        if d is None:
-            self._msg_lbl.configure(text="Data inválida (use dd/mm/aaaa).", fg=C["err"])
-            return
-        cents = self._get_volume_cents()
-        if cents <= 0:
-            self._msg_lbl.configure(text="Informe um volume maior que zero.", fg=C["err"])
-            return
-        trader = self._var_trader.get()
-        if trader not in PIPE_TRADERS:
-            self._msg_lbl.configure(text="Selecione um trader válido.", fg=C["err"])
-            return
-        cliente = (self._var_cliente.get() or "").strip() or None
-        spread = _pipe_decimal_to_float(self._var_spread.get())
-        prazo = _pipe_decimal_to_float(self._var_prazo.get())
-        iraroc = _pipe_decimal_to_float(self._var_iraroc.get())
-        try:
-            regiao = int(self._var_regiao.get()) if self._var_regiao.get().strip() else None
-        except ValueError:
-            regiao = None
-        ok = self._data.add_entry(
-            d.isoformat(), trader, cliente, self._cessao_val.get(), cents, spread,
-            prazo, iraroc, (self._var_obs.get() or "").strip() or None, regiao)
-        if ok:
-            self._msg_lbl.configure(text="Lançamento salvo.", fg=C["ok"])
-        else:
-            self._msg_lbl.configure(
-                text="Sem rede — lançamento guardado localmente e será "
-                     "enviado ao reconectar.", fg=C["warn"])
-        self._set_volume_cents(0)
-        self._var_cliente.set("")
-        self._var_spread.set(""); self._var_prazo.set("")
-        self._var_iraroc.set(""); self._var_regiao.set(""); self._var_obs.set("")
-        self._refresh_network_state()
-        self._refresh_recentes()
-
-    def _refresh_recentes(self):
-        for w in self._recentes_wrap.winfo_children():
-            w.destroy()
-        hoje = date.today()
-        rows = self._data.entries_between(hoje - timedelta(days=13), hoje)[:10]
-        self._render_entry_rows(self._recentes_wrap, rows,
-                                 vazio_msg="Nenhum lançamento nos últimos dias.")
-
-    def _render_entry_rows(self, parent, rows, vazio_msg="Nenhum lançamento encontrado."):
-        if not rows:
-            tk.Label(parent, text=vazio_msg, bg=C["bg"], fg=C["ink_faint"],
-                     font=("Segoe UI", 9)).pack(anchor="w", pady=4)
-            return
-        for r in rows:
-            row_f = tk.Frame(parent, bg=C["surface"], padx=14, pady=8,
-                              highlightthickness=1, highlightbackground=C["hair"])
-            row_f.pack(fill="x", pady=3)
-            d_fmt = datetime.strptime(r["data_report"], "%Y-%m-%d").strftime("%d/%m/%Y")
-            cessao_txt = "Cessão" if (r["cessao"] or "").upper() == "S" else "Risco Sacado"
-            val_txt = _fmt_brl(Decimal(r["volume_centavos"]) / Decimal("100"))
-            cliente_txt = f"  ·  {r['cliente']}" if r.get("cliente") else ""
-            tk.Label(row_f, text=f"{d_fmt}  ·  {r['trader']}{cliente_txt}  ·  {cessao_txt}",
-                     bg=C["surface"], fg=C["ink"], font=("Segoe UI", 9, "bold")).pack(
-                         side="left")
-            tk.Label(row_f, text=val_txt, bg=C["surface"], fg=C["accent"],
-                     font=("Segoe UI", 9, "bold")).pack(side="right")
-            detalhe = []
-            if r["spread"]: detalhe.append(f"Spread {r['spread']}%")
-            if r["prazo_medio"]: detalhe.append(f"Prazo {r['prazo_medio']}")
-            if r["iraroc"]: detalhe.append(f"IRAROC {r['iraroc']}")
-            if r["regiao"]: detalhe.append(f"Região {r['regiao']}")
-            if detalhe:
-                tk.Label(row_f, text="   ·   ".join(detalhe), bg=C["surface"],
-                         fg=C["ink_faint"], font=("Segoe UI", 8)).pack(side="right",
-                                                                        padx=(0, 14))
-
-    # ── Aba: Validar dados ───────────────────────────────────────────
-    def _build_validar(self, parent):
-        filt = card_frame(parent)
-        filt.pack(fill="x")
-        fbody = tk.Frame(filt, bg=C["surface"], padx=24, pady=18)
-        fbody.pack(fill="x")
-
-        row1 = tk.Frame(fbody, bg=C["surface"])
-        row1.pack(fill="x")
-        tk.Label(row1, text="Trader", bg=C["surface"], fg=C["ink_muted"],
-                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
-        self._var_v_trader = tk.StringVar(value="Todos")
-        ttk.Combobox(row1, textvariable=self._var_v_trader,
-                     values=["Todos"] + PIPE_TRADERS, state="readonly",
-                     width=14, font=("Segoe UI", 9)).pack(side="left", padx=(0, 20))
-
-        tk.Label(row1, text="Período", bg=C["surface"], fg=C["ink_muted"],
-                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
-        self._var_periodo = tk.StringVar(value="mensal")
-        self._btn_semanal = _pipe_toggle_button(row1, "Semanal",
-                                                 lambda: self._set_periodo("semanal"), small=True)
-        self._btn_semanal.pack(side="left")
-        self._btn_mensal = _pipe_toggle_button(row1, "Mensal",
-                                                lambda: self._set_periodo("mensal"), small=True)
-        self._btn_mensal.pack(side="left", padx=(6, 20))
-
-        tk.Label(row1, text="Comparar com", bg=C["surface"], fg=C["ink_muted"],
-                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
-        self._var_ano_cmp = tk.StringVar(value=str(date.today().year - 1))
-        styled_entry(row1, textvariable=self._var_ano_cmp, width=6).pack(side="left")
-        tk.Label(row1, text="(ano)", bg=C["surface"], fg=C["ink_faint"],
-                 font=("Segoe UI", 8)).pack(side="left", padx=(4, 0))
-
-        row2 = tk.Frame(fbody, bg=C["surface"])
-        row2.pack(fill="x", pady=(12, 0))
-        self._row2 = row2
-
-        self._var_mes = tk.StringVar(
-            value=f"{PIPE_MESES[date.today().month - 1]}/{date.today().year}")
-        self._var_ref_data = tk.StringVar(value=date.today().strftime("%d/%m/%Y"))
-
-        self._mes_lbl = tk.Label(row2, text="Mês", bg=C["surface"], fg=C["ink_muted"],
-                                  font=("Segoe UI", 9))
-        self._mes_cb = ttk.Combobox(
-            row2, textvariable=self._var_mes, state="readonly", width=16,
-            font=("Segoe UI", 9),
-            values=[f"{m}/{date.today().year}" for m in PIPE_MESES] +
-                   [f"{m}/{date.today().year - 1}" for m in PIPE_MESES])
-
-        self._ref_lbl = tk.Label(row2, text="Data de referência (semana)",
-                                  bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9))
-        self._ref_ent = styled_entry(row2, textvariable=self._var_ref_data, width=14)
-
-        styled_button(fbody, "Atualizar", self._refresh_validar,
-                      accent=True).pack(anchor="w", pady=(14, 0))
-
-        self._alert_wrap = tk.Frame(parent, bg=C["bg"])
-        self._alert_wrap.pack(fill="x", pady=(16, 0))
-
-        self._cards_wrap = tk.Frame(parent, bg=C["bg"])
-        self._cards_wrap.pack(fill="x", pady=(16, 0))
-
-        lista_hdr = tk.Frame(parent, bg=C["bg"])
-        lista_hdr.pack(fill="x", pady=(24, 6))
-        tk.Label(lista_hdr, text="Lançamentos do período", bg=C["bg"], fg=C["ink"],
-                 font=("Segoe UI", 11, "bold")).pack(side="left")
-        self._lista_wrap = tk.Frame(parent, bg=C["bg"])
-        self._lista_wrap.pack(fill="x")
-
-        self._set_periodo("mensal")
-
-    def _set_periodo(self, p):
-        self._var_periodo.set(p)
-        if p == "mensal":
-            _pipe_set_toggle(self._btn_mensal, True)
-            _pipe_set_toggle(self._btn_semanal, False)
-            self._ref_lbl.pack_forget(); self._ref_ent.pack_forget()
-            self._mes_lbl.pack(side="left", padx=(0, 8))
-            self._mes_cb.pack(side="left")
-        else:
-            _pipe_set_toggle(self._btn_semanal, True)
-            _pipe_set_toggle(self._btn_mensal, False)
-            self._mes_lbl.pack_forget(); self._mes_cb.pack_forget()
-            self._ref_lbl.pack(side="left", padx=(0, 8))
-            self._ref_ent.pack(side="left")
-
-    def _periodo_atual(self):
-        """Retorna (dt_ini, dt_fim, dt_ini_ant, dt_fim_ant, label) do período
-        selecionado e do mesmo período no ano de comparação escolhido."""
-        try:
-            ano_cmp = int(self._var_ano_cmp.get())
-        except ValueError:
-            ano_cmp = date.today().year - 1
-        if self._var_periodo.get() == "mensal":
-            mes_txt, ano_txt = self._var_mes.get().split("/")
-            ano = int(ano_txt)
-            mes = PIPE_MESES.index(mes_txt) + 1
-            ini, fim = _pipe_month_range(ano, mes)
-            ini_ant, fim_ant = _pipe_month_range(ano_cmp, mes)
-            label = f"{mes_txt}/{ano}"
-            label_ant = f"{mes_txt}/{ano_cmp}"
-        else:
-            try:
-                ref = datetime.strptime(self._var_ref_data.get(), "%d/%m/%Y").date()
-            except ValueError:
-                ref = date.today()
-            ini, fim = _pipe_week_range(ref)
-            ref_ant = ref.replace(year=ano_cmp) if not (ref.month == 2 and ref.day == 29) \
-                else date(ano_cmp, 2, 28)
-            ini_ant, fim_ant = _pipe_week_range(ref_ant)
-            label = f"{ini.strftime('%d/%m')} a {fim.strftime('%d/%m/%Y')}"
-            label_ant = f"{ini_ant.strftime('%d/%m')} a {fim_ant.strftime('%d/%m/%Y')}"
-        return ini, fim, ini_ant, fim_ant, label, label_ant
-
-    def _refresh_validar(self):
-        for w in self._cards_wrap.winfo_children():
-            w.destroy()
-        for w in self._alert_wrap.winfo_children():
-            w.destroy()
-        for w in self._lista_wrap.winfo_children():
-            w.destroy()
-
-        ini, fim, ini_ant, fim_ant, label, label_ant = self._periodo_atual()
-        trader = self._var_v_trader.get()
-
-        atual = self._data.summary(ini, fim, trader)
-        anterior = self._data.summary(ini_ant, fim_ant, trader)
-        equipe_atual = self._data.summary(ini, fim, None)
-        equipe_anterior = self._data.summary(ini_ant, fim_ant, None)
-        inc = self._data.inconsistencias(ini, fim, trader)
-        rows_periodo = self._data.entries_between(ini, fim, trader)
-        self._render_entry_rows(
-            self._lista_wrap, rows_periodo,
-            vazio_msg="Nenhum lançamento no período selecionado.")
-
-        if inc["incompletos"] or inc["duplicados"]:
-            partes = []
-            if inc["incompletos"]:
-                partes.append(f"{inc['incompletos']} lançamento(s) com campos em branco")
-            if inc["duplicados"]:
-                partes.append(f"{inc['duplicados']} possível(is) duplicata(s)")
-            banner = tk.Frame(self._alert_wrap, bg="#3d3520")
-            banner.pack(fill="x")
-            tk.Label(banner, text="⚠ " + "; ".join(partes) + " — vale revisar.",
-                     bg="#3d3520", fg=C["warn"], font=("Segoe UI", 8, "bold"),
-                     anchor="w", justify="left", wraplength=900).pack(
-                         fill="x", padx=16, pady=8)
-
-        def growth(a, b):
-            if b == 0:
-                return None
-            return (a - b) / b * 100
-
-        def gap_para_bater(a, b):
-            """Quanto falta (R$ e %) para o período atual igualar o valor do
-            período anterior (mesmo trecho, ano de comparação)."""
-            if a >= b:
-                return None
-            falta = b - a
-            pct = (falta / a * 100) if a > 0 else None
-            return falta, pct
-
-        grid = tk.Frame(self._cards_wrap, bg=C["bg"])
-        grid.pack(fill="x")
-        for c in range(3):
-            grid.columnconfigure(c, weight=1, uniform="pcards")
-
-        def make_card(r, c, titulo, valor_cents, sub=None, color=None):
-            outer = tk.Frame(grid, bg=C["bg"])
-            outer.grid(row=r, column=c, sticky="nsew", padx=5, pady=5)
-            card = card_frame(outer)
-            card.pack(fill="both", expand=True)
-            body = tk.Frame(card, bg=C["surface"], padx=16, pady=14)
-            body.pack(fill="both", expand=True)
-            tk.Label(body, text=titulo, bg=C["surface"], fg=C["ink_faint"],
-                     font=("Segoe UI", 7, "bold")).pack(anchor="w")
-            tk.Label(body, text=_fmt_brl(Decimal(valor_cents) / Decimal("100")),
-                     bg=C["surface"], fg=color or C["ink"],
-                     font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(4, 0))
-            if sub:
-                tk.Label(body, text=sub, bg=C["surface"], fg=C["ink_muted"],
-                         font=("Segoe UI", 8), justify="left", wraplength=220).pack(
-                             anchor="w", pady=(4, 0))
-
-        titulo_trader = "Todos os traders" if trader == "Todos" else trader
-        make_card(0, 0, f"TOTAL · {label} · {titulo_trader}", atual["total"],
-                   sub=f"{atual['count']} lançamento(s)")
-        make_card(0, 1, "RISCO SACADO", atual["risco"])
-        make_card(0, 2, "CESSÃO", atual["cessao"])
-
-        cresc = growth(atual["total"], anterior["total"])
-        cresc_txt = f"{cresc:+.1f}%" if cresc is not None else "—"
-        cresc_color = C["ok"] if (cresc or 0) >= 0 else C["err"]
-        make_card(1, 0, f"MESMO PERÍODO · {label_ant}", anterior["total"],
-                   sub=f"Crescimento: {cresc_txt}", color=None)
-
-        gap = gap_para_bater(atual["total"], anterior["total"])
-        if gap is None:
-            gap_sub = "Já superou o mesmo período do ano de comparação."
-            gap_val = 0
-        else:
-            falta, pct = gap
-            gap_val = falta
-            gap_sub = (f"Falta {pct:.1f}% sobre o total atual" if pct is not None
-                       else "Total atual é zero")
-        make_card(1, 1, "FALTA PARA IGUALAR", gap_val, sub=gap_sub,
-                   color=C["warn"] if gap_val else C["ok"])
-
-        cresc_lbl = tk.Frame(grid, bg=C["bg"])
-        cresc_lbl.grid(row=1, column=2, sticky="nsew", padx=5, pady=5)
-        cc = card_frame(cresc_lbl); cc.pack(fill="both", expand=True)
-        cb2 = tk.Frame(cc, bg=C["surface"], padx=16, pady=14); cb2.pack(fill="both", expand=True)
-        tk.Label(cb2, text="CRESCIMENTO % (YoY)", bg=C["surface"], fg=C["ink_faint"],
-                 font=("Segoe UI", 7, "bold")).pack(anchor="w")
-        tk.Label(cb2, text=cresc_txt, bg=C["surface"], fg=cresc_color,
-                 font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(4, 0))
-
-        if trader != "Todos":
-            tk.Label(self._cards_wrap, text="Time completo (montante)", bg=C["bg"],
-                     fg=C["ink"], font=("Segoe UI", 10, "bold")).pack(
-                         anchor="w", pady=(20, 8))
-            grid2 = tk.Frame(self._cards_wrap, bg=C["bg"])
-            grid2.pack(fill="x")
-            for c in range(3):
-                grid2.columnconfigure(c, weight=1, uniform="pcards2")
-
-            def make_card2(r, c, titulo, valor_cents, sub=None, color=None):
-                outer = tk.Frame(grid2, bg=C["bg"])
-                outer.grid(row=r, column=c, sticky="nsew", padx=5, pady=5)
-                card = card_frame(outer)
-                card.pack(fill="both", expand=True)
-                body = tk.Frame(card, bg=C["surface"], padx=16, pady=14)
-                body.pack(fill="both", expand=True)
-                tk.Label(body, text=titulo, bg=C["surface"], fg=C["ink_faint"],
-                         font=("Segoe UI", 7, "bold")).pack(anchor="w")
-                tk.Label(body, text=_fmt_brl(Decimal(valor_cents) / Decimal("100")),
-                         bg=C["surface"], fg=color or C["ink"],
-                         font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(4, 0))
-                if sub:
-                    tk.Label(body, text=sub, bg=C["surface"], fg=C["ink_muted"],
-                             font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
-
-            cresc_eq = growth(equipe_atual["total"], equipe_anterior["total"])
-            cresc_eq_txt = f"{cresc_eq:+.1f}%" if cresc_eq is not None else "—"
-            make_card2(0, 0, f"TOTAL EQUIPE · {label}", equipe_atual["total"],
-                        sub=f"{equipe_atual['count']} lançamento(s)")
-            make_card2(0, 1, f"EQUIPE · {label_ant}", equipe_anterior["total"],
-                        sub=f"Crescimento: {cresc_eq_txt}")
-            gap_eq = gap_para_bater(equipe_atual["total"], equipe_anterior["total"])
-            if gap_eq is None:
-                make_card2(0, 2, "FALTA (EQUIPE)", 0, sub="Já superou.", color=C["ok"])
-            else:
-                falta_eq, pct_eq = gap_eq
-                sub_eq = (f"Falta {pct_eq:.1f}% sobre o total atual" if pct_eq is not None
-                          else "Total atual é zero")
-                make_card2(0, 2, "FALTA (EQUIPE)", falta_eq, sub=sub_eq, color=C["warn"])
-
-    # ── Aba: Gerenciar dados (editar / excluir) ──────────────────────
-    def _build_gerenciar(self, parent):
-        filt = card_frame(parent)
-        filt.pack(fill="x")
-        fbody = tk.Frame(filt, bg=C["surface"], padx=24, pady=18)
-        fbody.pack(fill="x")
-
-        row1 = tk.Frame(fbody, bg=C["surface"])
-        row1.pack(fill="x")
-        tk.Label(row1, text="Trader", bg=C["surface"], fg=C["ink_muted"],
-                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
-        self._var_g_trader = tk.StringVar(value="Todos")
-        ttk.Combobox(row1, textvariable=self._var_g_trader,
-                     values=["Todos"] + PIPE_TRADERS, state="readonly",
-                     width=14, font=("Segoe UI", 9)).pack(side="left", padx=(0, 20))
-
-        tk.Label(row1, text="De", bg=C["surface"], fg=C["ink_muted"],
-                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
-        self._var_g_de = tk.StringVar(
-            value=(date.today() - timedelta(days=30)).strftime("%d/%m/%Y"))
-        styled_entry(row1, textvariable=self._var_g_de, width=12).pack(side="left")
-        tk.Label(row1, text="até", bg=C["surface"], fg=C["ink_muted"],
-                 font=("Segoe UI", 9)).pack(side="left", padx=(10, 8))
-        self._var_g_ate = tk.StringVar(value=date.today().strftime("%d/%m/%Y"))
-        styled_entry(row1, textvariable=self._var_g_ate, width=12).pack(side="left")
-
-        styled_button(fbody, "Buscar", self._refresh_gerenciar,
-                      accent=True).pack(anchor="w", pady=(14, 0))
-
-        self._gerenciar_lista = tk.Frame(parent, bg=C["bg"])
-        self._gerenciar_lista.pack(fill="x", pady=(16, 0))
-
-    def _refresh_gerenciar(self):
-        for w in self._gerenciar_lista.winfo_children():
-            w.destroy()
-        try:
-            de = datetime.strptime(self._var_g_de.get(), "%d/%m/%Y").date()
-        except ValueError:
-            de = date.today() - timedelta(days=30)
-        try:
-            ate = datetime.strptime(self._var_g_ate.get(), "%d/%m/%Y").date()
-        except ValueError:
-            ate = date.today()
-        trader = self._var_g_trader.get()
-        rows = self._data.entries_between(de, ate, trader)
-        if not rows:
-            tk.Label(self._gerenciar_lista, text="Nenhum lançamento encontrado no período.",
-                     bg=C["bg"], fg=C["ink_faint"], font=("Segoe UI", 9)).pack(
-                         anchor="w", pady=4)
-            return
-        for r in rows:
-            self._make_gerenciar_row(r)
-
-    def _make_gerenciar_row(self, r):
-        row_f = tk.Frame(self._gerenciar_lista, bg=C["surface"], padx=14, pady=8,
-                          highlightthickness=1, highlightbackground=C["hair"])
-        row_f.pack(fill="x", pady=3)
-
-        d_fmt = datetime.strptime(r["data_report"], "%Y-%m-%d").strftime("%d/%m/%Y")
-        cessao_txt = "Cessão" if (r["cessao"] or "").upper() == "S" else "Risco Sacado"
-        val_txt = _fmt_brl(Decimal(r["volume_centavos"]) / Decimal("100"))
-        cliente_txt = f"  ·  {r['cliente']}" if r.get("cliente") else ""
-
-        info = tk.Frame(row_f, bg=C["surface"])
-        info.pack(side="left", fill="x", expand=True)
-        tk.Label(info, text=f"{d_fmt}  ·  {r['trader']}{cliente_txt}  ·  {cessao_txt}",
-                 bg=C["surface"], fg=C["ink"], font=("Segoe UI", 9, "bold")).pack(
-                     anchor="w")
-        detalhe = [val_txt]
-        if r["spread"]: detalhe.append(f"Spread {r['spread']}%")
-        if r["prazo_medio"]: detalhe.append(f"Prazo {r['prazo_medio']}")
-        if r["iraroc"]: detalhe.append(f"IRAROC {r['iraroc']}")
-        if r["regiao"]: detalhe.append(f"Região {r['regiao']}")
-        if r["observacao"]: detalhe.append(r["observacao"])
-        tk.Label(info, text="   ·   ".join(detalhe), bg=C["surface"],
-                 fg=C["ink_faint"], font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
-
-        acoes = tk.Frame(row_f, bg=C["surface"])
-        acoes.pack(side="right")
-
-        edit_btn = tk.Button(acoes, text="✎", command=lambda: self._abrir_editor(r),
-                              bg=C["surface2"], fg=C["warn"],
-                              activebackground=C["warn"], activeforeground=C["bg"],
-                              font=("Segoe UI", 9, "bold"), relief="flat", bd=0,
-                              padx=9, pady=3, cursor="hand2")
-        edit_btn.pack(side="left", padx=(0, 6))
-        edit_btn.bind("<Enter>", lambda _e: edit_btn.configure(bg=C["warn"], fg=C["bg"]))
-        edit_btn.bind("<Leave>", lambda _e: edit_btn.configure(bg=C["surface2"], fg=C["warn"]))
-
-        del_btn = tk.Button(acoes, text="✕", command=lambda: self._confirmar_exclusao(r),
-                             bg=C["surface2"], fg=C["err"],
-                             activebackground=C["err"], activeforeground=C["bg"],
-                             font=("Segoe UI", 9, "bold"), relief="flat", bd=0,
-                             padx=9, pady=3, cursor="hand2")
-        del_btn.pack(side="left")
-        del_btn.bind("<Enter>", lambda _e: del_btn.configure(bg=C["err"], fg=C["bg"]))
-        del_btn.bind("<Leave>", lambda _e: del_btn.configure(bg=C["surface2"], fg=C["err"]))
-
-    # ── Modal de edição/exclusão (overlay centralizado, mesmo padrão do
-    #    OperacoesInvertidoFrame) ───────────────────────────────────────
-    def _abrir_overlay(self):
-        if getattr(self, "_overlay", None) is not None:
-            self._fechar_overlay()
-        overlay = tk.Frame(self, bg="#0c0c0c")
-        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
-        overlay.bind("<Button-1>", lambda _e: self._fechar_overlay())
-        self._overlay = overlay
-        return overlay
-
-    def _fechar_overlay(self):
-        if getattr(self, "_overlay", None) is not None:
-            self._overlay.destroy()
-            self._overlay = None
-
-    def _confirmar_exclusao(self, r):
-        overlay = self._abrir_overlay()
-        card = tk.Frame(overlay, bg=C["surface"],
-                         highlightthickness=1, highlightbackground=C["hair"])
-        card.place(relx=0.5, rely=0.5, anchor="center", width=420, height=200)
-        card.bind("<Button-1>", lambda _e: "break")
-        pad = tk.Frame(card, bg=C["surface"], padx=26, pady=22)
-        pad.pack(fill="both", expand=True)
-
-        tk.Label(pad, text="Excluir lançamento?", bg=C["surface"], fg=C["ink"],
-                 font=("Segoe UI", 13, "bold")).pack(anchor="w")
-        d_fmt = datetime.strptime(r["data_report"], "%Y-%m-%d").strftime("%d/%m/%Y")
-        val_txt = _fmt_brl(Decimal(r["volume_centavos"]) / Decimal("100"))
-        tk.Label(pad, text=f"{d_fmt} · {r['trader']} · {val_txt}\nEssa ação não pode "
-                            "ser desfeita.",
-                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9),
-                 justify="left").pack(anchor="w", pady=(8, 0))
-
-        foot = tk.Frame(pad, bg=C["surface"])
-        foot.pack(fill="x", pady=(20, 0), side="bottom")
-        styled_button(foot, "Cancelar", self._fechar_overlay).pack(side="left")
-
-        def do_delete():
-            self._data.delete_entry(r["id"])
-            self._fechar_overlay()
-            self._refresh_gerenciar()
-
-        styled_button(foot, "Excluir", do_delete, danger=True).pack(side="left", padx=(8, 0))
-
-    def _abrir_editor(self, r):
-        overlay = self._abrir_overlay()
-        card = tk.Frame(overlay, bg=C["surface"],
-                         highlightthickness=1, highlightbackground=C["hair"])
-        card.place(relx=0.5, rely=0.5, anchor="center", width=480, height=560)
-        card.bind("<Button-1>", lambda _e: "break")
-
-        pad = tk.Frame(card, bg=C["surface"], padx=26, pady=22)
-        pad.pack(fill="both", expand=True)
-
-        top = tk.Frame(pad, bg=C["surface"])
-        top.pack(fill="x")
-        tk.Label(top, text="Editar lançamento", bg=C["surface"], fg=C["ink"],
-                 font=("Segoe UI", 13, "bold")).pack(side="left")
-        styled_button(top, "✕", self._fechar_overlay, small=True).pack(side="right")
-
-        body = tk.Frame(pad, bg=C["surface"])
-        body.pack(fill="both", expand=True, pady=(16, 0))
-        body.columnconfigure(1, weight=1)
-
-        def label(txt, rr):
-            tk.Label(body, text=txt, bg=C["surface"], fg=C["ink_muted"],
-                     font=("Segoe UI", 9)).grid(row=rr, column=0, sticky="w", pady=7,
-                                                 padx=(0, 10))
-
-        d_fmt = datetime.strptime(r["data_report"], "%Y-%m-%d").strftime("%d/%m/%Y")
-
-        label("Data Report", 0)
-        v_data = tk.StringVar(value=d_fmt)
-        styled_entry(body, textvariable=v_data, width=14).grid(
-            row=0, column=1, sticky="w", pady=7)
-
-        label("Trader", 1)
-        v_trader = tk.StringVar(value=r["trader"])
-        ttk.Combobox(body, textvariable=v_trader, values=PIPE_TRADERS,
-                     state="readonly", width=18, font=("Segoe UI", 9)).grid(
-                         row=1, column=1, sticky="w", pady=7)
-
-        label("Cliente", 2)
-        v_cliente = tk.StringVar(value=r.get("cliente") or "")
-        styled_entry(body, textvariable=v_cliente, width=30).grid(
-            row=2, column=1, sticky="we", pady=7)
-
-        label("Cessão", 3)
-        cessao_row = tk.Frame(body, bg=C["surface"])
-        cessao_row.grid(row=3, column=1, sticky="w", pady=7)
-        v_cessao = tk.StringVar(value=(r["cessao"] or "N").upper())
-        btn_n = _pipe_toggle_button(cessao_row, "Não", lambda: set_cessao("N"), small=True)
-        btn_n.pack(side="left")
-        btn_s = _pipe_toggle_button(cessao_row, "Sim", lambda: set_cessao("S"), small=True)
-        btn_s.pack(side="left", padx=(6, 0))
-
-        def set_cessao(v):
-            v_cessao.set(v)
-            _pipe_set_toggle(btn_n, v == "N")
-            _pipe_set_toggle(btn_s, v == "S")
-        set_cessao(v_cessao.get())
-
-        label("Volume (R$)", 4)
-        v_volume = tk.StringVar()
-        ent_vol = styled_entry(body, textvariable=v_volume, width=18)
-        ent_vol.grid(row=4, column=1, sticky="w", pady=7)
-        get_vol_cents, set_vol_cents = _pipe_bind_money_entry(
-            ent_vol, v_volume, initial_cents=r["volume_centavos"])
-
-        label("Spread (%)", 5)
-        v_spread = tk.StringVar(value=("" if r["spread"] is None else
-                                        str(r["spread"]).replace(".", ",")))
-        ent_spread = styled_entry(body, textvariable=v_spread, width=14)
-        ent_spread.grid(row=5, column=1, sticky="w", pady=7)
-        _pipe_bind_decimal_entry(ent_spread, v_spread)
-
-        label("Prazo médio", 6)
-        v_prazo = tk.StringVar(value=("" if r["prazo_medio"] is None else
-                                       str(r["prazo_medio"]).replace(".", ",")))
-        ent_prazo = styled_entry(body, textvariable=v_prazo, width=14)
-        ent_prazo.grid(row=6, column=1, sticky="w", pady=7)
-        _pipe_bind_decimal_entry(ent_prazo, v_prazo)
-
-        label("IRAROC", 7)
-        v_iraroc = tk.StringVar(value=("" if r["iraroc"] is None else
-                                        str(r["iraroc"]).replace(".", ",")))
-        ent_iraroc = styled_entry(body, textvariable=v_iraroc, width=14)
-        ent_iraroc.grid(row=7, column=1, sticky="w", pady=7)
-        _pipe_bind_decimal_entry(ent_iraroc, v_iraroc)
-
-        label("Região", 8)
-        v_regiao = tk.StringVar(value=("" if r["regiao"] is None else str(r["regiao"])))
-        ent_regiao = styled_entry(body, textvariable=v_regiao, width=14)
-        ent_regiao.grid(row=8, column=1, sticky="w", pady=7)
-
-        def only_digits_key(e):
-            if e.keysym in {"Tab", "Left", "Right", "Home", "End", "BackSpace", "Delete"}:
-                return
-            if e.char and e.char.isdigit():
-                return
-            return "break"
-        ent_regiao.bind("<Key>", only_digits_key)
-
-        label("Observação", 9)
-        v_obs = tk.StringVar(value=r.get("observacao") or "")
-        styled_entry(body, textvariable=v_obs, width=30).grid(
-            row=9, column=1, sticky="we", pady=7)
-
-        msg_lbl = tk.Label(pad, text="", bg=C["surface"], fg=C["err"], font=("Segoe UI", 8))
-        msg_lbl.pack(anchor="w", pady=(6, 0))
-
-        foot = tk.Frame(pad, bg=C["surface"])
-        foot.pack(fill="x", pady=(10, 0), side="bottom")
-        styled_button(foot, "Cancelar", self._fechar_overlay).pack(side="left")
-
-        def do_confirm():
-            try:
-                d = datetime.strptime(v_data.get().strip(), "%d/%m/%Y").date()
-            except ValueError:
-                msg_lbl.configure(text="Data inválida (use dd/mm/aaaa)."); return
-            cents = get_vol_cents()
-            if cents <= 0:
-                msg_lbl.configure(text="Informe um volume maior que zero."); return
-            trader = v_trader.get()
-            if trader not in PIPE_TRADERS:
-                msg_lbl.configure(text="Selecione um trader válido."); return
-            try:
-                regiao = int(v_regiao.get()) if v_regiao.get().strip() else None
-            except ValueError:
-                regiao = None
-            self._data.update_entry(
-                r["id"],
-                data_report=d.isoformat(), trader=trader,
-                cliente=(v_cliente.get() or "").strip() or None,
-                cessao=v_cessao.get(), volume_centavos=cents,
-                spread=_pipe_decimal_to_float(v_spread.get()),
-                prazo_medio=_pipe_decimal_to_float(v_prazo.get()),
-                iraroc=_pipe_decimal_to_float(v_iraroc.get()),
-                observacao=(v_obs.get() or "").strip() or None,
-                regiao=regiao)
-            self._fechar_overlay()
-            self._refresh_gerenciar()
-
-        styled_button(foot, "Confirmar", do_confirm, accent=True).pack(
-            side="left", padx=(8, 0))
-
-
 # ─── Taxas Pré (histórico mensal de taxa por cliente/sacado) ──────────────
 # Banco PRÓPRIO (taxas_pre.db), separado do pipe.db e do historico_operacoes.db,
 # na mesma pasta de rede — assim a importação da planilha nunca conflita com
@@ -11985,7 +12094,7 @@ class TaxasPreFrame(tk.Frame):
 
 # ─── Ligações (contador diário de ligações) ────────────────────────────────
 # Banco próprio (ligacoes.db), na mesma pasta de rede dos demais módulos —
-# não interfere em nada do Pipeline/Taxas Pré/Histórico.
+# não interfere em nada do Braskem/Taxas Pré/Histórico.
 
 LIGACOES_DB_PATH = os.path.join(os.path.dirname(SHARED_TAXAS_PATH), "ligacoes.db")
 
@@ -12393,7 +12502,10 @@ class App(tk.Tk):
             (LimitesInvertidoFrame,  "LimitesInvertido"),
             (TaxasInvertidoFrame,    "TaxasInvertido"),
             (HistoricoOperacoesFrame,"HistoricoOperacoes"),
-            (PipelineFrame,          "Pipeline"),
+            (BraskemFrame,           "Braskem"),
+            (AnalisarBraskemFrame,   "AnalisarBraskem"),
+            (TaxasBraskemFrame,      "TaxasBraskem"),
+            (HistoricoBraskemFrame,  "HistoricoBraskem"),
             (TaxasPreFrame,          "TaxasPre"),
             (LigacoesFrame,          "Ligacoes"),
         ]:
