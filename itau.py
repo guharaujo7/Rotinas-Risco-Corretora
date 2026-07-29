@@ -1003,13 +1003,13 @@ _BK_TOTAL_STYLE = ("border:solid windowtext 1.0pt; background:yellow; padding:4p
 
 def build_braskem_email_html(cedente_cnpj: str, sacado_nome: str,
                               sacado_cnpj: str, notas: list, taxa_str: str) -> str:
-    """Monta o HTML das notas para a Braskem no mesmo layout do modelo
-    padrão (CNPJ CEDENTE, RAZAO SOCIAL SACADO, CNPJ SACADO, NOTA,
-    VENCIMENTO, VALOR, VALOR LÍQUIDO, TX), com uma linha por nota e uma
-    linha de total ao final — montante bruto e, ao lado, o líquido,
-    destacados em amarelo como no modelo. Cada item de `notas` deve
-    conter: nf, data_vencimento, valor_raw, valor_liquido (Decimal ou
-    None)."""
+    """Monta o HTML das notas para a Braskem idêntico ao modelo padrão
+    usado pela mesa (saudação, frases de abertura, valores em destaque
+    amarelo acima da tabela — bruto e líquido —, tabela com CNPJ
+    CEDENTE, RAZAO SOCIAL SACADO, CNPJ SACADO, NOTA, VENCIMENTO, VALOR,
+    VALOR LÍQUIDO, TX, uma linha por nota, e parágrafo final com os
+    dados de conta para crédito). Cada item de `notas` deve conter: nf,
+    data_vencimento, valor_raw, valor_liquido (Decimal ou None)."""
     cedente_cnpj_fmt = _fmt_cnpj(cedente_cnpj)
     sacado_cnpj_fmt = _fmt_cnpj(sacado_cnpj)
 
@@ -1034,24 +1034,25 @@ def build_braskem_email_html(cedente_cnpj: str, sacado_nome: str,
   <td style="{_BK_TD_STYLE}">{taxa_str or '—'}</td>
 </tr>""")
 
-    total_html = f"""
-<tr>
-  <td style="{_BK_TD_STYLE}"><b>TOTAL</b></td>
-  <td style="{_BK_TD_STYLE}"></td>
-  <td style="{_BK_TD_STYLE}"></td>
-  <td style="{_BK_TD_STYLE}"></td>
-  <td style="{_BK_TD_STYLE}"></td>
-  <td style="{_BK_TOTAL_STYLE}">R$ {_fmt_brl(total_bruto)}</td>
-  <td style="{_BK_TOTAL_STYLE}">R$ {_fmt_brl(total_liq)}</td>
-  <td style="{_BK_TD_STYLE}"></td>
-</tr>"""
-
     return f"""<html><head><meta charset="utf-8"></head>
 <body lang="PT-BR" style="font-family:Calibri,sans-serif; color:#000000">
-<p>Seguem as notas disponibilizadas nesta data para a Braskem.</p>
-<table border="0" cellspacing="0" cellpadding="0" width="948"
-       style="width:711.0pt; border-collapse:collapse">
+<p>Braskem, bom dia!</p>
+<p>&nbsp;</p>
+<p>Essa nota entrou em nosso sistema agora pouco, podem validar se querem seguir por gentileza?</p>
+<p><br>Segue nota disponível para antecipação e cotação válida para desembolso hoje.</p>
+<p>&nbsp;&nbsp; </p>
+<table border="0" cellspacing="0" cellpadding="0" width="943" style="width:707.0pt; border-collapse:collapse">
 <tbody>
+<tr style="height:14.4pt">
+  <td width="128" style="padding:.75pt"></td>
+  <td width="208" style="padding:.75pt"></td>
+  <td width="128" style="padding:.75pt"></td>
+  <td width="79" style="padding:.75pt"></td>
+  <td width="93" style="padding:.75pt"></td>
+  <td width="83" style="background:yellow; padding:.75pt; font-family:Calibri,sans-serif; font-size:11pt; color:black">{_fmt_brl(total_bruto)}</td>
+  <td width="105" style="background:yellow; padding:.75pt; font-family:Calibri,sans-serif; font-size:11pt; color:black">{_fmt_brl(total_liq)}</td>
+  <td width="119" style="padding:.75pt"></td>
+</tr>
 <tr>
   <td style="{_BK_TH_STYLE}">CNPJ CEDENTE</td>
   <td style="{_BK_TH_STYLE}">RAZAO SOCIAL SACADO</td>
@@ -1063,9 +1064,11 @@ def build_braskem_email_html(cedente_cnpj: str, sacado_nome: str,
   <td style="{_BK_TH_STYLE}">TX (% AM LINEAR)</td>
 </tr>
 {''.join(linhas_html)}
-{total_html}
 </tbody>
 </table>
+<p>&nbsp;</p>
+<p>Após o De Acordo dos responsáveis neste e-mail a operação será creditada na conta abaixo:</p>
+<p>Banco Itaú Unibanco S.A - Agência: 00912 / Conta Conta: 08080-1</p>
 <p>&nbsp;</p>
 <p style="font-family:Calibri; font-size:9pt; color:#000000; margin:5pt">Corporativo | Interno</p>
 </body></html>"""
