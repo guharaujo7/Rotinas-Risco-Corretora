@@ -8558,6 +8558,7 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
         self._groups = []
         self._last_path = None
         self._worker_running = False
+        self._confirmados = {}
         self._init_ui_queue()
         self._build()
 
@@ -8693,12 +8694,15 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
         bg = C["surface"]
         info_bk = group.get("_braskem", {})
         has_alert = bool(info_bk.get("alerts"))
+        chave = _normalize_sacado_key(group["nome_sacado"])
+        confirmado = self._confirmados.get(chave)
         outer = tk.Frame(self._grid, bg=C["bg"])
         outer.grid(row=row, column=col, sticky="new", padx=5, pady=5)
-        card = tk.Frame(outer, bg=bg, highlightthickness=1,
-                        highlightbackground=C["warn"] if has_alert else C["hair"])
+        borda = C["ok"] if confirmado else (C["warn"] if has_alert else C["hair"])
+        card = tk.Frame(outer, bg=bg, highlightthickness=1, highlightbackground=borda)
         card.pack(fill="x")
-        top_bar = tk.Frame(card, bg=C["warn"] if has_alert else C["ok"], height=2)
+        top_bar = tk.Frame(card, bg=(C["ok"] if confirmado else
+                                     (C["warn"] if has_alert else C["ok"])), height=2)
         top_bar.pack(fill="x")
 
         body = tk.Frame(card, bg=bg, padx=14, pady=12)
@@ -8706,6 +8710,11 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
         tk.Label(body, text=group["nome_sacado"], bg=bg, fg=C["ink"],
                  font=("Segoe UI", 9, "bold"), wraplength=220,
                  justify="center").pack()
+
+        if confirmado:
+            hora = confirmado.get("hora", "")
+            tk.Label(body, text=f"✓ Confirmado{(' às ' + hora) if hora else ''}",
+                     bg=bg, fg=C["ok"], font=("Segoe UI", 7, "bold")).pack(pady=(4, 0))
 
         info = tk.Frame(body, bg=bg)
         info.pack(pady=(10, 0), fill="x")
@@ -8729,9 +8738,55 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
 
         btn_row = tk.Frame(body, bg=bg)
         btn_row.pack(fill="x", pady=(12, 0))
-        styled_button(btn_row, "Confirmar envio",
-                      lambda g=group: self._confirmar_envio(g),
-                      accent=True, small=True).pack(side="right")
+        styled_button(
+            btn_row, ("Confirmar novamente" if confirmado else "Confirmar envio"),
+            lambda g=group: self._confirmar_envio(g),
+            accent=not confirmado, small=True).pack(side="right")
+        styled_button(btn_row, "Formular e-mail →",
+                      lambda g=group: self._formular_email(g),
+                      small=True).pack(side="right", padx=(0, 6))
+
+    def _formular_email(self, group):
+        """Monta e abre no Outlook o e-mail deste sacado (título, modelo
+        de tabela e destinatários do Depara), independente de já ter
+        sido confirmado ou não — pode ser chamado quantas vezes precisar."""
+        info_bk = group.get("_braskem", {})
+        cli = info_bk.get("cliente") or {}
+        taxa_str = cli.get("taxa_pre") or ""
+        notas_email = []
+        for n in group["notas"]:
+            prazo_dias = _invertido_parse_prazo_days(n.get("prazo"))
+            valor_raw = n.get("valor_raw", Decimal("0"))
+            valor_liquido = None
+            if taxa_str and prazo_dias is not None:
+                try:
+                    valor_liquido = calcular_valor_liquido(valor_raw, taxa_str, prazo_dias)
+                except Exception:
+                    valor_liquido = None
+            notas_email.append({
+                "nf": n.get("nf"), "data_vencimento": n.get("data_vencimento"),
+                "valor_raw": valor_raw, "valor_liquido": valor_liquido,
+            })
+
+        subject = f"Notas para Antecipação - Risco Sacado Braskem - {group['nome_sacado'].upper()}"
+        html = build_braskem_email_html(
+            cedente_cnpj=group.get("doc_cedente") or "",
+            sacado_nome=group["nome_sacado"].upper(),
+            sacado_cnpj=group.get("doc_sacado") or "",
+            notas=notas_email, taxa_str=taxa_str)
+        to = _clean_email_list(cli.get("email_para"))
+        cc = _clean_email_list(cli.get("email_cc"))
+        if not to and not cc:
+            messagebox.showinfo(
+                "E-mail", "Este cliente não tem destinatário (Para/Cc) cadastrado "
+                "no Depara — o e-mail será aberto sem destinatários, para "
+                "preencher manualmente.", parent=self.controller)
+        try:
+            enviar_email_outlook_risco_sacado(subject, html, to=to, cc=cc)
+        except Exception as e:
+            messagebox.showerror(
+                "E-mail", f"Não foi possível abrir o e-mail no Outlook: {e}",
+                parent=self.controller)
 
     def _confirmar_envio(self, group):
         info_bk = group.get("_braskem", {})
@@ -8747,24 +8802,13 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
         cli = info_bk.get("cliente") or {}
         taxa_str = cli.get("taxa_pre") or ""
         notas_hist = []
-        notas_email = []
         for n in group["notas"]:
             prazo_dias = _invertido_parse_prazo_days(n.get("prazo"))
             valor_raw = n.get("valor_raw", Decimal("0"))
-            valor_liquido = None
-            if taxa_str and prazo_dias is not None:
-                try:
-                    valor_liquido = calcular_valor_liquido(valor_raw, taxa_str, prazo_dias)
-                except Exception:
-                    valor_liquido = None
             notas_hist.append({
                 "nf": n.get("nf"), "valor": valor_raw,
                 "data_vencimento": n.get("data_vencimento"),
                 "prazo_dias": prazo_dias,
-            })
-            notas_email.append({
-                "nf": n.get("nf"), "data_vencimento": n.get("data_vencimento"),
-                "valor_raw": valor_raw, "valor_liquido": valor_liquido,
             })
 
         hist = BraskemHistoricoData.get()
@@ -8783,27 +8827,8 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
                                 "enviada(s) para o histórico.",
                                 parent=self.controller)
 
-        # Abre o e-mail (mesmo modelo/layout da mesa) já preenchido, com os
-        # destinatários "Para"/"Cc" cadastrados no Depara para este cliente.
-        to = _clean_email_list(cli.get("email_para"))
-        cc = _clean_email_list(cli.get("email_cc"))
-        if to or cc:
-            subject = f"Notas para Antecipação - Risco Sacado Braskem - {group['nome_sacado'].upper()}"
-            html = build_braskem_email_html(
-                cedente_cnpj=group.get("doc_cedente") or "",
-                sacado_nome=group["nome_sacado"].upper(),
-                sacado_cnpj=group.get("doc_sacado") or "",
-                notas=notas_email, taxa_str=taxa_str)
-            try:
-                enviar_email_outlook_risco_sacado(subject, html, to=to, cc=cc)
-            except Exception as e:
-                messagebox.showwarning(
-                    "E-mail", f"Não foi possível abrir o e-mail no Outlook: {e}",
-                    parent=self.controller)
-
-        self._all_ops = [op for op in self._all_ops
-                         if _normalize_sacado_key(op["nome_sacado"])
-                         != _normalize_sacado_key(group["nome_sacado"])]
+        chave = _normalize_sacado_key(group["nome_sacado"])
+        self._confirmados[chave] = {"hora": datetime.now().strftime("%H:%M")}
         self._rebuild_group_cards()
 
 
