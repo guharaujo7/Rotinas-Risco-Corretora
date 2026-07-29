@@ -3474,6 +3474,16 @@ def _parse_braskem_solution(rows):
                "data vencimento", "prazo"])
     if header_i is None:
         return []
+    # "doc cedente" é opcional e por isso NÃO está em `required` acima
+    # (senão planilhas sem essa coluna seriam rejeitadas). Precisa ser
+    # localizada manualmente aqui, senão nunca entra em `cols` e o CNPJ
+    # do cedente nunca é lido (bug corrigido).
+    if "doc cedente" not in cols:
+        header_row_norm = [_norm_txt(c) for c in rows[header_i]]
+        for j, cell in enumerate(header_row_norm):
+            if "doc cedente" in cell:
+                cols["doc cedente"] = j
+                break
     ops = []
     for row in rows[header_i + 1:]:
         if not row:
@@ -3515,6 +3525,15 @@ def _parse_braskem_nova(rows):
                "data vencimento", "data operacao"])
     if header_i is None:
         return []
+    # "cnpj fornecedor" (= CNPJ do cedente) é opcional e por isso NÃO está
+    # em `required` acima. Precisa ser localizada manualmente aqui, senão
+    # nunca entra em `cols` e o CNPJ do cedente nunca é lido (bug corrigido).
+    if "cnpj fornecedor" not in cols:
+        header_row_norm = [_norm_txt(c) for c in rows[header_i]]
+        for j, cell in enumerate(header_row_norm):
+            if "cnpj fornecedor" in cell:
+                cols["cnpj fornecedor"] = j
+                break
     ops = []
     for row in rows[header_i + 1:]:
         if not row:
@@ -3739,6 +3758,20 @@ class BraskemTaxasData:
             raise RuntimeError(
                 "Não encontrei as colunas esperadas (CNPJ SACADO, Prazo "
                 "Conv., Spread Mín., Taxa Pré) na planilha.")
+        # "para" e "cc" são colunas opcionais e por isso NÃO estão em
+        # `required` acima (senão o Depara seria rejeitado quando a
+        # planilha não as tivesse). Precisam ser localizadas manualmente
+        # aqui, senão nunca entram em `cols` e o e-mail Para/CC nunca é
+        # lido — era exatamente esse o bug que fazia o e-mail sair sem
+        # destinatário mesmo com a planilha preenchida corretamente.
+        header_row_norm = [_norm_txt(c) for c in rows[header_i]]
+        for opt_key in ("para", "cc"):
+            if opt_key in cols:
+                continue
+            for j, cell in enumerate(header_row_norm):
+                if opt_key in cell:
+                    cols[opt_key] = j
+                    break
         importados = 0
         for row in rows[header_i + 1:]:
             if not row:
