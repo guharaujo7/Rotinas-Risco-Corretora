@@ -1071,7 +1071,7 @@ def build_braskem_email_html(cedente_cnpj: str, sacado_nome: str,
 </body></html>"""
 
 
-
+def get_emails_por_cliente(nome_sacado: str) -> dict:
     """Retorna {"para": [...], "cc": [...]} para o cliente (Risco Sacado
     Invertido), ou listas vazias se não houver mapeamento. Usa o mesmo
     casamento tolerante (aliases + palavras-chave) do trader/prazo, e
@@ -8558,6 +8558,7 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
         self._groups = []
         self._last_path = None
         self._worker_running = False
+        self._init_ui_queue()
         self._build()
 
     def _build(self):
