@@ -431,8 +431,8 @@ def _parse_invertido_xlsx(path: str) -> list:
 
             rows.append({
                 "uid":         len(rows),
-                "doc_sacado":  only_digits(str(_cell("doc_sacado") or "")),
-                "doc_cedente": only_digits(str(_cell("doc_cedente") or "")),
+                "doc_sacado":  _norm_cnpj(_cell("doc_sacado")),
+                "doc_cedente": _norm_cnpj(_cell("doc_cedente")),
                 "nome_sacado": nome,
                 "nf":          str(_cell("nf") or "").strip(),
                 "valor_raw":   _valor_to_decimal(_cell("valor")),
@@ -453,8 +453,8 @@ def _group_invertido_ops(ops: list) -> list:
         if key not in groups:
             groups[key] = {
                 "nome_sacado": op["nome_sacado"].strip(),
-                "doc_sacado":  only_digits(op.get("doc_sacado") or ""),
-                "doc_cedente": only_digits(op.get("doc_cedente") or ""),
+                "doc_sacado":  _norm_cnpj(op.get("doc_sacado") or ""),
+                "doc_cedente": _norm_cnpj(op.get("doc_cedente") or ""),
                 "notas": [],
                 "total": Decimal("0"),
             }
@@ -1160,6 +1160,33 @@ def resource_path(p):
 
 def only_digits(s):
     return re.sub(r"\D","",s or "")
+
+
+def _norm_cnpj(v):
+    """Normaliza um valor de CNPJ vindo de qualquer fonte (célula de
+    planilha como texto ou número, campo já extraído de uma nota, etc.)
+    para uma string de dígitos consistente, sempre com 14 posições.
+
+    Sem isso, o mesmo CNPJ pode virar chaves diferentes dependendo de
+    como cada planilha guarda a coluna:
+    - Se a célula vier como número (float) do openpyxl (ex.:
+      12345678000199.0), only_digits() sozinho mantém o ".0" como dígito
+      espúrio, gerando um CNPJ com 1 dígito a mais.
+    - Se o CNPJ tiver zero(s) à esquerda e a célula estiver formatada
+      como número, esse(s) zero(s) se perdem, gerando um CNPJ com menos
+      de 14 dígitos.
+    Isso faz o cliente "não ser encontrado" no Depara mesmo estando
+    cadastrado (arquivo de operações lê o CNPJ como texto, com o zero
+    preservado; o Depara lê como número, sem o zero) — e por
+    consequência o e-mail Braskem sai sem destinatário (Para/Cc) mesmo
+    com a planilha do Depara preenchida corretamente.
+    """
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    digits = only_digits(str(v) if v is not None else "")
+    if digits and len(digits) <= 14:
+        digits = digits.zfill(14)
+    return digits
 
 def _bind_digits_only(entry, var, max_len, min_len=None, hint_lbl=None,
                        valid_lengths=None, hint_text=None):
@@ -3503,8 +3530,8 @@ def _parse_braskem_solution(rows):
             continue
         ops.append({
             "uid": len(ops),
-            "doc_sacado": only_digits(str(_cell("doc sacado") or "")),
-            "doc_cedente": (only_digits(str(_cell("doc cedente") or ""))
+            "doc_sacado": _norm_cnpj(_cell("doc sacado")),
+            "doc_cedente": (_norm_cnpj(_cell("doc cedente"))
                             if "doc cedente" in cols else ""),
             "nome_sacado": nome,
             "nf": str(_cell("numero") or "").strip(),
@@ -3568,8 +3595,8 @@ def _parse_braskem_nova(rows):
             prazo = ""
         ops.append({
             "uid": len(ops),
-            "doc_sacado": only_digits(str(_cell("cnpj sacado") or "")),
-            "doc_cedente": (only_digits(str(_cell("cnpj fornecedor") or ""))
+            "doc_sacado": _norm_cnpj(_cell("cnpj sacado")),
+            "doc_cedente": (_norm_cnpj(_cell("cnpj fornecedor"))
                             if "cnpj fornecedor" in cols else ""),
             "nome_sacado": nome,
             "nf": str(_cell("nf") or "").strip(),
@@ -3731,10 +3758,10 @@ class BraskemTaxasData:
         return dict(self._clientes)
 
     def get_cliente(self, cnpj):
-        return self._clientes.get(only_digits(cnpj or ""))
+        return self._clientes.get(_norm_cnpj(cnpj or ""))
 
     def set_taxa(self, cnpj, taxa_pre):
-        cnpj = only_digits(cnpj or "")
+        cnpj = _norm_cnpj(cnpj or "")
         if cnpj not in self._clientes:
             return False
         self._clientes[cnpj]["taxa_pre"] = str(taxa_pre)
@@ -3792,7 +3819,7 @@ class BraskemTaxasData:
                     razao_idx = j
                     break
             nome = str((row[razao_idx] if razao_idx is not None and razao_idx < len(row) else "") or "").strip()
-            cnpj = only_digits(str(_cell("cnpj sacado") or ""))
+            cnpj = _norm_cnpj(_cell("cnpj sacado"))
             if not cnpj or not nome:
                 continue
             self._clientes[cnpj] = {
