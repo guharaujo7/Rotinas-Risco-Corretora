@@ -8944,7 +8944,8 @@ class HistoricoBraskemFrame(tk.Frame, ThreadSafeUIMixin):
                          justify="left").grid(row=0, column=i, sticky="new", padx=8, pady=8)
 
 
-
+class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
+    """Exibe as operações importadas de uma planilha .xlsx, agrupadas por sacado."""
 
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
@@ -11396,6 +11397,69 @@ class BPMFrame(tk.Frame, ThreadSafeUIMixin):
                 self._started = False
                 if not self._cancel_requested:
                     self.controller.bpm_run_selection = []
+
+# ─── Utilidades de UI/data reaproveitadas por Taxas Pré e Ligações ─────────
+PIPE_MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
+              "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+
+
+def _pipe_month_range(year, month):
+    ini = date(year, month, 1)
+    if month == 12:
+        fim = date(year, 12, 31)
+    else:
+        fim = date(year, month + 1, 1) - timedelta(days=1)
+    return ini, fim
+
+
+def _pipe_week_range(ref):
+    ini = ref - timedelta(days=ref.weekday())  # segunda-feira
+    fim = ini + timedelta(days=6)
+    return ini, fim
+
+
+def _pipe_decimal_to_float(raw):
+    s = (raw or "").strip().replace(",", ".")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _pipe_toggle_button(parent, text, command, small=False):
+    """Botão estilo toggle (aba / seleção) cujo hover respeita o estado
+    selecionado, ao contrário de styled_button que sempre volta pra cor
+    'não selecionado' ao tirar o mouse."""
+    pad = (7, 3) if small else (13, 6)
+    btn = tk.Button(parent, text=text, command=command,
+                     bg=C["surface2"], fg=C["ink_muted"],
+                     activebackground=C["accent"], activeforeground=C["bg"],
+                     font=("Segoe UI", 8 if small else 9),
+                     relief="flat", bd=0, padx=pad[0], pady=pad[1], cursor="hand2")
+    btn._pipe_selected = False
+
+    def on_enter(_):
+        if not btn._pipe_selected:
+            btn.configure(bg=C["surface3"], fg=C["ink"])
+
+    def on_leave(_):
+        if not btn._pipe_selected:
+            btn.configure(bg=C["surface2"], fg=C["ink_muted"])
+
+    btn.bind("<Enter>", on_enter)
+    btn.bind("<Leave>", on_leave)
+    return btn
+
+
+def _pipe_set_toggle(btn, selected):
+    btn._pipe_selected = selected
+    if selected:
+        btn.configure(bg=C["accent"], fg=C["bg"])
+    else:
+        btn.configure(bg=C["surface2"], fg=C["ink_muted"])
+
 
 # ─── Taxas Pré (histórico mensal de taxa por cliente/sacado) ──────────────
 # Banco PRÓPRIO (taxas_pre.db), separado do pipe.db e do historico_operacoes.db,
