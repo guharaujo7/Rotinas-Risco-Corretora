@@ -981,6 +981,159 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
 # MIRROR_CLIENTS, já usado para o limite compartilhado.
 
 
+# Depara fixo de clientes Braskem (taxa pré, prazo convencionado, spread
+# mínimo e e-mails de aprovação/cc), igual ao padrão do Risco Sacado
+# Invertido (INVERTIDO_EMAILS_POR_CLIENTE): gravado direto no código, sem
+# depender de planilha de rede — evita o problema do anexo/Depara não
+# carregar (rede indisponível, planilha fora do padrão, etc.).
+BRASKEM_CLIENTES_DEPARA = {
+    '09074885000571': {
+        "nome": 'OXFORD PACKAGING S BRASIL LTDA',
+        "cnpj": '09074885000571',
+        "prazo_max": 60,
+        "spread_min": 7.5,
+        "taxa_pre": '1.732',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br; allan.palotti-silva@mailer.com.br; silvia.alm@mailer.com.br; geovana.andrade-silva@mailer.com.br; ; caio.farinha@mailer.com.br; mesarecebiveis.mm@itaubba.com; felipe.cunha@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '00827591000175': {
+        "nome": 'ACTIVAS PLASTICOS I LTDA',
+        "cnpj": '00827591000175',
+        "prazo_max": 45,
+        "spread_min": 1.53,
+        "taxa_pre": '1.326',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br; luis-claudio.paulino@itaubba.com; renato.montanari@itaubba.com; allan.palotti-silva@mailer.com.br; silvia.alm@mailer.com.br; geovana.andrade-silva@mailer.com.br; jaqueline.pereira@itaubba.com ; caio.farinha@mailer.com.br;mesarecebiveis.mm@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '02496442000104': {
+        "nome": 'RAFT EMBALAGENS LTDA',
+        "cnpj": '02496442000104',
+        "prazo_max": 90,
+        "spread_min": 3,
+        "taxa_pre": '1.35',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com;',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br;allan.palotti-silva@mailer.com.br;silvia.alm@mailer.com.br;geovana.andrade-silva@mailer.com.br;;caio.farinha@mailer.com.br;mesarecebiveis.mm@itaubba.com; fernando.cruz-oliveira@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '86046448000161': {
+        "nome": 'CONDOR S.A',
+        "cnpj": '86046448000161',
+        "prazo_max": 75,
+        "spread_min": 1.8,
+        "taxa_pre": '1.35',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br;allan.palotti-silva@mailer.com.br;silvia.alm@mailer.com.br;geovana.andrade-silva@mailer.com.br;;caio.farinha@mailer.com.br;mesarecebiveis.mm@itaubba.com; vitor.sasso@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '09217430000134': {
+        "nome": 'CONDOR PINCEIS',
+        "cnpj": '09217430000134',
+        "prazo_max": 75,
+        "spread_min": 1.8,
+        "taxa_pre": '1.35',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br;allan.palotti-silva@mailer.com.br;silvia.alm@mailer.com.br;geovana.andrade-silva@mailer.com.br;;caio.farinha@mailer.com.br;mesarecebiveis.mm@itaubba.com; vitor.sasso@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '07049845000110': {
+        "nome": 'CONDOR NORDESTE INDUSTRIA',
+        "cnpj": '07049845000110',
+        "prazo_max": 75,
+        "spread_min": 1.8,
+        "taxa_pre": '1.35',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br;allan.palotti-silva@mailer.com.br;silvia.alm@mailer.com.br;geovana.andrade-silva@mailer.com.br;;caio.farinha@mailer.com.br;mesarecebiveis.mm@itaubba.com; vitor.sasso@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '13204698000109': {
+        "nome": 'BOREALIS BRASIL S A',
+        "cnpj": '13204698000109',
+        "prazo_max": 180,
+        "spread_min": 0.7,
+        "taxa_pre": '1.149',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com; celia.ribeiro@braskem.com;',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br;silvia.alm@mailer.com.br; erika.ramos@itaubba.com;allan.palotti-silva@mailer.com.br;silvia.alm@mailer.com.br;geovana.andrade-silva@mailer.com.br;;caio.farinha@mailer.com.br;mesarecebiveis.mm@itaubba.com; geovana.rosa@borealisgroup.com; paulo.chaves@borealisgroup.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '23318607000381': {
+        "nome": 'AVIENT COLORANTS BRASIL LTDA',
+        "cnpj": '23318607000381',
+        "prazo_max": 120,
+        "spread_min": 3.65,
+        "taxa_pre": '1.402',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br;allan.palotti-silva@mailer.com.br;silvia.alm@mailer.com.br;geovana.andrade-silva@mailer.com.br;;caio.farinha@mailer.com.br;mesarecebiveis.mm@itaubba.com; felipe.cunha@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '46928552000165': {
+        "nome": 'DOVAC INDUSTRIA E COM LTDA',
+        "cnpj": '46928552000165',
+        "prazo_max": 75,
+        "spread_min": 1.2,
+        "taxa_pre": '1.238',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br; allan.palotti-silva@mailer.com.br; silvia.alm@mailer.com.br; geovana.andrade-silva@mailer.com.br; ; caio.farinha@mailer.com.br; mesarecebiveis.mm@itaubba.com; nuchinha.mattos@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '53031654000149': {
+        "nome": 'MAJICPLAST EMBALAGENS LTDA',
+        "cnpj": '53031654000149',
+        "prazo_max": 90,
+        "spread_min": 2.6,
+        "taxa_pre": '1.315',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br;allan.palotti-silva@mailer.com.br;silvia.alm@mailer.com.br;geovana.andrade-silva@mailer.com.br;;caio.farinha@mailer.com.br;mesarecebiveis.mm@itaubba.com; mariana.zanini@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '03281950000120': {
+        "nome": 'FCC INDUSTRIA E COMERCIO LTDA',
+        "cnpj": '03281950000120',
+        "prazo_max": 150,
+        "spread_min": 1.4,
+        "taxa_pre": '1.17',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br;allan.palotti-silva@mailer.com.br;silvia.alm@mailer.com.br;geovana.andrade-silva@mailer.com.br;;caio.farinha@mailer.com.br;mesarecebiveis.mm@itaubba.com; eliana.berenstein@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '85111441000113': {
+        "nome": 'FARBEN S A INDUSTRIA QUIMICA',
+        "cnpj": '85111441000113',
+        "prazo_max": 60,
+        "spread_min": 1.5,
+        "taxa_pre": '1.19',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br; allan.palotti-silva@mailer.com.br; silvia.alm@mailer.com.br; geovana.andrade-silva@mailer.com.br; ; caio.farinha@mailer.com.br; mesarecebiveis.mm@itaubba.com; alexsandro.kreusch@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+    '13816470000170': {
+        "nome": 'SUMITOMO RUBBER',
+        "cnpj": '13816470000170',
+        "prazo_max": 90,
+        "spread_min": 3,
+        "taxa_pre": '1.35',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'mesarecebiveis@itaubba.com;claudia.kondo@braskem.com;enzo.fontana@braskem.com;dionatan.costa@braskem.com;IBBA-RiscoSacado@itaubba.com',
+    },
+    '02290510000176': {
+        "nome": 'ADAMA BRASIL S.A',
+        "cnpj": '02290510000176',
+        "prazo_max": 90,
+        "spread_min": 3,
+        "taxa_pre": '1.3887',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'mesarecebiveis@itaubba.com;claudia.kondo@braskem.com;enzo.fontana@braskem.com;dionatan.costa@braskem.com;IBBA-RiscoSacado@itaubba.com',
+    },
+    '82270281000167': {
+        "nome": 'POLIJUTA INDUSTRIA E COMERCIO DE EMBALAGENS LTDA',
+        "cnpj": '82270281000167',
+        "prazo_max": 15,
+        "spread_min": 2.5,
+        "taxa_pre": '1.348',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br; allan.palotti-silva@mailer.com.br; silvia.alm@mailer.com.br; geovana.andrade-silva@mailer.com.br; ;',
+    },
+    '02166983000166': {
+        "nome": 'AVIENT BRASIL LTDA',
+        "cnpj": '02166983000166',
+        "prazo_max": 120,
+        "spread_min": 3.65,
+        "taxa_pre": '1.402',
+        "email_para": 'AprovacaoRiscoSacado@braskem.com',
+        "email_cc": 'renato.alves-antonio@itau-unibanco.com.br; liberacaommmn@correio.itau.com.br;allan.palotti-silva@mailer.com.br;silvia.alm@mailer.com.br;geovana.andrade-silva@mailer.com.br;;caio.farinha@mailer.com.br;mesarecebiveis.mm@itaubba.com; felipe.cunha@itaubba.com;silvia.sena@mailer.com.br;nathan.amaral@mailer.com.br;lilian.santos@mailer.com.br;olavo.silva@mailer.com.br;marco.lopes-silva@mailer.com.br;maria.bufon@mailer.com.br',
+    },
+}
+
+
 def _clean_email_list(raw: str) -> str:
     """Normaliza uma lista de e-mails vinda da planilha (separadores
     inconsistentes: ';', ';;', espaços) para 'a@x; b@y; c@z'."""
@@ -1001,6 +1154,21 @@ _BK_TOTAL_STYLE = ("border:solid windowtext 1.0pt; background:yellow; padding:4p
                     "color:black; text-align:center")
 
 
+def _fmt_taxa_braskem(taxa_str) -> str:
+    """Formata a taxa pré para exibição no e-mail Braskem sempre com 4
+    casas decimais e vírgula (ex.: 1,35 -> '1,3500'; 1,339 -> '1,3390').
+    Aceita string com vírgula ou ponto; se não conseguir interpretar,
+    devolve o valor original sem alterações."""
+    if not taxa_str:
+        return taxa_str
+    try:
+        valor = Decimal(str(taxa_str).strip().replace(",", "."))
+    except (InvalidOperation, ValueError):
+        return taxa_str
+    texto = f"{valor:.4f}"
+    return texto.replace(".", ",")
+
+
 def build_braskem_email_html(cedente_cnpj: str, sacado_nome: str,
                               sacado_cnpj: str, notas: list, taxa_str: str) -> str:
     """Monta o HTML das notas para a Braskem idêntico ao modelo padrão
@@ -1012,6 +1180,7 @@ def build_braskem_email_html(cedente_cnpj: str, sacado_nome: str,
     data_vencimento, valor_raw, valor_liquido (Decimal ou None)."""
     cedente_cnpj_fmt = _fmt_cnpj(cedente_cnpj)
     sacado_cnpj_fmt = _fmt_cnpj(sacado_cnpj)
+    taxa_str_fmt = _fmt_taxa_braskem(taxa_str)
 
     total_bruto = Decimal("0")
     total_liq = Decimal("0")
@@ -1031,7 +1200,7 @@ def build_braskem_email_html(cedente_cnpj: str, sacado_nome: str,
   <td style="{_BK_TD_STYLE}">{op.get('data_vencimento') or '—'}</td>
   <td style="{_BK_TD_STYLE}">{_fmt_brl(vf)}</td>
   <td style="{_BK_TD_STYLE}">{_fmt_brl(vl) if vl is not None else '—'}</td>
-  <td style="{_BK_TD_STYLE}">{taxa_str or '—'}</td>
+  <td style="{_BK_TD_STYLE}">{taxa_str_fmt or '—'}</td>
 </tr>""")
 
     return f"""<html><head><meta charset="utf-8"></head>
@@ -3683,8 +3852,6 @@ class BraskemTaxasData:
         self._on_reconnect_callbacks = []
         self._retry_timer = None
         self._try_load()
-        if not self._available:
-            self._schedule_retry()
 
     def is_available(self):
         return self._available
@@ -3692,67 +3859,20 @@ class BraskemTaxasData:
     def on_reconnect(self, callback):
         self._on_reconnect_callbacks.append(callback)
 
-    def _schedule_retry(self):
-        if self._retry_timer is not None:
-            return
-        self._retry_timer = threading.Timer(self.RETRY_SECONDS, self._retry_tick)
-        self._retry_timer.daemon = True
-        self._retry_timer.start()
-
-    def _retry_tick(self):
-        self._retry_timer = None
-        was_available = self._available
-        self._try_load()
-        if self._available and not was_available:
-            for cb in list(self._on_reconnect_callbacks):
-                try:
-                    cb()
-                except Exception:
-                    pass
-        if not self._available:
-            self._schedule_retry()
-
-    def _network_reachable(self):
-        try:
-            return os.path.isdir(os.path.dirname(SHARED_BRASKEM_TAXAS_PATH))
-        except Exception:
-            return False
-
     def _try_load(self):
-        if not self._network_reachable():
-            self._available = False
-            return
-        try:
-            if os.path.isfile(SHARED_BRASKEM_TAXAS_PATH):
-                with open(SHARED_BRASKEM_TAXAS_PATH, "r", encoding="utf-8") as f:
-                    conteudo = f.read().strip()
-                if conteudo:
-                    try:
-                        data = _json_mod.loads(conteudo)
-                    except Exception:
-                        data = {}
-                    self._clientes = data.get("clientes", {})
-                else:
-                    self._clientes = {}
-            self._available = True
-        except Exception:
-            self._available = False
+        # Fonte fixa no código (BRASKEM_CLIENTES_DEPARA), igual ao padrão
+        # do Risco Sacado Invertido — não depende mais de planilha/arquivo
+        # de rede, então nunca fica indisponível nem sem destinatário.
+        self._clientes = {
+            cnpj: dict(dados) for cnpj, dados in BRASKEM_CLIENTES_DEPARA.items()
+        }
+        self._available = True
 
     def save(self):
-        if not self._network_reachable():
-            self._available = False
-            self._schedule_retry()
-            return False
-        try:
-            with open(SHARED_BRASKEM_TAXAS_PATH, "w", encoding="utf-8") as f:
-                _json_mod.dump({"clientes": self._clientes}, f,
-                                ensure_ascii=False, indent=2)
-            self._available = True
-            return True
-        except Exception:
-            self._available = False
-            self._schedule_retry()
-            return False
+        # Persistência apenas em memória (sessão atual) — os dados-base
+        # (Para/Cc, prazo, spread, taxa) vêm de BRASKEM_CLIENTES_DEPARA no
+        # código. Retorna True pois não há mais dependência de rede.
+        return True
 
     def all_clientes(self):
         return dict(self._clientes)
