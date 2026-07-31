@@ -528,6 +528,21 @@ def _invertido_parse_prazo_days(prazo) -> int | None:
     return int(m.group()) if m else None
 
 
+def _braskem_prazo_dias(nota) -> int | None:
+    """Prazo (em dias corridos) até o vencimento da nota, calculado na
+    hora — (data_vencimento - hoje).days —, igual à lógica do Invertido
+    (AnalisarOperacoesFrame._calc_valor_liquido_group). NÃO usa o campo
+    'prazo' que vem pronto da planilha: esse número é uma fotografia do
+    dia em que a planilha foi gerada e fica desatualizado se a nota for
+    processada em outro dia, o que gerava líquido e alerta de prazo
+    errados dependendo de quando a planilha era aberta. Cai de volta no
+    campo da planilha só se a data de vencimento não puder ser lida."""
+    venc = _parse_data_curta(nota.get("data_vencimento"))
+    if venc is not None:
+        return (venc - date.today()).days
+    return _invertido_parse_prazo_days(nota.get("prazo"))
+
+
 def _invertido_check_nf(nf: str) -> str | None:
     s = str(nf or "").strip()
     if not s:
@@ -1144,13 +1159,13 @@ def _clean_email_list(raw: str) -> str:
 
 
 _BK_TH_STYLE = ("border:solid windowtext 1.0pt; background:#B4C6E7; "
-                "padding:4pt; font-family:Calibri,sans-serif; font-size:11pt; "
-                "font-weight:bold; color:black; text-align:center")
-_BK_TD_STYLE = ("border:solid windowtext 1.0pt; padding:4pt; "
-                "font-family:Calibri,sans-serif; font-size:11pt; color:black; "
-                "text-align:center")
-_BK_TOTAL_STYLE = ("border:solid windowtext 1.0pt; background:yellow; padding:4pt; "
-                    "font-family:Calibri,sans-serif; font-size:11pt; font-weight:bold; "
+                "padding:10pt 8pt; font-family:Calibri,sans-serif; font-size:12pt; "
+                "font-weight:bold; color:black; text-align:center; line-height:1.3")
+_BK_TD_STYLE = ("border:solid windowtext 1.0pt; padding:9pt 8pt; "
+                "font-family:Calibri,sans-serif; font-size:12pt; color:black; "
+                "text-align:center; line-height:1.3")
+_BK_TOTAL_STYLE = ("border:solid windowtext 1.0pt; background:yellow; padding:9pt 8pt; "
+                    "font-family:Calibri,sans-serif; font-size:12pt; font-weight:bold; "
                     "color:black; text-align:center")
 
 
@@ -1207,20 +1222,19 @@ def build_braskem_email_html(cedente_cnpj: str, sacado_nome: str,
 <body lang="PT-BR" style="font-family:Calibri,sans-serif; color:#000000">
 <p>Braskem, bom dia!</p>
 <p>&nbsp;</p>
-<p>Essa nota entrou em nosso sistema agora pouco, podem validar se querem seguir por gentileza?</p>
-<p><br>Segue nota disponível para antecipação e cotação válida para desembolso hoje.</p>
+<p>Segue nota disponível para antecipação e cotação válida para desembolso hoje.</p>
 <p>&nbsp;&nbsp; </p>
-<table border="0" cellspacing="0" cellpadding="0" width="943" style="width:707.0pt; border-collapse:collapse">
+<table border="0" cellspacing="0" cellpadding="0" width="1110" style="width:832.5pt; border-collapse:collapse">
 <tbody>
-<tr style="height:14.4pt">
-  <td width="128" style="padding:.75pt"></td>
-  <td width="208" style="padding:.75pt"></td>
-  <td width="128" style="padding:.75pt"></td>
-  <td width="79" style="padding:.75pt"></td>
-  <td width="93" style="padding:.75pt"></td>
-  <td width="83" style="background:yellow; padding:.75pt; font-family:Calibri,sans-serif; font-size:11pt; color:black">{_fmt_brl(total_bruto)}</td>
-  <td width="105" style="background:yellow; padding:.75pt; font-family:Calibri,sans-serif; font-size:11pt; color:black">{_fmt_brl(total_liq)}</td>
-  <td width="119" style="padding:.75pt"></td>
+<tr style="height:18pt">
+  <td width="150" style="padding:.75pt"></td>
+  <td width="245" style="padding:.75pt"></td>
+  <td width="150" style="padding:.75pt"></td>
+  <td width="95" style="padding:.75pt"></td>
+  <td width="110" style="padding:.75pt"></td>
+  <td width="115" style="background:yellow; padding:9pt 8pt; font-family:Calibri,sans-serif; font-size:12pt; font-weight:bold; color:black; text-align:center">{_fmt_brl(total_bruto)}</td>
+  <td width="130" style="background:yellow; padding:9pt 8pt; font-family:Calibri,sans-serif; font-size:12pt; font-weight:bold; color:black; text-align:center">{_fmt_brl(total_liq)}</td>
+  <td width="115" style="padding:.75pt"></td>
 </tr>
 <tr>
   <td style="{_BK_TH_STYLE}">CNPJ CEDENTE</td>
@@ -3633,12 +3647,19 @@ def calcular_spread_sacado(notas, taxa_alvo_str):
 # Módulo separado do Operações Invertido. O Depara aqui não tem validade
 # mensal (fica sempre vigente até ser atualizado manualmente ou por nova
 # importação da planilha de clientes/taxas).
-SHARED_BRASKEM_TAXAS_PATH = os.path.join(
-    os.path.dirname(SHARED_TAXAS_PATH), "braskem_taxas.json")
+BRASKEM_TAXAS_DB_PATH = os.path.join(
+    os.path.dirname(SHARED_TAXAS_PATH), "braskem_taxas.db")
 BRASKEM_DB_PATH = os.path.join(
     os.path.dirname(SHARED_TAXAS_PATH), "braskem_operacoes.db")
 BRASKEM_PENDING_LOCAL_PATH = os.path.join(
     tempfile.gettempdir(), "braskem_pendente_local.jsonl")
+# Confirmação de pagamento: primeiro alerta 1h30 após o envio; se a
+# operação não for marcada como paga (ficar "não paga" ou simplesmente
+# adiada sem resposta), o alerta some e volta em 30 min, indefinidamente,
+# até alguém marcar como paga.
+BRASKEM_ALERTA_PRIMEIRA_ESPERA_MIN = 90
+BRASKEM_ALERTA_RECORRENCIA_MIN = 30
+BRASKEM_ALERTA_CHECK_MS = 60_000
 
 
 def _norm_txt(s):
@@ -3835,10 +3856,16 @@ class BraskemTaxasData:
     convencionado (máximo) e spread mínimo a.a. (ambos vindos da planilha
     de clientes, respeitados como regra de alerta), além dos e-mails de
     aprovação/cc. Sem validade mensal — permanece vigente até ser
-    atualizado (a nota fica em uso por alguns dias após o faturamento)."""
+    atualizado (a nota fica em uso por alguns dias após o faturamento).
+
+    Nome, prazo, spread e e-mails vêm fixos do código (BRASKEM_CLIENTES_
+    DEPARA), igual ao Risco Sacado Invertido. Só a taxa pré, que é editada
+    na tela com frequência, é persistida à parte — em banco SQLite próprio
+    (braskem_taxas.db, na mesma pasta de rede do taxas_pre.db/pipe.db, mas
+    em arquivo isolado, sem misturar com os demais módulos), no mesmo
+    padrão usado pelo TaxasPreData."""
 
     _instance = None
-    RETRY_SECONDS = 30
 
     @classmethod
     def get(cls):
@@ -3850,7 +3877,7 @@ class BraskemTaxasData:
         self._clientes = {}  # cnpj (só dígitos) -> dict
         self._available = False
         self._on_reconnect_callbacks = []
-        self._retry_timer = None
+        self._ensure_schema()
         self._try_load()
 
     def is_available(self):
@@ -3859,20 +3886,62 @@ class BraskemTaxasData:
     def on_reconnect(self, callback):
         self._on_reconnect_callbacks.append(callback)
 
+    def _connect(self):
+        conn = sqlite3.connect(BRASKEM_TAXAS_DB_PATH, timeout=20)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        return conn
+
+    def _ensure_schema(self):
+        try:
+            if not os.path.isdir(os.path.dirname(BRASKEM_TAXAS_DB_PATH)):
+                self._available = False
+                return
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS braskem_taxas_editadas (
+                        cnpj TEXT PRIMARY KEY,
+                        taxa_pre TEXT NOT NULL,
+                        atualizado_em TEXT NOT NULL
+                    )
+                """)
+                conn.commit()
+            finally:
+                conn.close()
+            self._available = True
+        except Exception as e:
+            print(f"[braskem_taxas] _ensure_schema falhou: {e}", file=sys.stderr)
+            self._available = False
+
     def _try_load(self):
-        # Fonte fixa no código (BRASKEM_CLIENTES_DEPARA), igual ao padrão
-        # do Risco Sacado Invertido — não depende mais de planilha/arquivo
-        # de rede, então nunca fica indisponível nem sem destinatário.
+        # Base fixa no código (BRASKEM_CLIENTES_DEPARA), igual ao padrão
+        # do Risco Sacado Invertido.
         self._clientes = {
             cnpj: dict(dados) for cnpj, dados in BRASKEM_CLIENTES_DEPARA.items()
         }
-        self._available = True
+        # Por cima da base fixa, aplica as taxas editadas manualmente na
+        # tela e salvas no banco SQLite próprio da Braskem — só a taxa é
+        # sobreposta, prazo/spread/e-mails continuam vindo do código.
+        if not self._available:
+            return
+        try:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT cnpj, taxa_pre FROM braskem_taxas_editadas").fetchall()
+            finally:
+                conn.close()
+            for cnpj, taxa in rows:
+                if cnpj in self._clientes and taxa:
+                    self._clientes[cnpj]["taxa_pre"] = str(taxa)
+        except Exception as e:
+            print(f"[braskem_taxas] _try_load falhou: {e}", file=sys.stderr)
+            self._available = False
 
     def save(self):
-        # Persistência apenas em memória (sessão atual) — os dados-base
-        # (Para/Cc, prazo, spread, taxa) vêm de BRASKEM_CLIENTES_DEPARA no
-        # código. Retorna True pois não há mais dependência de rede.
-        return True
+        # Grava só a taxa editada no banco SQLite próprio da Braskem —
+        # não depende de rede compartilhada com outros módulos.
+        return self._available
 
     def all_clientes(self):
         return dict(self._clientes)
@@ -3884,8 +3953,28 @@ class BraskemTaxasData:
         cnpj = _norm_cnpj(cnpj or "")
         if cnpj not in self._clientes:
             return False
-        self._clientes[cnpj]["taxa_pre"] = str(taxa_pre)
-        return self.save()
+        taxa_pre = str(taxa_pre)
+        self._clientes[cnpj]["taxa_pre"] = taxa_pre
+        if not self._available:
+            self._ensure_schema()
+        if not self._available:
+            return False
+        try:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO braskem_taxas_editadas (cnpj, taxa_pre, atualizado_em)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(cnpj) DO UPDATE SET
+                        taxa_pre=excluded.taxa_pre, atualizado_em=excluded.atualizado_em
+                """, (cnpj, taxa_pre, datetime.now().isoformat(timespec="seconds")))
+                conn.commit()
+            finally:
+                conn.close()
+            return True
+        except Exception as e:
+            print(f"[braskem_taxas] set_taxa falhou: {e}", file=sys.stderr)
+            return False
 
     def importar_planilha(self, path):
         """Importa/atualiza clientes a partir da planilha padrão de
@@ -3957,9 +4046,12 @@ class BraskemTaxasData:
 
 
 class BraskemHistoricoData:
-    """Histórico de notas enviadas para a Braskem. Diferente do histórico
-    de Invertido, aqui não existem alertas nem notas recusadas — apenas
-    as notas efetivamente enviadas, uma linha por nota."""
+    """Histórico de notas enviadas para a Braskem — uma linha por nota
+    (notas_enviadas), agrupadas por "envio" (uma confirmação de envio =
+    um cliente + as notas daquele lote, tabela `envios`). Enviar é uma
+    coisa, pagar é outra: cada envio nasce com status 'pendente' e só
+    sai desse estado quando alguém confirma manualmente no alerta de
+    cobrança (ver `listar_envios_para_alerta` / `marcar_pagamento`)."""
 
     _instance = None
 
@@ -4008,10 +4100,35 @@ class BraskemHistoricoData:
                 "CREATE INDEX IF NOT EXISTS idx_bk_dia ON notas_enviadas(data_dia)")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_bk_cliente ON notas_enviadas(cliente)")
+            # Coluna nova (envio_id) numa base que já existia antes desse
+            # recurso: ALTER TABLE ADD COLUMN não tem "IF NOT EXISTS" no
+            # SQLite, então checa via PRAGMA antes de tentar adicionar.
+            cols_existentes = {row[1] for row in
+                                conn.execute("PRAGMA table_info(notas_enviadas)").fetchall()}
+            if "envio_id" not in cols_existentes:
+                conn.execute("ALTER TABLE notas_enviadas ADD COLUMN envio_id INTEGER")
+            conn.execute("""CREATE TABLE IF NOT EXISTS envios (
+                                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                                cliente           TEXT NOT NULL,
+                                cnpj_sacado       TEXT,
+                                valor_total       TEXT,
+                                qtd_notas         INTEGER,
+                                enviado_em        TEXT NOT NULL,
+                                status            TEXT NOT NULL DEFAULT 'pendente',
+                                motivo_nao_pago   TEXT,
+                                pago_em           TEXT,
+                                proximo_alerta_em TEXT,
+                                usuario           TEXT
+                            )""")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bk_env_status ON envios(status)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bk_env_alerta ON envios(proximo_alerta_em)")
             conn.commit()
             conn.close()
             self._available = True
-        except Exception:
+        except Exception as e:
+            print(f"[braskem_historico] _ensure_schema falhou: {e}", file=sys.stderr)
             self._available = False
 
     def is_available(self):
@@ -4023,32 +4140,60 @@ class BraskemHistoricoData:
             return True
         now = datetime.now()
         usuario = _current_username()
-        payload = [
-            (cliente, cnpj_sacado, n.get("nf"), str(n.get("valor")),
-             n.get("data_vencimento"), n.get("prazo_dias"),
-             str(spread) if spread is not None else None,
-             now.isoformat(timespec="seconds"), now.date().isoformat(),
-             usuario, arquivo_origem)
-            for n in notas
-        ]
+
         if not self._network_reachable():
             self._available = False
+            payload = [
+                (cliente, cnpj_sacado, n.get("nf"), str(n.get("valor")),
+                 n.get("data_vencimento"), n.get("prazo_dias"),
+                 str(spread) if spread is not None else None,
+                 now.isoformat(timespec="seconds"), now.date().isoformat(),
+                 usuario, arquivo_origem)
+                for n in notas
+            ]
             self._queue_local(payload)
             return False
         try:
+            valor_total = sum(
+                (_valor_to_decimal(n.get("valor")) for n in notas), Decimal("0"))
+            prox_alerta = (now + timedelta(minutes=BRASKEM_ALERTA_PRIMEIRA_ESPERA_MIN))
             conn = self._connect()
+            cur = conn.execute(
+                """INSERT INTO envios
+                   (cliente, cnpj_sacado, valor_total, qtd_notas, enviado_em,
+                    status, proximo_alerta_em, usuario)
+                   VALUES (?,?,?,?,?, 'pendente', ?, ?)""",
+                (cliente, cnpj_sacado, str(valor_total), len(notas),
+                 now.isoformat(timespec="seconds"),
+                 prox_alerta.isoformat(timespec="seconds"), usuario))
+            envio_id = cur.lastrowid
             conn.executemany(
                 """INSERT INTO notas_enviadas
                    (cliente, cnpj_sacado, nf, valor, data_vencimento,
                     prazo_dias, spread, data_hora, data_dia, usuario,
-                    arquivo_origem)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""", payload)
+                    arquivo_origem, envio_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(cliente, cnpj_sacado, n.get("nf"), str(n.get("valor")),
+                  n.get("data_vencimento"), n.get("prazo_dias"),
+                  str(spread) if spread is not None else None,
+                  now.isoformat(timespec="seconds"), now.date().isoformat(),
+                  usuario, arquivo_origem, envio_id)
+                 for n in notas])
             conn.commit()
             conn.close()
             self._available = True
             return True
-        except Exception:
+        except Exception as e:
+            print(f"[braskem_historico] registrar_notas falhou: {e}", file=sys.stderr)
             self._available = False
+            payload = [
+                (cliente, cnpj_sacado, n.get("nf"), str(n.get("valor")),
+                 n.get("data_vencimento"), n.get("prazo_dias"),
+                 str(spread) if spread is not None else None,
+                 now.isoformat(timespec="seconds"), now.date().isoformat(),
+                 usuario, arquivo_origem)
+                for n in notas
+            ]
             self._queue_local(payload)
             return False
 
@@ -4068,32 +4213,93 @@ class BraskemHistoricoData:
             conn = self._connect()
             clauses, params = [], []
             if data_de:
-                clauses.append("data_dia >= ?"); params.append(data_de)
+                clauses.append("n.data_dia >= ?"); params.append(data_de)
             if data_ate:
-                clauses.append("data_dia <= ?"); params.append(data_ate)
+                clauses.append("n.data_dia <= ?"); params.append(data_ate)
             if cliente:
                 ph = ",".join(["?"] * len(cliente))
-                clauses.append(f"cliente IN ({ph})")
+                clauses.append(f"n.cliente IN ({ph})")
                 params.extend(cliente)
             if busca:
                 b = f"%{busca.strip()}%"
-                clauses.append("(cnpj_sacado LIKE ? OR nf LIKE ?)")
+                clauses.append("(n.cnpj_sacado LIKE ? OR n.nf LIKE ?)")
                 params.extend([b, b])
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
             cur = conn.execute(
-                f"""SELECT id, cliente, cnpj_sacado, nf, valor,
-                           data_vencimento, prazo_dias, spread, data_hora,
-                           data_dia, usuario, arquivo_origem
-                    FROM notas_enviadas {where}
-                    ORDER BY data_hora DESC""", params)
+                f"""SELECT n.id, n.cliente, n.cnpj_sacado, n.nf, n.valor,
+                           n.data_vencimento, n.prazo_dias, n.spread, n.data_hora,
+                           n.data_dia, n.usuario, n.arquivo_origem,
+                           e.status, e.motivo_nao_pago, e.pago_em
+                    FROM notas_enviadas n
+                    LEFT JOIN envios e ON e.id = n.envio_id
+                    {where}
+                    ORDER BY n.data_hora DESC""", params)
             cols = ["id", "cliente", "cnpj_sacado", "nf", "valor",
                     "data_vencimento", "prazo_dias", "spread", "data_hora",
-                    "data_dia", "usuario", "arquivo_origem"]
+                    "data_dia", "usuario", "arquivo_origem",
+                    "status_pagamento", "motivo_nao_pago", "pago_em"]
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
             conn.close()
             return rows
         except Exception:
             return []
+
+    def listar_envios_para_alerta(self):
+        """Envios ainda não pagos cujo próximo alerta já venceu — é o
+        que alimenta o popup de cobrança de pagamento."""
+        if not self._network_reachable():
+            return []
+        try:
+            conn = self._connect()
+            now = datetime.now().isoformat(timespec="seconds")
+            cur = conn.execute(
+                """SELECT id, cliente, cnpj_sacado, valor_total, qtd_notas,
+                          enviado_em, status, motivo_nao_pago
+                   FROM envios
+                   WHERE status != 'pago' AND proximo_alerta_em IS NOT NULL
+                         AND proximo_alerta_em <= ?
+                   ORDER BY enviado_em ASC""", (now,))
+            cols = ["id", "cliente", "cnpj_sacado", "valor_total", "qtd_notas",
+                    "enviado_em", "status", "motivo_nao_pago"]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            conn.close()
+            return rows
+        except Exception:
+            return []
+
+    def marcar_pagamento(self, envio_ids, acao, motivo=None):
+        """acao: 'pago' (para de alertar), 'nao_pago' (grava motivo e
+        volta a alertar em 30 min) ou 'adiar' (não muda o status, só some
+        e volta em 30 min — usado quando ninguém respondeu ainda)."""
+        if not envio_ids or not self._network_reachable():
+            return False
+        now = datetime.now()
+        try:
+            conn = self._connect()
+            for eid in envio_ids:
+                if acao == "pago":
+                    conn.execute(
+                        """UPDATE envios SET status='pago', pago_em=?,
+                           proximo_alerta_em=NULL WHERE id=?""",
+                        (now.isoformat(timespec="seconds"), eid))
+                elif acao == "nao_pago":
+                    prox = now + timedelta(minutes=BRASKEM_ALERTA_RECORRENCIA_MIN)
+                    conn.execute(
+                        """UPDATE envios SET status='nao_pago', motivo_nao_pago=?,
+                           proximo_alerta_em=? WHERE id=?""",
+                        (motivo or "", prox.isoformat(timespec="seconds"), eid))
+                else:  # adiar
+                    prox = now + timedelta(minutes=BRASKEM_ALERTA_RECORRENCIA_MIN)
+                    conn.execute(
+                        """UPDATE envios SET proximo_alerta_em=?
+                           WHERE id=? AND status != 'pago'""",
+                        (prox.isoformat(timespec="seconds"), eid))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"[braskem_historico] marcar_pagamento falhou: {e}", file=sys.stderr)
+            return False
 
 
 # ─── Histórico de Operações (Risco Sacado Invertido) ───────────────────────
@@ -7963,18 +8169,26 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
     def _render_spread_medio(self, parent):
         """Janela minimalista com o spread médio das operações atualmente
         exibidas: sem filtro aplicado, é a média de todo o histórico; com
-        filtro, é a média apenas do resultado filtrado. Operações sem
-        spread gravado (confirmadas antes deste recurso, ou onde o
-        cálculo falhou) não entram na média."""
-        spreads = []
+        filtro, é a média apenas do resultado filtrado. Ponderada pelo
+        montante de cada operação (não é média simples entre os spreads),
+        já que uma operação de 1MM deve pesar mais que uma de 100k.
+        Operações sem spread gravado (confirmadas antes deste recurso, ou
+        onde o cálculo falhou) não entram na média."""
+        soma_ponderada = Decimal("0")
+        soma_montante = Decimal("0")
+        n_considerados = 0
         for r in self._rows:
             sp = r.get("spread")
             if not sp:
                 continue
             try:
-                spreads.append(Decimal(str(sp).replace(",", ".")))
+                sp_dec = Decimal(str(sp).replace(",", "."))
+                montante = _valor_to_decimal(r["montante_total"])
             except Exception:
                 continue
+            soma_ponderada += sp_dec * montante
+            soma_montante += montante
+            n_considerados += 1
 
         card = card_frame(parent)
         card.pack(fill="x", pady=(0, 16))
@@ -7983,16 +8197,16 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
         top = tk.Frame(pad, bg=C["surface"])
         top.pack(fill="x")
-        tk.Label(top, text="Spread médio", bg=C["surface"], fg=C["ink_faint"],
+        tk.Label(top, text="Spread médio ponderado", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 8)).pack(side="left")
         escopo = "todas as operações" if not (self._filtro_de or self._filtro_ate) else "período filtrado"
         tk.Label(top, text=f"  ·  {escopo}", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 7)).pack(side="left")
 
-        if spreads:
-            media = (sum(spreads) / len(spreads)).quantize(Decimal("0.0001"))
+        if soma_montante:
+            media = (soma_ponderada / soma_montante).quantize(Decimal("0.0001"))
             val_txt = f"{media} %"
-            sub_txt = f"com base em {len(spreads)} de {len(self._rows)} operação(ões)"
+            sub_txt = f"ponderada por montante · com base em {n_considerados} de {len(self._rows)} operação(ões)"
             color = C["ok"]
         else:
             val_txt = "—"
@@ -8015,13 +8229,16 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         for r in self._rows:
             d = r["data_dia"]
             por_dia.setdefault(d, {"montante": Decimal("0"), "liquido": Decimal("0"),
-                                   "spreads": []})
-            por_dia[d]["montante"] += _valor_to_decimal(r["montante_total"])
+                                   "spread_pond": Decimal("0"), "spread_peso": Decimal("0")})
+            montante_r = _valor_to_decimal(r["montante_total"])
+            por_dia[d]["montante"] += montante_r
             por_dia[d]["liquido"] += _valor_to_decimal(r["liquido_total"])
             sp = r.get("spread")
             if sp:
                 try:
-                    por_dia[d]["spreads"].append(Decimal(str(sp).replace(",", ".")))
+                    sp_dec = Decimal(str(sp).replace(",", "."))
+                    por_dia[d]["spread_pond"] += sp_dec * montante_r
+                    por_dia[d]["spread_peso"] += montante_r
                 except Exception:
                     pass
         dias_ord = sorted(por_dia.keys())
@@ -8113,11 +8330,11 @@ class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         else:
             escopo = "todas as operações" if not (self._filtro_de or self._filtro_ate) \
                 else "período filtrado"
-            self._chart1_title_lbl.configure(text=f"Spread médio por dia — {escopo}")
-            dias_com_spread = [d for d in dias_ord if por_dia[d]["spreads"]]
+            self._chart1_title_lbl.configure(text=f"Spread médio por dia (ponderado) — {escopo}")
+            dias_com_spread = [d for d in dias_ord if por_dia[d]["spread_peso"]]
             labels_sp = [_hist_fmt_dia(d)[:5] for d in dias_com_spread]
             serie_spread = [
-                float(sum(por_dia[d]["spreads"]) / len(por_dia[d]["spreads"]))
+                float(por_dia[d]["spread_pond"] / por_dia[d]["spread_peso"])
                 for d in dias_com_spread]
             self._chart1.set_data(
                 labels_sp, [serie_spread], [C["warn"]], legend=["Spread médio"],
@@ -8845,7 +9062,7 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
             try:
                 prazo_max_i = int(float(prazo_max))
                 for n in group["notas"]:
-                    p = _invertido_parse_prazo_days(n.get("prazo"))
+                    p = _braskem_prazo_dias(n)
                     if p is not None and p > prazo_max_i:
                         notas_excedentes += 1
             except Exception:
@@ -8938,9 +9155,7 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
         taxa_str = cli.get("taxa_pre") or ""
         notas_email = []
         for n in group["notas"]:
-            prazo_dias = _invertido_parse_prazo_days(n.get("prazo"))
-            valor_raw = n.get("valor_raw", Decimal("0"))
-            valor_liquido = None
+            prazo_dias = _braskem_prazo_dias(n)
             if taxa_str and prazo_dias is not None:
                 try:
                     valor_liquido = calcular_valor_liquido(valor_raw, taxa_str, prazo_dias)
@@ -8986,7 +9201,7 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
         taxa_str = cli.get("taxa_pre") or ""
         notas_hist = []
         for n in group["notas"]:
-            prazo_dias = _invertido_parse_prazo_days(n.get("prazo"))
+            prazo_dias = _braskem_prazo_dias(n)
             valor_raw = n.get("valor_raw", Decimal("0"))
             notas_hist.append({
                 "nf": n.get("nf"), "valor": valor_raw,
@@ -9117,7 +9332,7 @@ class HistoricoBraskemFrame(tk.Frame, ThreadSafeUIMixin):
         hdr = tk.Frame(pad, bg=C["surface2"])
         hdr.pack(fill="x")
         cols = [("Cliente", 3), ("NF", 1), ("Valor", 2), ("Vencimento", 1),
-                ("Prazo", 1), ("Spread", 1), ("Data envio", 1)]
+                ("Pagamento", 1), ("Spread", 1), ("Data envio", 1)]
         for i, (txt, wgt) in enumerate(cols):
             hdr.columnconfigure(i, weight=wgt, uniform="btbl")
             tk.Label(hdr, text=txt, bg=C["surface2"], fg=C["ink_faint"],
@@ -9130,6 +9345,10 @@ class HistoricoBraskemFrame(tk.Frame, ThreadSafeUIMixin):
                      anchor="w", padx=8, pady=20)
             return
 
+        status_cfg = {
+            "pago":     ("✓ Pago", C["ok"]),
+            "nao_pago": ("✗ Não pago", C["err"]),
+        }
         for r in rows:
             row_wrap = tk.Frame(pad, bg=C["bg"])
             row_wrap.pack(fill="x")
@@ -9138,19 +9357,27 @@ class HistoricoBraskemFrame(tk.Frame, ThreadSafeUIMixin):
             line.pack(fill="x")
             for i, (_t, wgt) in enumerate(cols):
                 line.columnconfigure(i, weight=wgt, uniform="btbl")
+            pag_txt, pag_cor = status_cfg.get(
+                r.get("status_pagamento"), ("Pendente", C["warn"]))
+            if r.get("status_pagamento") == "nao_pago" and r.get("motivo_nao_pago"):
+                motivo_curto = str(r["motivo_nao_pago"]).strip()
+                if len(motivo_curto) > 40:
+                    motivo_curto = motivo_curto[:37] + "…"
+                pag_txt = f"{pag_txt} ({motivo_curto})"
             vals = [
-                r.get("cliente") or "—",
-                r.get("nf") or "—",
-                _fmt_brl_from_raw(r.get("valor") or "0"),
-                _fmt_date_short(r.get("data_vencimento")),
-                f"{r['prazo_dias']}d" if r.get("prazo_dias") is not None else "—",
-                f"{r['spread']}%" if r.get("spread") else "—",
-                _hist_fmt_dia(r.get("data_dia") or ""),
+                (r.get("cliente") or "—", C["ink"]),
+                (r.get("nf") or "—", C["ink"]),
+                (_fmt_brl_from_raw(r.get("valor") or "0"), C["ink"]),
+                (_fmt_date_short(r.get("data_vencimento")), C["ink"]),
+                (pag_txt, pag_cor),
+                (f"{r['spread']}%" if r.get("spread") else "—", C["ink"]),
+                (_hist_fmt_dia(r.get("data_dia") or ""), C["ink"]),
             ]
-            for i, v in enumerate(vals):
-                tk.Label(line, text=v, bg=C["surface"], fg=C["ink"],
-                         font=("Segoe UI", 9), anchor="w", wraplength=140,
-                         justify="left").grid(row=0, column=i, sticky="new", padx=8, pady=8)
+            for i, (v, cor) in enumerate(vals):
+                lbl = tk.Label(line, text=v, bg=C["surface"], fg=cor,
+                               font=("Segoe UI", 9, "bold" if i == 4 else "normal"),
+                               anchor="w", wraplength=140, justify="left")
+                lbl.grid(row=0, column=i, sticky="new", padx=8, pady=8)
 
 
 class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
@@ -12719,6 +12946,155 @@ class LigacoesFrame(tk.Frame):
         card(2, "VS. PERÍODO ANTERIOR", cresc_txt, cor)
 
 
+def _fmt_tempo_decorrido(iso_str) -> str:
+    """'há 1h32min' / 'há 12min' a partir de um datetime ISO."""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+    except Exception:
+        return "—"
+    delta = datetime.now() - dt
+    total_min = max(int(delta.total_seconds() // 60), 0)
+    h, m = divmod(total_min, 60)
+    return f"há {h}h{m:02d}min" if h else f"há {m}min"
+
+
+def _open_braskem_pagamento_alerta(root, envios):
+    """Popup de confirmação de pagamento Braskem: uma ou mais operações
+    já enviadas, aguardando confirmação de que o crédito realmente caiu
+    (enviar é uma coisa, pagar é outra). Cada operação pode ser marcada
+    como paga (para de alertar) ou não paga (com motivo — volta a
+    alertar em 30 min). O que ficar sem resposta some ao fechar o popup
+    e volta a alertar em 30 min, sem precisar de ação nenhuma."""
+    data = BraskemHistoricoData.get()
+    dlg = tk.Toplevel(root)
+    dlg.title("Confirmação de pagamento — Braskem")
+    dlg.configure(bg=C["surface"])
+    largura, altura = 560, min(180 + len(envios) * 92, 680)
+    dlg.geometry(f"{largura}x{altura}")
+    dlg.resizable(False, True)
+    dlg.grab_set()
+    dlg.attributes("-topmost", True)
+
+    resolvidos = set()
+    checks = {}  # envio_id -> BooleanVar
+
+    def _pendentes_ids():
+        return [e["id"] for e in envios if e["id"] not in resolvidos]
+
+    def _selecionados_ids():
+        return [eid for eid, v in checks.items()
+                if v.get() and eid not in resolvidos]
+
+    def _ao_fechar():
+        restantes = _pendentes_ids()
+        if restantes:
+            data.marcar_pagamento(restantes, "adiar")
+        dlg.destroy()
+
+    dlg.protocol("WM_DELETE_WINDOW", _ao_fechar)
+
+    pad = tk.Frame(dlg, bg=C["surface"], padx=20, pady=18)
+    pad.pack(fill="both", expand=True)
+
+    tk.Label(pad, text="Confirmar pagamento", bg=C["surface"], fg=C["ink"],
+              font=("Segoe UI", 13, "bold")).pack(anchor="w")
+    tk.Label(pad, text=(f"{len(envios)} operação(ões) da Braskem enviada(s) — "
+                        "o crédito já caiu?"),
+              bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9)).pack(
+                  anchor="w", pady=(2, 12))
+
+    lista_sf = ScrollableFrame(pad, bg=C["surface"])
+    lista_sf.pack(fill="both", expand=True)
+    lista = tk.Frame(lista_sf.inner, bg=C["surface"])
+    lista.pack(fill="both", expand=True)
+
+    linhas_frames = {}
+
+    def _render_lista():
+        for w in lista.winfo_children():
+            w.destroy()
+        pendentes = [e for e in envios if e["id"] not in resolvidos]
+        if not pendentes:
+            tk.Label(lista, text="Tudo confirmado por aqui. ✓", bg=C["surface"],
+                      fg=C["ok"], font=("Segoe UI", 9, "bold")).pack(
+                          anchor="w", pady=12)
+            dlg.after(600, dlg.destroy)
+            return
+        for env in pendentes:
+            eid = env["id"]
+            card = card_frame(lista)
+            card.pack(fill="x", pady=(0, 8))
+            body = tk.Frame(card, bg=C["surface"], padx=12, pady=10)
+            body.pack(fill="both", expand=True)
+
+            var = checks.setdefault(eid, tk.BooleanVar(value=False))
+            top = tk.Frame(body, bg=C["surface"])
+            top.pack(fill="x")
+            cb = tk.Checkbutton(
+                top, variable=var, bg=C["surface"], fg=C["ink"],
+                activebackground=C["surface"], selectcolor=C["surface2"],
+                highlightthickness=0, bd=0, cursor="hand2")
+            cb.pack(side="left")
+            info = tk.Frame(top, bg=C["surface"])
+            info.pack(side="left", fill="x", expand=True, padx=(6, 0))
+            tk.Label(info, text=f"{env['cliente']}  ·  "
+                                 f"{_fmt_brl_from_raw(env.get('valor_total') or '0')}",
+                      bg=C["surface"], fg=C["ink"], font=("Segoe UI", 10, "bold"),
+                      anchor="w").pack(anchor="w")
+            qtd = env.get("qtd_notas") or 0
+            sub_txt = f"{qtd} nota(s)  ·  enviado {_fmt_tempo_decorrido(env.get('enviado_em'))}"
+            if env.get("status") == "nao_pago" and env.get("motivo_nao_pago"):
+                sub_txt += f"  ·  último motivo: {env['motivo_nao_pago']}"
+            tk.Label(info, text=sub_txt, bg=C["surface"], fg=C["ink_faint"],
+                      font=("Segoe UI", 8)).pack(anchor="w")
+            linhas_frames[eid] = card
+
+    _render_lista()
+
+    make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(12, 10))
+
+    motivo_row = tk.Frame(pad, bg=C["surface"])
+    motivo_row.pack(fill="x")
+    tk.Label(motivo_row, text="MOTIVO (para marcar como não pago)",
+              bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(
+                  anchor="w")
+    motivo_var = tk.StringVar()
+    motivo_entry = styled_entry(motivo_row, textvariable=motivo_var, width=40)
+    motivo_entry.pack(fill="x", pady=(4, 0))
+
+    err_lbl = tk.Label(pad, text="", bg=C["surface"], fg=C["err"], font=("Segoe UI", 8))
+    err_lbl.pack(anchor="w", pady=(4, 0))
+
+    def _marcar(acao):
+        sel = _selecionados_ids()
+        if not sel:
+            err_lbl.configure(text="Selecione ao menos uma operação.")
+            return
+        motivo = motivo_var.get().strip()
+        if acao == "nao_pago" and not motivo:
+            err_lbl.configure(text="Informe o motivo para marcar como não pago.")
+            return
+        ok = data.marcar_pagamento(sel, acao, motivo=motivo if acao == "nao_pago" else None)
+        if not ok:
+            err_lbl.configure(text="Sem conexão com a rede agora — tente novamente.")
+            return
+        err_lbl.configure(text="")
+        resolvidos.update(sel)
+        for eid in sel:
+            checks.pop(eid, None)
+        motivo_var.set("")
+        _render_lista()
+
+    btn_row = tk.Frame(pad, bg=C["surface"])
+    btn_row.pack(fill="x", pady=(12, 0))
+    styled_button(btn_row, "Adiar 30 min", _ao_fechar).pack(side="left")
+    styled_button(btn_row, "Marcar não pago", lambda: _marcar("nao_pago"),
+                  danger=True).pack(side="right", padx=(6, 0))
+    styled_button(btn_row, "Marcar como pago", lambda: _marcar("pago"),
+                  accent=True).pack(side="right")
+    return dlg
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -12791,6 +13167,21 @@ class App(tk.Tk):
 
         self.show_frame("Home")
         self.after(120, self._apply_window_chrome)
+        self._braskem_alerta_aberto = False
+        self.after(5_000, self._check_braskem_pagamentos)
+
+    def _check_braskem_pagamentos(self):
+        if not self._braskem_alerta_aberto:
+            try:
+                envios = BraskemHistoricoData.get().listar_envios_para_alerta()
+            except Exception:
+                envios = []
+            if envios:
+                self._braskem_alerta_aberto = True
+                dlg = _open_braskem_pagamento_alerta(self, envios)
+                self.wait_window(dlg)
+                self._braskem_alerta_aberto = False
+        self.after(BRASKEM_ALERTA_CHECK_MS, self._check_braskem_pagamentos)
 
     def _apply_window_chrome(self):
         apply_modern_window_chrome(self)
