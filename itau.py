@@ -924,7 +924,7 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
         ],
         "cc": [
             "renato.alves-antonio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
-            "alana.ferreira@mailer.com.br", "allan.palotti-silva@mailer.com.br",
+            "allan.palotti-silva@mailer.com.br",
             "isadora.silv@mailer.com.br", "simone.lavinio@itau-unibanco.com.br",
             "mesarecebiveis.mm@itaubba.com", "LiberacaoMMMN@correio.itau.com.br",
             "silvia.alm@mailer.com.br", "julia.garai-andrade@mailer.com.br",
@@ -940,7 +940,7 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
         "cc": [
             "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
             "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
-            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
+            "mesarecebiveis.mm@itaubba.com",
             "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
             "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
             "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
@@ -952,7 +952,7 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
         "cc": [
             "simone.lavinio@itau-unibanco.com.br", "milena.oshiro@mailer.com.br",
             "julia.garai-andrade@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
-            "alana.ferreira@mailer.com.br", "caio.farinha@mailer.com.br",
+            "caio.farinha@mailer.com.br",
             "allan.palotti-silva@mailer.com.br", "LiberacaoMMMN@correio.itau.com.br",
             "rosemeire-fatima.santos@itau-unibanco.com.br", "mesarecebiveis.mm@itaubba.com",
             "renato.alves-antonio@itau-unibanco.com.br", "silvia.alm@mailer.com.br",
@@ -968,7 +968,7 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
         "cc": [
             "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
             "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
-            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
+            "mesarecebiveis.mm@itaubba.com",
             "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
             "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
             "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
@@ -983,7 +983,7 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
         "cc": [
             "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
             "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
-            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
+            "mesarecebiveis.mm@itaubba.com",
             "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
             "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
             "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
@@ -3651,6 +3651,8 @@ BRASKEM_TAXAS_DB_PATH = os.path.join(
     os.path.dirname(SHARED_TAXAS_PATH), "braskem_taxas.db")
 BRASKEM_DB_PATH = os.path.join(
     os.path.dirname(SHARED_TAXAS_PATH), "braskem_operacoes.db")
+BRASKEM_DB_PATH_LOCAL_FALLBACK = os.path.join(
+    app_base_dir(), "braskem_operacoes_local.db")
 BRASKEM_PENDING_LOCAL_PATH = os.path.join(
     tempfile.gettempdir(), "braskem_pendente_local.jsonl")
 # Confirmação de pagamento: primeiro alerta 1h30 após o envio; se a
@@ -4071,15 +4073,21 @@ class BraskemHistoricoData:
         except Exception:
             return False
 
+    def _db_path(self):
+        # Prefere sempre a base de rede (compartilhada com o resto da
+        # mesa); se a rede não estiver acessível (ex.: ambiente de
+        # teste sem rede), cai para uma base local — assim o fluxo de
+        # envio/histórico/alerta de pagamento continua funcionando
+        # mesmo offline, sem travar em "sem conexão".
+        return BRASKEM_DB_PATH if self._network_reachable() else BRASKEM_DB_PATH_LOCAL_FALLBACK
+
     def _connect(self):
-        conn = sqlite3.connect(BRASKEM_DB_PATH, timeout=20)
+        path = self._db_path()
+        conn = sqlite3.connect(path, timeout=20)
         conn.execute("PRAGMA journal_mode=DELETE")
         return conn
 
     def _ensure_schema(self):
-        if not self._network_reachable():
-            self._available = False
-            return
         try:
             conn = self._connect()
             conn.execute("""CREATE TABLE IF NOT EXISTS notas_enviadas (
@@ -4140,19 +4148,6 @@ class BraskemHistoricoData:
             return True
         now = datetime.now()
         usuario = _current_username()
-
-        if not self._network_reachable():
-            self._available = False
-            payload = [
-                (cliente, cnpj_sacado, n.get("nf"), str(n.get("valor")),
-                 n.get("data_vencimento"), n.get("prazo_dias"),
-                 str(spread) if spread is not None else None,
-                 now.isoformat(timespec="seconds"), now.date().isoformat(),
-                 usuario, arquivo_origem)
-                for n in notas
-            ]
-            self._queue_local(payload)
-            return False
         try:
             valor_total = sum(
                 (_valor_to_decimal(n.get("valor")) for n in notas), Decimal("0"))
@@ -4207,8 +4202,6 @@ class BraskemHistoricoData:
 
     def listar_notas(self, *, cliente=None, data_de=None, data_ate=None,
                       busca=None):
-        if not self._network_reachable():
-            return []
         try:
             conn = self._connect()
             clauses, params = [], []
@@ -4247,8 +4240,6 @@ class BraskemHistoricoData:
     def listar_envios_para_alerta(self):
         """Envios ainda não pagos cujo próximo alerta já venceu — é o
         que alimenta o popup de cobrança de pagamento."""
-        if not self._network_reachable():
-            return []
         try:
             conn = self._connect()
             now = datetime.now().isoformat(timespec="seconds")
@@ -4271,7 +4262,7 @@ class BraskemHistoricoData:
         """acao: 'pago' (para de alertar), 'nao_pago' (grava motivo e
         volta a alertar em 30 min) ou 'adiar' (não muda o status, só some
         e volta em 30 min — usado quando ninguém respondeu ainda)."""
-        if not envio_ids or not self._network_reachable():
+        if not envio_ids:
             return False
         now = datetime.now()
         try:
@@ -9156,6 +9147,8 @@ class AnalisarBraskemFrame(tk.Frame, ThreadSafeUIMixin):
         notas_email = []
         for n in group["notas"]:
             prazo_dias = _braskem_prazo_dias(n)
+            valor_raw = n.get("valor_raw", Decimal("0"))
+            valor_liquido = None
             if taxa_str and prazo_dias is not None:
                 try:
                     valor_liquido = calcular_valor_liquido(valor_raw, taxa_str, prazo_dias)
@@ -12964,16 +12957,23 @@ def _open_braskem_pagamento_alerta(root, envios):
     (enviar é uma coisa, pagar é outra). Cada operação pode ser marcada
     como paga (para de alertar) ou não paga (com motivo — volta a
     alertar em 30 min). O que ficar sem resposta some ao fechar o popup
-    e volta a alertar em 30 min, sem precisar de ação nenhuma."""
+    e volta a alertar em 30 min, sem precisar de ação nenhuma.
+
+    O tamanho da janela não é chutado por uma conta de "tantos px por
+    item" (isso quebra fácil com nome de cliente comprido, motivo
+    aparecendo embaixo do nome, etc.) — a lista de operações tem uma
+    altura FIXA e rolável (não estica com a quantidade de clientes), e
+    o resto (cabeçalho, motivo, botões) é medido de verdade pelo
+    próprio Tk depois de montado, então cabeçalho e botões nunca ficam
+    escondidos, não importa se é 1 ou 20 clientes."""
     data = BraskemHistoricoData.get()
     dlg = tk.Toplevel(root)
     dlg.title("Confirmação de pagamento — Braskem")
     dlg.configure(bg=C["surface"])
-    largura, altura = 560, min(180 + len(envios) * 92, 680)
-    dlg.geometry(f"{largura}x{altura}")
-    dlg.resizable(False, True)
+    dlg.resizable(True, True)
     dlg.grab_set()
     dlg.attributes("-topmost", True)
+    dlg.withdraw()  # só mostra depois de dimensionado, evita "pulo" visual
 
     resolvidos = set()
     checks = {}  # envio_id -> BooleanVar
@@ -12993,6 +12993,9 @@ def _open_braskem_pagamento_alerta(root, envios):
 
     dlg.protocol("WM_DELETE_WINDOW", _ao_fechar)
 
+    LARGURA = 560
+    ALTURA_LISTA_MAX = 320  # teto — acima disso vira scroll interno
+
     pad = tk.Frame(dlg, bg=C["surface"], padx=20, pady=18)
     pad.pack(fill="both", expand=True)
 
@@ -13004,11 +13007,9 @@ def _open_braskem_pagamento_alerta(root, envios):
                   anchor="w", pady=(2, 12))
 
     lista_sf = ScrollableFrame(pad, bg=C["surface"])
-    lista_sf.pack(fill="both", expand=True)
+    lista_sf.pack(fill="x", expand=False)
     lista = tk.Frame(lista_sf.inner, bg=C["surface"])
     lista.pack(fill="both", expand=True)
-
-    linhas_frames = {}
 
     def _render_lista():
         for w in lista.winfo_children():
@@ -13034,22 +13035,32 @@ def _open_braskem_pagamento_alerta(root, envios):
                 top, variable=var, bg=C["surface"], fg=C["ink"],
                 activebackground=C["surface"], selectcolor=C["surface2"],
                 highlightthickness=0, bd=0, cursor="hand2")
-            cb.pack(side="left")
+            cb.pack(side="left", anchor="n")
             info = tk.Frame(top, bg=C["surface"])
             info.pack(side="left", fill="x", expand=True, padx=(6, 0))
             tk.Label(info, text=f"{env['cliente']}  ·  "
                                  f"{_fmt_brl_from_raw(env.get('valor_total') or '0')}",
                       bg=C["surface"], fg=C["ink"], font=("Segoe UI", 10, "bold"),
-                      anchor="w").pack(anchor="w")
+                      anchor="w", wraplength=LARGURA - 110,
+                      justify="left").pack(anchor="w", fill="x")
             qtd = env.get("qtd_notas") or 0
             sub_txt = f"{qtd} nota(s)  ·  enviado {_fmt_tempo_decorrido(env.get('enviado_em'))}"
             if env.get("status") == "nao_pago" and env.get("motivo_nao_pago"):
                 sub_txt += f"  ·  último motivo: {env['motivo_nao_pago']}"
             tk.Label(info, text=sub_txt, bg=C["surface"], fg=C["ink_faint"],
-                      font=("Segoe UI", 8)).pack(anchor="w")
-            linhas_frames[eid] = card
+                      font=("Segoe UI", 8), anchor="w", wraplength=LARGURA - 110,
+                      justify="left").pack(anchor="w", fill="x")
 
     _render_lista()
+
+    # Mede a altura real que os cards pedem (não estima) e trava a área
+    # nesse tamanho, com teto ALTURA_LISTA_MAX — abaixo disso fica
+    # compacta (1-3 clientes), acima disso vira scroll interno, sem
+    # nunca esticar o popup e empurrar os botões pra fora da tela.
+    dlg.update_idletasks()
+    altura_lista = min(max(lista.winfo_reqheight(), 60), ALTURA_LISTA_MAX)
+    lista_sf.configure(height=altura_lista)
+    lista_sf.pack_propagate(False)
 
     make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(12, 10))
 
@@ -13092,6 +13103,17 @@ def _open_braskem_pagamento_alerta(root, envios):
                   danger=True).pack(side="right", padx=(6, 0))
     styled_button(btn_row, "Marcar como pago", lambda: _marcar("pago"),
                   accent=True).pack(side="right")
+
+    # Mede o tamanho real que o conteúdo pede (cabeçalho + lista travada
+    # em ALTURA_LISTA_MAX + motivo + erro + botões) e só então define a
+    # geometria — sem chute. Cabe na tela mesmo com bordas de janela.
+    dlg.update_idletasks()
+    altura_pedida = pad.winfo_reqheight() + 20
+    tela_h = dlg.winfo_screenheight()
+    altura = max(min(altura_pedida, int(tela_h * 0.85)), 420)
+    dlg.geometry(f"{LARGURA}x{altura}")
+    dlg.minsize(LARGURA, 420)
+    dlg.deiconify()
     return dlg
 
 
