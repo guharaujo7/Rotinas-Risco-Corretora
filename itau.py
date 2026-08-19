@@ -924,7 +924,7 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
         ],
         "cc": [
             "renato.alves-antonio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
-            "allan.palotti-silva@mailer.com.br",
+            "alana.ferreira@mailer.com.br", "allan.palotti-silva@mailer.com.br",
             "isadora.silv@mailer.com.br", "simone.lavinio@itau-unibanco.com.br",
             "mesarecebiveis.mm@itaubba.com", "LiberacaoMMMN@correio.itau.com.br",
             "silvia.alm@mailer.com.br", "julia.garai-andrade@mailer.com.br",
@@ -940,7 +940,7 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
         "cc": [
             "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
             "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
-            "mesarecebiveis.mm@itaubba.com",
+            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
             "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
             "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
             "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
@@ -952,7 +952,7 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
         "cc": [
             "simone.lavinio@itau-unibanco.com.br", "milena.oshiro@mailer.com.br",
             "julia.garai-andrade@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
-            "caio.farinha@mailer.com.br",
+            "alana.ferreira@mailer.com.br", "caio.farinha@mailer.com.br",
             "allan.palotti-silva@mailer.com.br", "LiberacaoMMMN@correio.itau.com.br",
             "rosemeire-fatima.santos@itau-unibanco.com.br", "mesarecebiveis.mm@itaubba.com",
             "renato.alves-antonio@itau-unibanco.com.br", "silvia.alm@mailer.com.br",
@@ -968,7 +968,7 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
         "cc": [
             "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
             "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
-            "mesarecebiveis.mm@itaubba.com",
+            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
             "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
             "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
             "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
@@ -983,7 +983,7 @@ INVERTIDO_EMAILS_POR_CLIENTE = {
         "cc": [
             "simone.lavinio@itau-unibanco.com.br", "rosemeire-fatima.santos@itau-unibanco.com.br",
             "LiberacaoMMMN@correio.itau.com.br", "silvia.alm@mailer.com.br",
-            "mesarecebiveis.mm@itaubba.com",
+            "alana.ferreira@mailer.com.br", "mesarecebiveis.mm@itaubba.com",
             "milena.oshiro@mailer.com.br", "renato.alves-antonio@itau-unibanco.com.br",
             "caio.farinha@mailer.com.br", "julia.garai-andrade@mailer.com.br",
             "isadora.silv@mailer.com.br", "geovana.andrade-silva@mailer.com.br",
@@ -3420,6 +3420,135 @@ class TaxasData:
         return [c for c in cnpjs if c and not self.is_vigente(c)]
 
 
+# ─── Cadastro de clientes novos (Risco Sacado Invertido) ───────────────────
+# Quando uma operação chega de um sacado que ainda não está na lista fixa
+# de clientes mapeados (BPM_CLIENT_DATA), o usuário pode cadastrá-lo pela
+# tela de Detalhes: nome, CNPJ e o link de consulta de limite (mesmo tipo
+# de link já usado para os clientes mapeados — abre a consulta automática
+# de LTC/limite igual aos demais). Taxa e prazo continuam guardados no
+# TaxasData (Depara), que já é genérico por CNPJ. Fica num banco SQLite
+# próprio, na mesma pasta de rede dos demais arquivos do módulo.
+CLIENTES_EXTRA_INVERTIDO_DB_PATH = os.path.join(
+    os.path.dirname(SHARED_TAXAS_PATH), "clientes_extra_invertido.db")
+
+
+class ClientesExtrasInvertidoData:
+    _instance = None
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._available = False
+        self._cache = {}  # cnpj -> {"nome":..., "limite_url":...}
+        self._ensure_schema()
+        self._reload()
+
+    def _network_reachable(self):
+        try:
+            return os.path.isdir(os.path.dirname(CLIENTES_EXTRA_INVERTIDO_DB_PATH))
+        except Exception:
+            return False
+
+    def _connect(self):
+        conn = sqlite3.connect(CLIENTES_EXTRA_INVERTIDO_DB_PATH, timeout=20)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        return conn
+
+    def _ensure_schema(self):
+        if not self._network_reachable():
+            self._available = False
+            return
+        try:
+            conn = self._connect()
+            conn.execute("""CREATE TABLE IF NOT EXISTS clientes_extra (
+                                cnpj           TEXT PRIMARY KEY,
+                                nome           TEXT NOT NULL,
+                                limite_url     TEXT,
+                                criado_em      TEXT,
+                                atualizado_em  TEXT
+                            )""")
+            conn.commit()
+            conn.close()
+            self._available = True
+        except Exception:
+            self._available = False
+
+    def is_available(self):
+        return self._available
+
+    def _reload(self):
+        if not self._network_reachable():
+            self._available = False
+            return
+        try:
+            conn = self._connect()
+            cur = conn.execute("SELECT cnpj, nome, limite_url FROM clientes_extra")
+            self._cache = {row[0]: {"nome": row[1], "limite_url": row[2]}
+                           for row in cur.fetchall()}
+            conn.close()
+            self._available = True
+        except Exception:
+            self._available = False
+
+    def all(self):
+        """cnpj -> {'nome':..., 'limite_url':...}"""
+        return dict(self._cache)
+
+    def by_nome(self):
+        """nome -> {'cnpj':..., 'limite_url':...} (case/trim tolerante via chave normalizada)."""
+        return {v["nome"]: {"cnpj": k, "limite_url": v.get("limite_url")}
+                for k, v in self._cache.items()}
+
+    def get_by_cnpj(self, cnpj):
+        return self._cache.get(only_digits(cnpj or ""))
+
+    def upsert(self, cnpj, nome, limite_url):
+        cnpj = only_digits(cnpj or "")
+        nome = (nome or "").strip()
+        if not cnpj or not nome:
+            return False
+        if not self._network_reachable():
+            self._available = False
+            return False
+        now = datetime.now().isoformat(timespec="seconds")
+        try:
+            conn = self._connect()
+            existente = conn.execute(
+                "SELECT criado_em FROM clientes_extra WHERE cnpj=?", (cnpj,)).fetchone()
+            criado_em = existente[0] if existente else now
+            conn.execute(
+                """INSERT INTO clientes_extra (cnpj, nome, limite_url, criado_em, atualizado_em)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(cnpj) DO UPDATE SET
+                       nome=excluded.nome,
+                       limite_url=excluded.limite_url,
+                       atualizado_em=excluded.atualizado_em""",
+                (cnpj, nome, (limite_url or "").strip(), criado_em, now))
+            conn.commit()
+            conn.close()
+            self._cache[cnpj] = {"nome": nome, "limite_url": (limite_url or "").strip()}
+            self._available = True
+            return True
+        except Exception:
+            self._available = False
+            return False
+
+
+def _limite_extra_cnpjs():
+    try:
+        return set(ClientesExtrasInvertidoData.get().all().keys())
+    except Exception:
+        return set()
+
+
+def _cnpj_mapeado_limite(cnpj):
+    return bool(cnpj) and (cnpj in LIMITE_INVERTIDO_CNPJS or cnpj in _limite_extra_cnpjs())
+
+
 # ─── Curva Spot (DI) — usada no cálculo de Spread por sacado ──────────────
 # Mesmo arquivo de rede usado historicamente na planilha spread.py.
 
@@ -3659,9 +3788,13 @@ BRASKEM_PENDING_LOCAL_PATH = os.path.join(
 # operação não for marcada como paga (ficar "não paga" ou simplesmente
 # adiada sem resposta), o alerta some e volta em 30 min, indefinidamente,
 # até alguém marcar como paga.
-BRASKEM_ALERTA_PRIMEIRA_ESPERA_MIN = 90
-BRASKEM_ALERTA_RECORRENCIA_MIN = 30
-BRASKEM_ALERTA_CHECK_MS = 60_000
+# ── MODO TESTE (temporário) ─────────────────────────────────────────────
+# Valores originais: PRIMEIRA_ESPERA_MIN = 90, RECORRENCIA_MIN = 30.
+# Trocado pra 1 min / 1 min só pra validar o fluxo mais rápido — pediu
+# pra eu voltar ao original depois.
+BRASKEM_ALERTA_PRIMEIRA_ESPERA_MIN = 1
+BRASKEM_ALERTA_RECORRENCIA_MIN = 1
+BRASKEM_ALERTA_CHECK_MS = 15_000
 
 
 def _norm_txt(s):
@@ -6631,7 +6764,7 @@ class OperacoesInvertidoFrame(tk.Frame):
 
     def _taxas_vencidas(self):
         try:
-            return len(TaxasData.get().vencidas(LIMITE_INVERTIDO_CNPJS)) > 0
+            return len(TaxasData.get().vencidas(LIMITE_INVERTIDO_CNPJS | _limite_extra_cnpjs())) > 0
         except Exception:
             return False
 
@@ -9476,7 +9609,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
     def _refresh_taxas_banner(self):
         try:
-            vencidas = TaxasData.get().vencidas(LIMITE_INVERTIDO_CNPJS)
+            vencidas = TaxasData.get().vencidas(LIMITE_INVERTIDO_CNPJS | _limite_extra_cnpjs())
         except Exception:
             vencidas = []
         if vencidas:
@@ -9671,7 +9804,7 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
 
     def _evaluate_group_limite(self, group):
         cnpj = group.get("doc_sacado") or ""
-        if not cnpj or cnpj not in LIMITE_INVERTIDO_CNPJS:
+        if not cnpj or not _cnpj_mapeado_limite(cnpj):
             tem_taxa = bool(cnpj) and TaxasData.get().get_taxa(cnpj) is not None
             if not tem_taxa:
                 return "sem_taxa", "Sem taxa Parametrizada"
@@ -9882,8 +10015,10 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             ).pack(anchor="w")
             foot = tk.Frame(pad, bg=C["surface"])
             foot.pack(fill="x", pady=(16, 0))
-            styled_button(foot, "Fechar", self._close_limite_modal, accent=True, small=True).pack(
-                side="right")
+            styled_button(foot, "Fechar", self._close_limite_modal, small=True).pack(side="right")
+            styled_button(foot, "Cadastrar cliente →",
+                          lambda g=group: (self._close_limite_modal(), self._abrir_cadastro_cliente(g)),
+                          accent=True, small=True).pack(side="right", padx=(0, 8))
             return
 
         if status == "nao_validado":
@@ -9913,8 +10048,10 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
             ).pack(anchor="w")
             foot = tk.Frame(pad, bg=C["surface"])
             foot.pack(fill="x", pady=(16, 0))
-            styled_button(foot, "Fechar", self._close_limite_modal, accent=True, small=True).pack(
-                side="right")
+            styled_button(foot, "Fechar", self._close_limite_modal, small=True).pack(side="right")
+            styled_button(foot, "Cadastrar cliente →",
+                          lambda g=group: (self._close_limite_modal(), self._abrir_cadastro_cliente(g)),
+                          accent=True, small=True).pack(side="right", padx=(0, 8))
             return
 
         mont = group["valor_total"]
@@ -10022,6 +10159,29 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
                       lambda g=group: self._abrir_spread_sacado(g),
                       small=True).pack(side="right", padx=(0, 8))
 
+        cnpj_detalhe = group.get("doc_sacado") or ""
+        tem_taxa = bool(cnpj_detalhe) and TaxasData.get().get_taxa(cnpj_detalhe) is not None
+        tem_limite = _cnpj_mapeado_limite(cnpj_detalhe)
+        precisa_cadastro = bool(cnpj_detalhe) and (not tem_taxa or not tem_limite)
+
+        if precisa_cadastro:
+            faltando = []
+            if not tem_taxa:
+                faltando.append("taxa/prazo")
+            if not tem_limite:
+                faltando.append("consulta de limite")
+            banner = tk.Frame(pad, bg="#3d3520")
+            banner.pack(fill="x", pady=(10, 0))
+            banner_pad = tk.Frame(banner, bg="#3d3520")
+            banner_pad.pack(fill="x", padx=12, pady=8)
+            tk.Label(banner_pad,
+                     text=f"⚠ Cliente novo — sem {' e '.join(faltando)} cadastrados.",
+                     bg="#3d3520", fg=C["warn"], font=("Segoe UI", 8, "bold"),
+                     anchor="w").pack(side="left")
+            styled_button(banner_pad, "Cadastrar cliente →",
+                          lambda g=group: self._abrir_cadastro_cliente(g),
+                          accent=True, small=True).pack(side="right")
+
         self._detail_sub_lbl = tk.Label(
             pad, text="", bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 9))
         self._detail_sub_lbl.pack(anchor="w", pady=(8, 0))
@@ -10057,6 +10217,141 @@ class AnalisarOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
         self._detail_pad = pad
 
         self._render_detalhes_list()
+
+    def _abrir_cadastro_cliente(self, group):
+        """Formulário para parametrizar um cliente novo direto da tela de
+        Detalhes: taxa e prazo (Depara, vencem normalmente todo mês, igual
+        aos demais) e o link de consulta de limite (mesmo tipo de link já
+        usado para os clientes mapeados)."""
+        if getattr(self, "_cadastro_overlay", None) is not None:
+            return
+        cnpj = group.get("doc_sacado") or ""
+        if not cnpj:
+            messagebox.showerror(
+                "Cadastrar cliente",
+                "Não encontrei o CNPJ do sacado nesta planilha — não é "
+                "possível cadastrar sem um CNPJ.", parent=self.controller)
+            return
+
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._cadastro_overlay = overlay
+
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=460, height=520)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=26, pady=22)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text="Cadastrar cliente novo", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold")).pack(side="left")
+        styled_button(top, "✕", self._fechar_cadastro_cliente, small=True).pack(side="right")
+
+        taxa_existente = (TaxasData.get().get_taxa(cnpj) or {})
+        prazo_existente = TaxasData.get().get_prazo(cnpj) or {}
+        extra_existente = ClientesExtrasInvertidoData.get().get_by_cnpj(cnpj) or {}
+
+        tk.Label(pad, text=f"CNPJ {_fmt_cnpj(cnpj)}", bg=C["surface"],
+                 fg=C["ink_faint"], font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 0))
+
+        def _campo(label_txt):
+            tk.Label(pad, text=label_txt, bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(14, 3))
+
+        _campo("NOME DO CLIENTE")
+        nome_var = tk.StringVar(value=extra_existente.get("nome") or group["nome_sacado"])
+        styled_entry(pad, textvariable=nome_var, width=42).pack(anchor="w")
+
+        _campo("PRAZO (DIAS) — MÍNIMO · ESPERADO · MÁXIMO")
+        prazo_row = tk.Frame(pad, bg=C["surface"])
+        prazo_row.pack(anchor="w")
+        min_var = tk.StringVar(value=str(prazo_existente.get("min", "")))
+        esp_var = tk.StringVar(value=str(prazo_existente.get("esperado", "")))
+        max_var = tk.StringVar(value=str(prazo_existente.get("max", "")))
+        for var in (min_var, esp_var, max_var):
+            styled_entry(prazo_row, textvariable=var, width=8).pack(side="left", padx=(0, 8))
+
+        _campo("TAXA (% A.M.)")
+        taxa_var = tk.StringVar(value=str(taxa_existente.get("taxa", "")))
+        styled_entry(pad, textvariable=taxa_var, width=14).pack(anchor="w")
+
+        _campo("LINK DE CONSULTA DE LIMITE")
+        tk.Label(pad, text="Mesmo tipo de link já usado para os demais clientes "
+                            "(abre a consulta automática de LTC/limite).",
+                 bg=C["surface"], fg=C["ink_faint"], font=("Segoe UI", 7),
+                 wraplength=400, justify="left").pack(anchor="w")
+        url_var = tk.StringVar(value=extra_existente.get("limite_url") or "")
+        styled_entry(pad, textvariable=url_var, width=52).pack(anchor="w", pady=(4, 0))
+
+        self._cadastro_msg = tk.Label(pad, text="", bg=C["surface"], fg=C["err"],
+                                      font=("Segoe UI", 8))
+        self._cadastro_msg.pack(anchor="w", pady=(10, 0))
+
+        def _salvar():
+            nome = nome_var.get().strip()
+            if not nome:
+                self._cadastro_msg.configure(text="Informe o nome do cliente.")
+                return
+            min_s, esp_s, max_s = min_var.get().strip(), esp_var.get().strip(), max_var.get().strip()
+            if any((min_s, esp_s, max_s)) and not all((min_s, esp_s, max_s)):
+                self._cadastro_msg.configure(
+                    text="Preencha mínimo, esperado e máximo do prazo (ou deixe os três em branco).")
+                return
+            try:
+                if min_s:
+                    min_i, esp_i, max_i = int(min_s), int(esp_s), int(max_s)
+                    if not (min_i <= esp_i <= max_i):
+                        self._cadastro_msg.configure(
+                            text="O prazo esperado deve ficar entre o mínimo e o máximo.")
+                        return
+                else:
+                    min_i = esp_i = max_i = None
+            except ValueError:
+                self._cadastro_msg.configure(text="Prazo deve ser um número inteiro de dias.")
+                return
+
+            taxa_str = taxa_var.get().strip()
+            if taxa_str:
+                TaxasData.get().set_taxa(cnpj, taxa_str)
+            if min_i is not None:
+                TaxasData.get().set_prazo(cnpj, min_i, esp_i, max_i)
+
+            url = url_var.get().strip()
+            ok_extra = ClientesExtrasInvertidoData.get().upsert(cnpj, nome, url)
+            if not ok_extra:
+                self._cadastro_msg.configure(
+                    text="Taxa/prazo salvos, mas não consegui salvar o cadastro "
+                         "do cliente agora (rede indisponível). Tente novamente.")
+                return
+
+            lf = self.controller.frames.get("LimitesInvertido")
+            if lf is not None:
+                lf._started = False  # força reconstruir a grade com o novo cliente
+
+            self._fechar_cadastro_cliente()
+            self._refresh_all_limit_buttons()
+            nome_reabrir = self._detail_nome
+            self._close_detalhes()
+            self._open_detalhes(nome_reabrir)
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(16, 0))
+        styled_button(foot, "Cancelar", self._fechar_cadastro_cliente).pack(side="left")
+        styled_button(foot, "Salvar cadastro", _salvar, accent=True).pack(side="right")
+
+    def _fechar_cadastro_cliente(self):
+        if getattr(self, "_cadastro_overlay", None) is not None:
+            try:
+                self._cadastro_overlay.destroy()
+            except Exception:
+                pass
+            self._cadastro_overlay = None
 
     def _detail_ops_do_cliente(self):
         """Todas as ops da planilha (incluídas ou não) para o cliente em detalhe."""
@@ -11044,15 +11339,31 @@ class LimitesInvertidoFrame(tk.Frame, ThreadSafeUIMixin):
     def _setup_cards(self):
         for w in self._grid.winfo_children(): w.destroy()
         self._cards = []
-        all_clients = list(BPM_CLIENT_DATA.keys())
+        extras = ClientesExtrasInvertidoData.get().by_nome()
+        self._extras_by_nome = extras
+        all_clients = list(BPM_CLIENT_DATA.keys()) + [n for n in extras if n not in BPM_CLIENT_DATA]
         for idx, name in enumerate(all_clients):
-            is_mapped = name in MAPPED_CLIENTS
+            is_mapped = name in MAPPED_CLIENTS or name in extras
             is_mirror = name in MIRROR_CLIENTS
             row, col  = divmod(idx, 3)
             c = self._make_card(name, row, col, is_mapped, is_mirror)
             self._cards.append(c)
         for i in range(len(self._cards)):
             self.after(50*i, lambda i=i: self._reveal_card(i))
+
+    def _client_cnpj(self, name):
+        cnpj = only_digits(BPM_CLIENT_DATA.get(name, {}).get("CNPJ", ""))
+        if cnpj:
+            return cnpj
+        extra = getattr(self, "_extras_by_nome", {}).get(name)
+        return extra["cnpj"] if extra else ""
+
+    def _client_url(self, name):
+        url = LIMITE_CLIENT_URLS.get(name)
+        if url:
+            return url
+        extra = getattr(self, "_extras_by_nome", {}).get(name)
+        return extra.get("limite_url") if extra else None
 
     def _make_card(self, name, row, col, is_mapped, is_mirror):
         bg = C["surface"]; bord = C["hair"]
@@ -11150,7 +11461,7 @@ class LimitesInvertidoFrame(tk.Frame, ThreadSafeUIMixin):
 
     def _publish_limite(self, name, ltc_str=None, ltc_date=None, limite_disp=None,
                         state="processing", info=""):
-        cnpj = only_digits(BPM_CLIENT_DATA.get(name, {}).get("CNPJ", ""))
+        cnpj = self._client_cnpj(name)
         if not cnpj:
             return
         data = {
@@ -11164,7 +11475,7 @@ class LimitesInvertidoFrame(tk.Frame, ThreadSafeUIMixin):
         }
         self.controller.publish_limite_result(cnpj, data)
         for mn in LIMITE_SHARED_RESULTS.get(name, []):
-            mcnpj = only_digits(BPM_CLIENT_DATA.get(mn, {}).get("CNPJ", ""))
+            mcnpj = self._client_cnpj(mn)
             if not mcnpj:
                 continue
             mdata = dict(data)
@@ -11201,14 +11512,16 @@ class LimitesInvertidoFrame(tk.Frame, ThreadSafeUIMixin):
                 page.set_default_timeout(60_000)
                 RE_DATE = re.compile(r"\d{2}/\d{2}/\d{4}")
 
-                for name in list(BPM_CLIENT_DATA.keys()):
+                extras_by_nome = getattr(self, "_extras_by_nome", {}) or ClientesExtrasInvertidoData.get().by_nome()
+                todos_nomes = list(BPM_CLIENT_DATA.keys()) + [n for n in extras_by_nome if n not in BPM_CLIENT_DATA]
+                for name in todos_nomes:
                     if self._cancel_requested: break
-                    if name not in MAPPED_CLIENTS: continue
+                    if not (name in MAPPED_CLIENTS or name in extras_by_nome): continue
                     idx = self._find_idx(name)
                     if idx == -1: continue
                     self._publish_limite(name, state="processing")
                     self._ui(lambda i=idx: self._set_state(i, "processing"))
-                    url = LIMITE_CLIENT_URLS.get(name)
+                    url = self._client_url(name)
                     if not url:
                         self._ui(lambda i=idx: self._set_state(i,"error","URL não mapeada")); continue
                     try:
