@@ -1259,30 +1259,36 @@ def build_braskem_email_html(cedente_cnpj: str, sacado_nome: str,
 
 def get_emails_por_cliente(nome_sacado: str) -> dict:
     """Retorna {"para": [...], "cc": [...]} para o cliente (Risco Sacado
-    Invertido), ou listas vazias se não houver mapeamento. Usa o mesmo
-    casamento tolerante (aliases + palavras-chave) do trader/prazo, e
-    também resolve clientes-espelho para o destinatário do cliente-mãe."""
+    Invertido). Fonte primária é o SQL (EmailsInvertidoData, editável pela
+    tela de E-mails); usa o mesmo casamento tolerante (aliases + palavras-
+    chave) do trader/prazo e resolve clientes-espelho para o cliente-mãe.
+    Cai para o dicionário fixo no código só se o SQL estiver indisponível."""
     vazio = {"para": [], "cc": []}
     if not nome_sacado:
         return vazio
+    try:
+        emails_data = EmailsInvertidoData.get()
+    except Exception:
+        emails_data = None
+
+    def _por_sql(nome):
+        if emails_data is None:
+            return None
+        cnpj = _cnpj_do_cliente_invertido(nome)
+        info = emails_data.get_by_cnpj(cnpj) if cnpj else None
+        if info is not None:
+            return info
+        return emails_data.get_by_nome(nome)
+
     key = _normalize_sacado_key(nome_sacado)
-
-    def _lookup(nome):
-        k = _normalize_sacado_key(nome)
-        for cliente, emails in INVERTIDO_EMAILS_POR_CLIENTE.items():
-            if _normalize_sacado_key(cliente) == k:
-                return emails
-        for cliente, emails in INVERTIDO_EMAILS_POR_CLIENTE.items():
-            if _invertido_sacado_matches(nome, cliente):
-                return emails
-        return None
-
-    encontrado = _lookup(nome_sacado)
+    encontrado = _por_sql(nome_sacado)
     if encontrado is None:
         for espelho, mae in MIRROR_CLIENTS.items():
             if _normalize_sacado_key(espelho) == key or _invertido_sacado_matches(nome_sacado, espelho):
-                encontrado = _lookup(mae)
+                encontrado = _por_sql(mae)
                 break
+    if encontrado is None:
+        encontrado = _get_emails_por_cliente_legado(nome_sacado)
     return encontrado or vazio
 
 
@@ -1979,6 +1985,8 @@ FRAME_LABELS = {
     "LimitesInvertido":  "Limites Invertido",
     "AnalisarOperacoes": "Analisar Operações",
     "TaxasInvertido":    "Taxas (Depara)",
+    "NovasInclusoesInvertido": "Novas Inclusões",
+    "EmailsInvertido":   "E-mails",
     "Braskem":           "Braskem",
     "AnalisarBraskem":   "Analisar Operações — Braskem",
     "TaxasBraskem":      "Taxas (Depara) — Braskem",
@@ -3441,7 +3449,7 @@ class ClientesExtrasInvertidoData:
 
     def __init__(self):
         self._available = False
-        self._cache = {}  # cnpj -> {"nome":..., "limite_url":...}
+        self._cache = {}  # cnpj -> {"nome":..., "limite_url":..., "plataforma":..., "agencia":..., "conta":...}
         self._ensure_schema()
         self._reload()
 
@@ -3469,6 +3477,12 @@ class ClientesExtrasInvertidoData:
                                 criado_em      TEXT,
                                 atualizado_em  TEXT
                             )""")
+            # Migração leve: bancos criados antes do BPM Invertido opcional
+            # não têm essas 3 colunas — adiciona se ainda não existirem.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(clientes_extra)")}
+            for col in ("plataforma", "agencia", "conta"):
+                if col not in cols:
+                    conn.execute(f"ALTER TABLE clientes_extra ADD COLUMN {col} TEXT")
             conn.commit()
             conn.close()
             self._available = True
@@ -3484,16 +3498,20 @@ class ClientesExtrasInvertidoData:
             return
         try:
             conn = self._connect()
-            cur = conn.execute("SELECT cnpj, nome, limite_url FROM clientes_extra")
-            self._cache = {row[0]: {"nome": row[1], "limite_url": row[2]}
-                           for row in cur.fetchall()}
+            cur = conn.execute(
+                "SELECT cnpj, nome, limite_url, plataforma, agencia, conta FROM clientes_extra")
+            self._cache = {
+                row[0]: {"nome": row[1], "limite_url": row[2], "plataforma": row[3],
+                         "agencia": row[4], "conta": row[5]}
+                for row in cur.fetchall()
+            }
             conn.close()
             self._available = True
         except Exception:
             self._available = False
 
     def all(self):
-        """cnpj -> {'nome':..., 'limite_url':...}"""
+        """cnpj -> {'nome':..., 'limite_url':..., 'plataforma':..., 'agencia':..., 'conta':...}"""
         return dict(self._cache)
 
     def by_nome(self):
@@ -3528,12 +3546,262 @@ class ClientesExtrasInvertidoData:
                 (cnpj, nome, (limite_url or "").strip(), criado_em, now))
             conn.commit()
             conn.close()
-            self._cache[cnpj] = {"nome": nome, "limite_url": (limite_url or "").strip()}
+            prev = self._cache.get(cnpj, {})
+            self._cache[cnpj] = {**prev, "nome": nome, "limite_url": (limite_url or "").strip()}
             self._available = True
             return True
         except Exception:
             self._available = False
             return False
+
+    def set_bpm_dados(self, cnpj, plataforma, agencia, conta):
+        """Marca o cliente para também aparecer em BPM Invertido, com os
+        dados necessários pro login automático (CNPJ já existe no
+        cadastro)."""
+        cnpj = only_digits(cnpj or "")
+        if cnpj not in self._cache:
+            return False
+        if not self._network_reachable():
+            self._available = False
+            return False
+        try:
+            conn = self._connect()
+            conn.execute(
+                """UPDATE clientes_extra SET plataforma=?, agencia=?, conta=?,
+                   atualizado_em=? WHERE cnpj=?""",
+                (plataforma.strip(), agencia.strip(), conta.strip(),
+                 datetime.now().isoformat(timespec="seconds"), cnpj))
+            conn.commit()
+            conn.close()
+            self._cache[cnpj].update(
+                {"plataforma": plataforma.strip(), "agencia": agencia.strip(),
+                 "conta": conta.strip()})
+            self._available = True
+            return True
+        except Exception:
+            self._available = False
+            return False
+
+    def clientes_bpm_ativos(self):
+        """nome -> {'CNPJ','PLATAFORMA','AG','CONTA'} — mesmo formato do
+        BPM_CLIENT_DATA — para os clientes extra que já têm os 3 campos
+        de BPM preenchidos (opt-in feito pelo usuário)."""
+        out = {}
+        for cnpj, info in self._cache.items():
+            if info.get("plataforma") and info.get("agencia") and info.get("conta"):
+                out[info["nome"]] = {"CNPJ": cnpj, "PLATAFORMA": info["plataforma"],
+                                     "AG": info["agencia"], "CONTA": info["conta"]}
+        return out
+
+
+# ─── E-mails por cliente (Risco Sacado Invertido) ──────────────────────────
+# Historicamente gravados direto no código (INVERTIDO_EMAILS_POR_CLIENTE).
+# Migrado para um SQLite próprio, na mesma pasta de rede dos demais bancos:
+# na primeira execução, semeia a partir do dicionário fixo; a partir daí o
+# SQL manda — o dicionário fica só como um fallback de segurança (rede
+# indisponível antes da primeira sincronização) e pode ser removido do
+# código mais adiante, já com os dados preservados no banco.
+EMAILS_INVERTIDO_DB_PATH = os.path.join(
+    os.path.dirname(SHARED_TAXAS_PATH), "emails_invertido.db")
+
+
+class EmailsInvertidoData:
+    _instance = None
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._available = False
+        self._cache = {}  # cnpj -> {"nome":..., "para":[...], "cc":[...]}
+        self._ensure_schema_e_seed()
+        self._reload()
+
+    def _network_reachable(self):
+        try:
+            return os.path.isdir(os.path.dirname(EMAILS_INVERTIDO_DB_PATH))
+        except Exception:
+            return False
+
+    def _connect(self):
+        conn = sqlite3.connect(EMAILS_INVERTIDO_DB_PATH, timeout=20)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        return conn
+
+    def _ensure_schema_e_seed(self):
+        if not self._network_reachable():
+            self._available = False
+            return
+        try:
+            conn = self._connect()
+            conn.execute("""CREATE TABLE IF NOT EXISTS emails (
+                                cnpj           TEXT PRIMARY KEY,
+                                nome           TEXT NOT NULL,
+                                para           TEXT,
+                                cc             TEXT,
+                                atualizado_em  TEXT
+                            )""")
+            conn.commit()
+            (count,) = conn.execute("SELECT COUNT(*) FROM emails").fetchone()
+            if count == 0:
+                self._seed_do_codigo(conn)
+            conn.close()
+            self._available = True
+        except Exception:
+            self._available = False
+
+    def _seed_do_codigo(self, conn):
+        """Semeia o banco, uma única vez, com o que já existia gravado
+        direto no código (INVERTIDO_EMAILS_POR_CLIENTE)."""
+        now = datetime.now().isoformat(timespec="seconds")
+        linhas = []
+        for nome, emails in INVERTIDO_EMAILS_POR_CLIENTE.items():
+            cnpj = only_digits(BPM_CLIENT_DATA.get(nome, {}).get("CNPJ", ""))
+            if not cnpj:
+                continue
+            para = "; ".join(emails.get("para") or [])
+            cc = "; ".join(emails.get("cc") or [])
+            linhas.append((cnpj, nome, para, cc, now))
+        if linhas:
+            conn.executemany(
+                """INSERT OR IGNORE INTO emails (cnpj, nome, para, cc, atualizado_em)
+                   VALUES (?,?,?,?,?)""", linhas)
+            conn.commit()
+
+    def is_available(self):
+        return self._available
+
+    def _reload(self):
+        if not self._network_reachable():
+            self._available = False
+            return
+        try:
+            conn = self._connect()
+            cur = conn.execute("SELECT cnpj, nome, para, cc FROM emails")
+            self._cache = {
+                row[0]: {
+                    "nome": row[1],
+                    "para": [e for e in (row[2] or "").split(";") if e.strip()],
+                    "cc": [e for e in (row[3] or "").split(";") if e.strip()],
+                }
+                for row in cur.fetchall()
+            }
+            conn.close()
+            self._available = True
+        except Exception:
+            self._available = False
+
+    def all(self):
+        """cnpj -> {'nome':..., 'para':[...], 'cc':[...]}"""
+        return dict(self._cache)
+
+    def get_by_cnpj(self, cnpj):
+        info = self._cache.get(only_digits(cnpj or ""))
+        if info is None:
+            return None
+        return {"para": list(info.get("para") or []), "cc": list(info.get("cc") or [])}
+
+    def get_by_nome(self, nome):
+        key = _normalize_sacado_key(nome or "")
+        for info in self._cache.values():
+            if _normalize_sacado_key(info.get("nome") or "") == key:
+                return {"para": list(info.get("para") or []), "cc": list(info.get("cc") or [])}
+        return None
+
+    def upsert(self, cnpj, nome, para_list, cc_list):
+        cnpj = only_digits(cnpj or "")
+        nome = (nome or "").strip()
+        if not cnpj or not nome:
+            return False
+        if not self._network_reachable():
+            self._available = False
+            return False
+        para = "; ".join(e.strip() for e in (para_list or []) if e.strip())
+        cc = "; ".join(e.strip() for e in (cc_list or []) if e.strip())
+        now = datetime.now().isoformat(timespec="seconds")
+        try:
+            conn = self._connect()
+            conn.execute(
+                """INSERT INTO emails (cnpj, nome, para, cc, atualizado_em)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(cnpj) DO UPDATE SET
+                       nome=excluded.nome, para=excluded.para, cc=excluded.cc,
+                       atualizado_em=excluded.atualizado_em""",
+                (cnpj, nome, para, cc, now))
+            conn.commit()
+            conn.close()
+            self._cache[cnpj] = {
+                "nome": nome,
+                "para": [e for e in para.split(";") if e.strip()],
+                "cc": [e for e in cc.split(";") if e.strip()],
+            }
+            self._available = True
+            return True
+        except Exception:
+            self._available = False
+            return False
+
+
+def _get_emails_por_cliente_legado(nome_sacado: str) -> dict:
+    """Implementação original (dicionário fixo no código). Mantida como
+    fallback caso o SQL de e-mails esteja indisponível antes da primeira
+    sincronização."""
+    vazio = {"para": [], "cc": []}
+    if not nome_sacado:
+        return vazio
+    key = _normalize_sacado_key(nome_sacado)
+
+    def _lookup(nome):
+        k = _normalize_sacado_key(nome)
+        for cliente, emails in INVERTIDO_EMAILS_POR_CLIENTE.items():
+            if _normalize_sacado_key(cliente) == k:
+                return emails
+        for cliente, emails in INVERTIDO_EMAILS_POR_CLIENTE.items():
+            if _invertido_sacado_matches(nome, cliente):
+                return emails
+        return None
+
+    encontrado = _lookup(nome_sacado)
+    if encontrado is None:
+        for espelho, mae in MIRROR_CLIENTS.items():
+            if _normalize_sacado_key(espelho) == key or _invertido_sacado_matches(nome_sacado, espelho):
+                encontrado = _lookup(mae)
+                break
+    return encontrado or vazio
+
+
+def bpm_client_data_efetivo():
+    """BPM_CLIENT_DATA (fixo) + clientes extra que optaram por aparecer
+    também em BPM Invertido."""
+    try:
+        extras_bpm = ClientesExtrasInvertidoData.get().clientes_bpm_ativos()
+    except Exception:
+        extras_bpm = {}
+    return {**BPM_CLIENT_DATA, **extras_bpm}
+
+
+def _todos_clientes_invertido():
+    """Nomes: BPM_CLIENT_DATA (fixos) + todos os clientes extra cadastrados
+    manualmente (com ou sem BPM), sem duplicar por nome."""
+    try:
+        extras = ClientesExtrasInvertidoData.get().by_nome()
+    except Exception:
+        extras = {}
+    return list(BPM_CLIENT_DATA.keys()) + [n for n in extras if n not in BPM_CLIENT_DATA]
+
+
+def _cnpj_do_cliente_invertido(nome):
+    cnpj = only_digits(BPM_CLIENT_DATA.get(nome, {}).get("CNPJ", ""))
+    if cnpj:
+        return cnpj
+    try:
+        extra = ClientesExtrasInvertidoData.get().by_nome().get(nome)
+    except Exception:
+        extra = None
+    return extra["cnpj"] if extra else ""
 
 
 def _limite_extra_cnpjs():
@@ -5984,8 +6252,6 @@ class BPMHubFrame(tk.Frame):
 
 
 class BPMConfigFrame(tk.Frame, ThreadSafeUIMixin):
-    CLIENTS = list(BPM_CLIENT_DATA.keys())
-
     def __init__(self, parent, controller):
         super().__init__(parent, bg=C["bg"])
         self.controller = controller
@@ -6007,7 +6273,19 @@ class BPMConfigFrame(tk.Frame, ThreadSafeUIMixin):
         self._senha_var.set(getattr(self.controller, "bpm_password", "") or "")
         if hasattr(self, "_sf"):
             self._sf.refresh_bindings()
+        self._refresh_client_rows_if_changed()
         self._refresh_confirmacoes()
+
+    def _refresh_client_rows_if_changed(self):
+        atuais = list(bpm_client_data_efetivo().keys())
+        if atuais == self._clients_snapshot:
+            return
+        for w in self._clients_frame.winfo_children():
+            w.destroy()
+        self._client_rows = {}
+        self._clients_snapshot = atuais
+        for cli in atuais:
+            self._make_client_row(self._clients_frame, cli)
 
     def _build(self):
         hdr = tk.Frame(self, bg=C["bg"])
@@ -6076,9 +6354,11 @@ class BPMConfigFrame(tk.Frame, ThreadSafeUIMixin):
 
         clients_frame = tk.Frame(sec2, bg=C["surface"], padx=18, pady=12)
         clients_frame.pack(fill="x")
+        self._clients_frame = clients_frame
 
         self._client_rows = {}
-        for cli in self.CLIENTS:
+        self._clients_snapshot = list(bpm_client_data_efetivo().keys())
+        for cli in self._clients_snapshot:
             self._make_client_row(clients_frame, cli)
 
         make_hairline(body, bg=C["hair"]).pack(fill="x", padx=32, pady=(20,0))
@@ -6098,7 +6378,7 @@ class BPMConfigFrame(tk.Frame, ThreadSafeUIMixin):
         row.pack(fill="x")
         row.columnconfigure(1, weight=1)
 
-        cnpj_cli = only_digits(BPM_CLIENT_DATA.get(cli, {}).get("CNPJ", ""))
+        cnpj_cli = only_digits(bpm_client_data_efetivo().get(cli, {}).get("CNPJ", ""))
         confirmado_holder = [None]
 
         selected = tk.BooleanVar(value=False)
@@ -6214,7 +6494,7 @@ class BPMConfigFrame(tk.Frame, ThreadSafeUIMixin):
             messagebox.showwarning("Senha inválida", "Senha deve ter 1 a 6 dígitos."); return
 
         selection = []
-        for cli in self.CLIENTS:
+        for cli in self._clients_snapshot:
             row = self._client_rows[cli]
             if not row["selected"].get(): continue
             raw = row["val_var"].get()
@@ -6758,6 +7038,10 @@ class OperacoesInvertidoFrame(tk.Frame):
 
         self._taxas_card = None
         self._refresh_taxas_card()
+        self._novas_card = None
+        self._refresh_novas_card()
+        self._emails_card = None
+        self._refresh_emails_card()
 
     def _taxas_vencidas(self):
         try:
@@ -6765,8 +7049,47 @@ class OperacoesInvertidoFrame(tk.Frame):
         except Exception:
             return False
 
+    def _tem_novas_pendentes(self):
+        try:
+            extras = ClientesExtrasInvertidoData.get().all()
+        except Exception:
+            return False
+        for cnpj, info in extras.items():
+            sem_bpm = not (info.get("plataforma") and info.get("agencia") and info.get("conta"))
+            sem_taxa = TaxasData.get().get_taxa(cnpj) is None
+            sem_limite = not info.get("limite_url")
+            if sem_bpm or sem_taxa or sem_limite:
+                return True
+        return False
+
     def on_show(self):
         self._refresh_taxas_card()
+        self._refresh_novas_card()
+        self._refresh_emails_card()
+
+    def _tem_clientes_sem_email(self):
+        try:
+            emails_data = EmailsInvertidoData.get()
+        except Exception:
+            return False
+        for nome in _todos_clientes_invertido():
+            cnpj = _cnpj_do_cliente_invertido(nome)
+            info = emails_data.get_by_cnpj(cnpj) if cnpj else None
+            if not info or not (info.get("para") or info.get("cc")):
+                return True
+        return False
+
+    def _refresh_emails_card(self):
+        try:
+            if self._emails_card is not None and self._emails_card.winfo_exists():
+                self._emails_card.destroy()
+        except Exception:
+            pass
+        self._emails_card = self._make_option_card(
+            self._cards_body, 1, 2, "✉", "E-mails",
+            "Para/Cc por cliente — inclua, remova ou replique de outro cliente.",
+            lambda: self.controller.show_frame("EmailsInvertido"), "#5a9e72",
+            alert=self._tem_clientes_sem_email(), alert_text="● Sem e-mail")
 
     def _refresh_taxas_card(self):
         try:
@@ -6779,6 +7102,18 @@ class OperacoesInvertidoFrame(tk.Frame):
             "Tabela de depara de taxas por cliente/modalidade.",
             lambda: self.controller.show_frame("TaxasInvertido"), "#c4a832",
             alert=self._taxas_vencidas())
+
+    def _refresh_novas_card(self):
+        try:
+            if self._novas_card is not None and self._novas_card.winfo_exists():
+                self._novas_card.destroy()
+        except Exception:
+            pass
+        self._novas_card = self._make_option_card(
+            self._cards_body, 1, 1, "✚", "Novas Inclusões",
+            "Clientes cadastrados manualmente — valide taxa, prazo, limite e BPM.",
+            lambda: self.controller.show_frame("NovasInclusoesInvertido"), "#4a8bd4",
+            alert=self._tem_novas_pendentes(), alert_text="● Pendências")
 
     # ── Cards de opção ───────────────────────────────────────────────────────
     def _make_option_card(self, parent, row, col, icon, title, sub, command, color,
@@ -7030,13 +7365,13 @@ class TaxasInvertidoFrame(tk.Frame):
         for w in self._grid.winfo_children():
             w.destroy()
         self._cards = {}
-        nomes = list(BPM_CLIENT_DATA.keys())
+        nomes = _todos_clientes_invertido()
         for idx, nome in enumerate(nomes):
             row, col = divmod(idx, 3)
             self._make_card(nome, row, col)
 
     def _make_card(self, nome, row, col):
-        cnpj = only_digits(BPM_CLIENT_DATA[nome].get("CNPJ", ""))
+        cnpj = _cnpj_do_cliente_invertido(nome)
         disponivel = self._data.is_available()
         info = self._data.get_taxa(cnpj) if disponivel else None
         vigente = self._data.is_vigente(cnpj) if disponivel else False
@@ -7642,6 +7977,561 @@ class HorizontalRankChart(tk.Canvas):
                                   fill=C["accent"], outline="")
             self.create_text(label_w + bar_w + 6, yc, text=_fmt_brl(Decimal(str(val))),
                              fill=C["ink_faint"], font=("Segoe UI", 7), anchor="w")
+
+
+class NovasInclusoesInvertidoFrame(tk.Frame):
+    """Lista os clientes cadastrados manualmente (via Detalhes → Cadastrar
+    cliente) que não estavam na lista fixa de Operações Invertido. Permite
+    revisar/editar taxa, prazo e o link de consulta de limite de cada um,
+    e também marcar para aparecer em BPM Invertido (Plataforma/Agência/
+    Conta — o CNPJ já vem do cadastro)."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._edit_overlay = None
+        self._bpm_overlay = None
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        styled_button(hdr, "← Voltar",
+                      lambda: self.controller.show_frame("OperacoesInvertido")).pack(side="left")
+        tk.Label(hdr, text="Novas Inclusões", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left", padx=(14, 0))
+
+        sub = tk.Frame(self, bg=C["bg"])
+        sub.pack(fill="x", padx=32)
+        tk.Label(sub, text="Clientes cadastrados manualmente pela tela de Detalhes — "
+                            "revise taxa, prazo, limite e, se quiser, inclua também em "
+                            "BPM Invertido.",
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9),
+                 wraplength=820, justify="left").pack(anchor="w", pady=(4, 0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16, 0))
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        self._grid_outer = self._sf.inner
+        self._grid_outer.configure(bg=C["bg"])
+        self._grid = tk.Frame(self._grid_outer, bg=C["bg"])
+        self._grid.pack(padx=32, pady=(16, 24), fill="x")
+        for c in range(2):
+            self._grid.columnconfigure(c, weight=1, uniform="nicards")
+
+    def on_show(self):
+        self._sf.refresh_bindings()
+        self._setup_cards()
+
+    def _setup_cards(self):
+        for w in self._grid.winfo_children():
+            w.destroy()
+        clientes = sorted(ClientesExtrasInvertidoData.get().all().items(),
+                          key=lambda kv: (kv[1].get("nome") or ""))
+        if not clientes:
+            empty = tk.Frame(self._grid, bg=C["bg"])
+            empty.grid(row=0, column=0, columnspan=2, sticky="ew", pady=24)
+            tk.Label(empty,
+                     text="Nenhum cliente novo cadastrado ainda. Isso acontece pela "
+                          "tela de Detalhes, em Analisar Operações, quando o sacado "
+                          "não está na lista fixa de clientes.",
+                     bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 10),
+                     wraplength=600, justify="center").pack()
+            return
+        for idx, (cnpj, info) in enumerate(clientes):
+            row, col = divmod(idx, 2)
+            self._make_card(cnpj, info, row, col)
+
+    def _make_card(self, cnpj, info, row, col):
+        bg = C["surface"]
+        nome = info.get("nome") or "—"
+        taxa_info = TaxasData.get().get_taxa(cnpj)
+        vigente = TaxasData.get().is_vigente(cnpj)
+        prazo_info = TaxasData.get().get_prazo(cnpj)
+        tem_limite_url = bool(info.get("limite_url"))
+        bpm_ativo = bool(info.get("plataforma") and info.get("agencia") and info.get("conta"))
+
+        card = tk.Frame(self._grid, bg=bg, highlightthickness=1, highlightbackground=C["hair"])
+        card.grid(row=row, column=col, sticky="new", padx=6, pady=6)
+        body = tk.Frame(card, bg=bg, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+
+        top = tk.Frame(body, bg=bg)
+        top.pack(fill="x")
+        tk.Label(top, text=nome, bg=bg, fg=C["ink"], font=("Segoe UI", 10, "bold"),
+                 anchor="w", wraplength=280, justify="left").pack(side="left", fill="x", expand=True)
+        tk.Label(body, text=f"CNPJ {_fmt_cnpj(cnpj)}", bg=bg, fg=C["ink_faint"],
+                 font=("Segoe UI", 7)).pack(anchor="w", pady=(2, 10))
+
+        def _status_row(ok, texto_ok, texto_falta):
+            row_f = tk.Frame(body, bg=bg)
+            row_f.pack(fill="x", pady=(0, 4))
+            dot_fg = C["ok"] if ok else C["warn"]
+            tk.Label(row_f, text="●", bg=bg, fg=dot_fg, font=("Segoe UI", 8)).pack(side="left")
+            tk.Label(row_f, text=(texto_ok if ok else texto_falta), bg=bg,
+                     fg=(C["ink_muted"] if ok else C["warn"]),
+                     font=("Segoe UI", 8), anchor="w").pack(side="left", padx=(6, 0))
+
+        _status_row(bool(taxa_info) and vigente,
+                   f"Taxa {taxa_info.get('taxa')}% — vigente" if taxa_info else "",
+                   "Sem taxa vigente este mês")
+        _status_row(bool(prazo_info),
+                   (f"Prazo {prazo_info.get('min')}–{prazo_info.get('max')}d "
+                    f"(esperado {prazo_info.get('esperado')}d)") if prazo_info else "",
+                   "Sem prazo cadastrado")
+        _status_row(tem_limite_url, "Link de limite cadastrado", "Sem link de consulta de limite")
+        _status_row(bpm_ativo, "Incluído em BPM Invertido", "Não aparece em BPM Invertido")
+
+        btn_row = tk.Frame(body, bg=bg)
+        btn_row.pack(fill="x", pady=(12, 0))
+        styled_button(btn_row, "Editar taxa/prazo/limite →",
+                      lambda c=cnpj, n=nome, i=info: self._abrir_edicao(c, n, i),
+                      accent=True, small=True).pack(side="left")
+        styled_button(
+            btn_row, ("Editar dados BPM →" if bpm_ativo else "Incluir em BPM Invertido →"),
+            lambda c=cnpj, n=nome, i=info: self._abrir_bpm(c, n, i),
+            small=True).pack(side="right")
+
+    # ── Editar taxa / prazo / link de limite ────────────────────────────
+    def _abrir_edicao(self, cnpj, nome, info):
+        if self._edit_overlay is not None:
+            return
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._edit_overlay = overlay
+
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=440, height=460)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=24, pady=20)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text=nome, bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold"), wraplength=340,
+                 justify="left").pack(side="left", fill="x", expand=True)
+        styled_button(top, "✕", self._fechar_edicao, small=True).pack(side="right")
+        tk.Label(pad, text=f"CNPJ {_fmt_cnpj(cnpj)}", bg=C["surface"],
+                 fg=C["ink_faint"], font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(12, 0))
+
+        taxa_existente = TaxasData.get().get_taxa(cnpj) or {}
+        prazo_existente = TaxasData.get().get_prazo(cnpj) or {}
+
+        def _campo(txt):
+            tk.Label(pad, text=txt, bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(12, 3))
+
+        _campo("TAXA (% A.M.)")
+        taxa_var = tk.StringVar(value=str(taxa_existente.get("taxa", "")))
+        styled_entry(pad, textvariable=taxa_var, width=14).pack(anchor="w")
+
+        _campo("PRAZO (DIAS) — MÍNIMO · ESPERADO · MÁXIMO")
+        prazo_row = tk.Frame(pad, bg=C["surface"])
+        prazo_row.pack(anchor="w")
+        min_var = tk.StringVar(value=str(prazo_existente.get("min", "")))
+        esp_var = tk.StringVar(value=str(prazo_existente.get("esperado", "")))
+        max_var = tk.StringVar(value=str(prazo_existente.get("max", "")))
+        for var in (min_var, esp_var, max_var):
+            styled_entry(prazo_row, textvariable=var, width=8).pack(side="left", padx=(0, 8))
+
+        _campo("LINK DE CONSULTA DE LIMITE")
+        url_var = tk.StringVar(value=info.get("limite_url") or "")
+        styled_entry(pad, textvariable=url_var, width=48).pack(anchor="w")
+
+        msg = tk.Label(pad, text="", bg=C["surface"], fg=C["err"], font=("Segoe UI", 8))
+        msg.pack(anchor="w", pady=(10, 0))
+
+        def _salvar():
+            min_s, esp_s, max_s = min_var.get().strip(), esp_var.get().strip(), max_var.get().strip()
+            if any((min_s, esp_s, max_s)) and not all((min_s, esp_s, max_s)):
+                msg.configure(text="Preencha mínimo, esperado e máximo do prazo (ou deixe em branco).")
+                return
+            try:
+                if min_s:
+                    min_i, esp_i, max_i = int(min_s), int(esp_s), int(max_s)
+                    if not (min_i <= esp_i <= max_i):
+                        msg.configure(text="O esperado deve ficar entre o mínimo e o máximo.")
+                        return
+                else:
+                    min_i = esp_i = max_i = None
+            except ValueError:
+                msg.configure(text="Prazo deve ser um número inteiro de dias.")
+                return
+
+            taxa_str = taxa_var.get().strip()
+            if taxa_str:
+                TaxasData.get().set_taxa(cnpj, taxa_str)
+            if min_i is not None:
+                TaxasData.get().set_prazo(cnpj, min_i, esp_i, max_i)
+            ClientesExtrasInvertidoData.get().upsert(cnpj, nome, url_var.get().strip())
+
+            lf = self.controller.frames.get("LimitesInvertido")
+            if lf is not None:
+                lf._started = False
+
+            self._fechar_edicao()
+            self._setup_cards()
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(16, 0))
+        styled_button(foot, "Cancelar", self._fechar_edicao).pack(side="left")
+        styled_button(foot, "Salvar", _salvar, accent=True).pack(side="right")
+
+    def _fechar_edicao(self):
+        if self._edit_overlay is not None:
+            try:
+                self._edit_overlay.destroy()
+            except Exception:
+                pass
+            self._edit_overlay = None
+
+    # ── Incluir/editar dados de BPM Invertido ───────────────────────────
+    def _abrir_bpm(self, cnpj, nome, info):
+        if self._bpm_overlay is not None:
+            return
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._bpm_overlay = overlay
+
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=420, height=340)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=24, pady=20)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text="Incluir em BPM Invertido", bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold")).pack(side="left")
+        styled_button(top, "✕", self._fechar_bpm, small=True).pack(side="right")
+
+        tk.Label(pad, text=f"{nome}  ·  CNPJ {_fmt_cnpj(cnpj)}", bg=C["surface"],
+                 fg=C["ink_faint"], font=("Segoe UI", 8), wraplength=360,
+                 justify="left").pack(anchor="w", pady=(4, 0))
+        tk.Label(pad, text="O CNPJ já vem do cadastro. Informe Plataforma, Agência "
+                            "e Conta para o cliente também aparecer na lista de "
+                            "BPM Invertido, igual aos demais.",
+                 bg=C["surface"], fg=C["ink_muted"], font=("Segoe UI", 8),
+                 wraplength=360, justify="left").pack(anchor="w", pady=(8, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 0))
+
+        def _campo(txt):
+            tk.Label(pad, text=txt, bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(14, 3))
+
+        _campo("PLATAFORMA")
+        plat_var = tk.StringVar(value=info.get("plataforma") or "")
+        styled_entry(pad, textvariable=plat_var, width=16).pack(anchor="w")
+
+        row2 = tk.Frame(pad, bg=C["surface"])
+        row2.pack(fill="x", pady=(14, 0))
+        c1 = tk.Frame(row2, bg=C["surface"])
+        c1.pack(side="left", padx=(0, 16))
+        tk.Label(c1, text="AGÊNCIA", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(0, 3))
+        ag_var = tk.StringVar(value=info.get("agencia") or "")
+        styled_entry(c1, textvariable=ag_var, width=12).pack(anchor="w")
+
+        c2 = tk.Frame(row2, bg=C["surface"])
+        c2.pack(side="left")
+        tk.Label(c2, text="CONTA", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(0, 3))
+        conta_var = tk.StringVar(value=info.get("conta") or "")
+        styled_entry(c2, textvariable=conta_var, width=12).pack(anchor="w")
+
+        msg = tk.Label(pad, text="", bg=C["surface"], fg=C["err"], font=("Segoe UI", 8))
+        msg.pack(anchor="w", pady=(10, 0))
+
+        def _salvar():
+            plat, ag, conta = plat_var.get().strip(), ag_var.get().strip(), conta_var.get().strip()
+            if not (plat and ag and conta):
+                msg.configure(text="Preencha Plataforma, Agência e Conta.")
+                return
+            ok = ClientesExtrasInvertidoData.get().set_bpm_dados(cnpj, plat, ag, conta)
+            if not ok:
+                msg.configure(text="Não foi possível salvar agora (rede indisponível).")
+                return
+            self._fechar_bpm()
+            self._setup_cards()
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(16, 0))
+        styled_button(foot, "Cancelar", self._fechar_bpm).pack(side="left")
+        styled_button(foot, "Salvar", _salvar, accent=True).pack(side="right")
+
+    def _fechar_bpm(self):
+        if self._bpm_overlay is not None:
+            try:
+                self._bpm_overlay.destroy()
+            except Exception:
+                pass
+            self._bpm_overlay = None
+
+
+class EmailsInvertidoFrame(tk.Frame):
+    """Lista todos os clientes de Risco Sacado Invertido (fixos + os
+    cadastrados manualmente em Novas Inclusões) com os e-mails "Para" e
+    "Cc" usados no envio. Editável: incluir/remover destinatários, ou
+    replicar a lista de Para/Cc de outro cliente já cadastrado. Fonte de
+    dados é o SQL (EmailsInvertidoData) — o dicionário fixo no código só
+    é usado como semente na primeira execução."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, bg=C["bg"])
+        self.controller = controller
+        self._edit_overlay = None
+        self._build()
+
+    def _build(self):
+        hdr = tk.Frame(self, bg=C["bg"])
+        hdr.pack(fill="x", padx=32, pady=(24, 0))
+        styled_button(hdr, "← Voltar",
+                      lambda: self.controller.show_frame("OperacoesInvertido")).pack(side="left")
+        tk.Label(hdr, text="E-mails", bg=C["bg"], fg=C["ink"],
+                 font=("Georgia", 18, "bold")).pack(side="left", padx=(14, 0))
+
+        sub = tk.Frame(self, bg=C["bg"])
+        sub.pack(fill="x", padx=32)
+        tk.Label(sub, text="Destinatários (Para/Cc) usados no envio de e-mail por "
+                            "cliente. Clientes novos entram sem e-mail — cadastre "
+                            "aqui, com a opção de replicar de outro cliente já pronto.",
+                 bg=C["bg"], fg=C["ink_muted"], font=("Segoe UI", 9),
+                 wraplength=820, justify="left").pack(anchor="w", pady=(4, 0))
+
+        make_hairline(self, bg=C["hair"]).pack(fill="x", padx=0, pady=(16, 0))
+
+        self._sf = ScrollableFrame(self, bg=C["bg"])
+        self._sf.pack(fill="both", expand=True)
+        self._sf.link_wheel(self)
+        self._grid_outer = self._sf.inner
+        self._grid_outer.configure(bg=C["bg"])
+        self._grid = tk.Frame(self._grid_outer, bg=C["bg"])
+        self._grid.pack(padx=32, pady=(16, 24), fill="x")
+        for c in range(2):
+            self._grid.columnconfigure(c, weight=1, uniform="emcards")
+
+    def on_show(self):
+        self._sf.refresh_bindings()
+        self._setup_cards()
+
+    def _setup_cards(self):
+        for w in self._grid.winfo_children():
+            w.destroy()
+        nomes = sorted(_todos_clientes_invertido())
+        emails_data = EmailsInvertidoData.get()
+        for idx, nome in enumerate(nomes):
+            cnpj = _cnpj_do_cliente_invertido(nome)
+            info = emails_data.get_by_cnpj(cnpj) if cnpj else None
+            para = info.get("para") if info else []
+            cc = info.get("cc") if info else []
+            row, col = divmod(idx, 2)
+            self._make_card(nome, cnpj, para, cc, row, col)
+
+    def _make_card(self, nome, cnpj, para, cc, row, col):
+        bg = C["surface"]
+        sem_emails = not para and not cc
+        card = tk.Frame(self._grid, bg=bg, highlightthickness=1,
+                        highlightbackground=C["warn"] if sem_emails else C["hair"])
+        card.grid(row=row, column=col, sticky="new", padx=6, pady=6)
+        body = tk.Frame(card, bg=bg, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+
+        top = tk.Frame(body, bg=bg)
+        top.pack(fill="x")
+        tk.Label(top, text=nome, bg=bg, fg=C["ink"], font=("Segoe UI", 10, "bold"),
+                 anchor="w", wraplength=260, justify="left").pack(side="left", fill="x", expand=True)
+        if sem_emails:
+            tk.Label(top, text="⚠ sem e-mail", bg=bg, fg=C["warn"],
+                     font=("Segoe UI", 7, "bold")).pack(side="right")
+        tk.Label(body, text=(f"CNPJ {_fmt_cnpj(cnpj)}" if cnpj else "CNPJ não identificado"),
+                 bg=bg, fg=C["ink_faint"], font=("Segoe UI", 7)).pack(anchor="w", pady=(2, 10))
+
+        def _linha_contagem(label, lista):
+            row_f = tk.Frame(body, bg=bg)
+            row_f.pack(fill="x", pady=(0, 3))
+            tk.Label(row_f, text=label, bg=bg, fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold"), width=6, anchor="w").pack(side="left")
+            texto = ("; ".join(lista) if lista else "—")
+            tk.Label(row_f, text=texto, bg=bg, fg=C["ink_muted"], font=("Segoe UI", 8),
+                     anchor="w", wraplength=260, justify="left").pack(
+                         side="left", fill="x", expand=True)
+
+        _linha_contagem("Para", para)
+        _linha_contagem("Cc", cc)
+
+        btn_row = tk.Frame(body, bg=bg)
+        btn_row.pack(fill="x", pady=(12, 0))
+        styled_button(btn_row, "Editar e-mails →",
+                      lambda n=nome, c=cnpj: self._abrir_edicao(n, c),
+                      accent=True, small=True).pack(side="right")
+
+    # ── Modal de edição ──────────────────────────────────────────────────
+    def _abrir_edicao(self, nome, cnpj):
+        if self._edit_overlay is not None:
+            return
+        if not cnpj:
+            messagebox.showerror(
+                "E-mails", "Não foi possível identificar o CNPJ deste cliente.",
+                parent=self.controller)
+            return
+
+        overlay = tk.Frame(self, bg="#0c0c0c")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._edit_overlay = overlay
+
+        card = tk.Frame(overlay, bg=C["surface"],
+                        highlightthickness=1, highlightbackground=C["hair"])
+        card.place(relx=0.5, rely=0.5, anchor="center", width=520, height=620)
+        card.bind("<Button-1>", lambda _e: "break")
+
+        pad = tk.Frame(card, bg=C["surface"], padx=26, pady=22)
+        pad.pack(fill="both", expand=True)
+
+        top = tk.Frame(pad, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text=nome, bg=C["surface"], fg=C["ink"],
+                 font=("Segoe UI", 13, "bold"), wraplength=380,
+                 justify="left").pack(side="left", fill="x", expand=True)
+        styled_button(top, "✕", self._fechar_edicao, small=True).pack(side="right")
+        tk.Label(pad, text=f"CNPJ {_fmt_cnpj(cnpj)}", bg=C["surface"], fg=C["ink_faint"],
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
+        info_atual = EmailsInvertidoData.get().get_by_cnpj(cnpj) or {"para": [], "cc": []}
+        estado = {"para": list(info_atual["para"]), "cc": list(info_atual["cc"])}
+
+        # ── Replicar de outro cliente ────────────────────────────────
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 0))
+        rep_row = tk.Frame(pad, bg=C["surface"])
+        rep_row.pack(fill="x", pady=(12, 0))
+        tk.Label(rep_row, text="REPLICAR DE OUTRO CLIENTE", bg=C["surface"],
+                 fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(0, 4))
+        rep_inner = tk.Frame(pad, bg=C["surface"])
+        rep_inner.pack(fill="x")
+        outros = sorted(n for n in _todos_clientes_invertido() if n != nome)
+        rep_var = tk.StringVar(value=(outros[0] if outros else ""))
+        combo = ttk.Combobox(rep_inner, textvariable=rep_var, values=outros,
+                             state="readonly", width=28, font=("Segoe UI", 9))
+        combo.pack(side="left")
+
+        def _replicar():
+            origem = rep_var.get()
+            if not origem:
+                return
+            cnpj_origem = _cnpj_do_cliente_invertido(origem)
+            fonte = EmailsInvertidoData.get().get_by_cnpj(cnpj_origem) if cnpj_origem else None
+            if not fonte or not (fonte.get("para") or fonte.get("cc")):
+                messagebox.showinfo("Replicar", f"{origem} ainda não tem e-mails cadastrados.",
+                                    parent=self.controller)
+                return
+            estado["para"] = list(fonte.get("para") or [])
+            estado["cc"] = list(fonte.get("cc") or [])
+            _redraw()
+
+        styled_button(rep_inner, "Aplicar", _replicar, small=True).pack(side="left", padx=(8, 0))
+
+        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 0))
+
+        # ── Listas Para / Cc (chips) ─────────────────────────────────
+        listas_area = tk.Frame(pad, bg=C["surface"])
+        listas_area.pack(fill="both", expand=True, pady=(12, 0))
+
+        def _secao(titulo, chave):
+            wrap = tk.Frame(listas_area, bg=C["surface"])
+            wrap.pack(fill="x", pady=(0, 14))
+            tk.Label(wrap, text=titulo, bg=C["surface"], fg=C["ink_faint"],
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(0, 4))
+            chips_frame = tk.Frame(wrap, bg=C["surface"])
+            chips_frame.pack(fill="x")
+
+            add_row = tk.Frame(wrap, bg=C["surface"])
+            add_row.pack(fill="x", pady=(6, 0))
+            novo_var = tk.StringVar()
+            entry = styled_entry(add_row, textvariable=novo_var, width=34)
+            entry.pack(side="left")
+
+            def _adicionar():
+                email = novo_var.get().strip()
+                if not email:
+                    return
+                if "@" not in email:
+                    messagebox.showwarning("E-mail inválido", f"'{email}' não parece um e-mail válido.",
+                                          parent=self.controller)
+                    return
+                if email.lower() not in [e.lower() for e in estado[chave]]:
+                    estado[chave].append(email)
+                novo_var.set("")
+                _redraw()
+
+            entry.bind("<Return>", lambda _e: _adicionar())
+            styled_button(add_row, "+ Adicionar", _adicionar, small=True).pack(
+                side="left", padx=(8, 0))
+            return chips_frame
+
+        chips_para = _secao("PARA", "para")
+        chips_cc = _secao("CC", "cc")
+
+        def _redraw():
+            for frame, chave in ((chips_para, "para"), (chips_cc, "cc")):
+                for w in frame.winfo_children():
+                    w.destroy()
+                if not estado[chave]:
+                    tk.Label(frame, text="Nenhum destinatário.", bg=C["surface"],
+                             fg=C["ink_faint"], font=("Segoe UI", 8, "italic")).pack(
+                                 anchor="w", pady=(0, 2))
+                    continue
+                for email in estado[chave]:
+                    chip = tk.Frame(frame, bg=C["surface2"], highlightthickness=0)
+                    chip.pack(fill="x", pady=(0, 3))
+                    tk.Label(chip, text=email, bg=C["surface2"], fg=C["ink"],
+                             font=("Segoe UI", 8), anchor="w").pack(
+                                 side="left", fill="x", expand=True, padx=(8, 0), pady=4)
+
+                    def _remover(e=email, k=chave):
+                        estado[k] = [x for x in estado[k] if x != e]
+                        _redraw()
+
+                    rm = tk.Button(chip, text="✕", command=_remover,
+                                  bg=C["surface2"], fg=C["err"],
+                                  activebackground=C["err_dim"], activeforeground=C["err"],
+                                  font=("Segoe UI", 8, "bold"), relief="flat", bd=0,
+                                  padx=8, pady=2, cursor="hand2")
+                    rm.pack(side="right", padx=(0, 4))
+
+        _redraw()
+
+        foot = tk.Frame(pad, bg=C["surface"])
+        foot.pack(fill="x", pady=(16, 0))
+
+        def _salvar():
+            ok = EmailsInvertidoData.get().upsert(cnpj, nome, estado["para"], estado["cc"])
+            if not ok:
+                messagebox.showerror(
+                    "E-mails", "Não foi possível salvar agora (rede indisponível).",
+                    parent=self.controller)
+                return
+            self._fechar_edicao()
+            self._setup_cards()
+
+        styled_button(foot, "Cancelar", self._fechar_edicao).pack(side="left")
+        styled_button(foot, "Salvar", _salvar, accent=True).pack(side="right")
+
+    def _fechar_edicao(self):
+        if self._edit_overlay is not None:
+            try:
+                self._edit_overlay.destroy()
+            except Exception:
+                pass
+            self._edit_overlay = None
 
 
 class HistoricoOperacoesFrame(tk.Frame, ThreadSafeUIMixin):
@@ -12021,7 +12911,7 @@ class BPMFrame(tk.Frame, ThreadSafeUIMixin):
                         if not all(info.values()):
                             self._log_line(f"[{client_name}] Dados incompletos.", "err"); continue
                     else:
-                        info = BPM_CLIENT_DATA.get(client_name)
+                        info = bpm_client_data_efetivo().get(client_name)
                         if not info:
                             self._log_line(f"[{client_name}] Sem mapeamento interno.", "err"); continue
                     amount_web = _fmt_brl_plain_web(raw_amount)
@@ -12777,6 +13667,8 @@ class App(tk.Tk):
             (AnalisarOperacoesFrame, "AnalisarOperacoes"),
             (LimitesInvertidoFrame,  "LimitesInvertido"),
             (TaxasInvertidoFrame,    "TaxasInvertido"),
+            (NovasInclusoesInvertidoFrame, "NovasInclusoesInvertido"),
+            (EmailsInvertidoFrame,   "EmailsInvertido"),
             (HistoricoOperacoesFrame,"HistoricoOperacoes"),
             (BraskemFrame,           "Braskem"),
             (AnalisarBraskemFrame,   "AnalisarBraskem"),
@@ -12790,6 +13682,13 @@ class App(tk.Tk):
 
         self._statusbar = AppStatusBar(self._shell, self)
         self._statusbar.pack(side="bottom", fill="x")
+
+        # Pré-aquece o cadastro de clientes novos em background — sem isso,
+        # o primeiro toque acontece durante o uso de Analisar Operações
+        # (checagem de limite/taxa), travando a tela por causa da latência
+        # de rede na primeira leitura do SQLite.
+        threading.Thread(target=ClientesExtrasInvertidoData.get, daemon=True).start()
+        threading.Thread(target=EmailsInvertidoData.get, daemon=True).start()
 
         self.show_frame("Home")
         self.after(120, self._apply_window_chrome)
