@@ -8389,38 +8389,44 @@ class EmailsInvertidoFrame(tk.Frame):
         overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._edit_overlay = overlay
 
+        # Altura do modal respeita a tela — o conteúdo (Para/Cc) rola por
+        # dentro; cabeçalho e rodapé (Cancelar/Salvar) ficam sempre fixos
+        # e visíveis, não importa quantos e-mails a lista tenha.
+        modal_h = min(620, max(420, int(self.winfo_screenheight() * 0.8)))
         card = tk.Frame(overlay, bg=C["surface"],
                         highlightthickness=1, highlightbackground=C["hair"])
-        card.place(relx=0.5, rely=0.5, anchor="center", width=520, height=620)
+        card.place(relx=0.5, rely=0.5, anchor="center", width=520, height=modal_h)
         card.bind("<Button-1>", lambda _e: "break")
+        card.pack_propagate(False)
 
-        pad = tk.Frame(card, bg=C["surface"], padx=26, pady=22)
-        pad.pack(fill="both", expand=True)
+        # ── Cabeçalho fixo ────────────────────────────────────────────
+        head = tk.Frame(card, bg=C["surface"], padx=26, pady=22)
+        head.pack(fill="x", side="top")
 
-        top = tk.Frame(pad, bg=C["surface"])
+        top = tk.Frame(head, bg=C["surface"])
         top.pack(fill="x")
         tk.Label(top, text=nome, bg=C["surface"], fg=C["ink"],
                  font=("Segoe UI", 13, "bold"), wraplength=380,
                  justify="left").pack(side="left", fill="x", expand=True)
         styled_button(top, "✕", self._fechar_edicao, small=True).pack(side="right")
-        tk.Label(pad, text=f"CNPJ {_fmt_cnpj(cnpj)}", bg=C["surface"], fg=C["ink_faint"],
+        tk.Label(head, text=f"CNPJ {_fmt_cnpj(cnpj)}", bg=C["surface"], fg=C["ink_faint"],
                  font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
 
         info_atual = EmailsInvertidoData.get().get_by_cnpj(cnpj) or {"para": [], "cc": []}
         estado = {"para": list(info_atual["para"]), "cc": list(info_atual["cc"])}
 
-        # ── Replicar de outro cliente ────────────────────────────────
-        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 0))
-        rep_row = tk.Frame(pad, bg=C["surface"])
+        # ── Replicar de outro cliente (fixo, sempre visível) ──────────
+        make_hairline(head, bg=C["hair"]).pack(fill="x", pady=(14, 0))
+        rep_row = tk.Frame(head, bg=C["surface"])
         rep_row.pack(fill="x", pady=(12, 0))
         tk.Label(rep_row, text="REPLICAR DE OUTRO CLIENTE", bg=C["surface"],
                  fg=C["ink_faint"], font=("Segoe UI", 7, "bold")).pack(anchor="w", pady=(0, 4))
-        rep_inner = tk.Frame(pad, bg=C["surface"])
+        rep_inner = tk.Frame(head, bg=C["surface"])
         rep_inner.pack(fill="x")
         outros = sorted(n for n in _todos_clientes_invertido() if n != nome)
         rep_var = tk.StringVar(value=(outros[0] if outros else ""))
         combo = ttk.Combobox(rep_inner, textvariable=rep_var, values=outros,
-                             state="readonly", width=28, font=("Segoe UI", 9))
+                             state="readonly", width=26, font=("Segoe UI", 9))
         combo.pack(side="left")
 
         def _replicar():
@@ -8438,12 +8444,33 @@ class EmailsInvertidoFrame(tk.Frame):
             _redraw()
 
         styled_button(rep_inner, "Aplicar", _replicar, small=True).pack(side="left", padx=(8, 0))
+        make_hairline(head, bg=C["hair"]).pack(fill="x", pady=(14, 0))
 
-        make_hairline(pad, bg=C["hair"]).pack(fill="x", pady=(14, 0))
+        # ── Rodapé fixo (sempre visível, empacotado ANTES da área que
+        #    expande, pra nunca ser espremido pra fora da tela) ────────
+        foot = tk.Frame(card, bg=C["surface"], padx=26, pady=16)
+        foot.pack(fill="x", side="bottom")
+        make_hairline(foot, bg=C["hair"]).pack(fill="x", pady=(0, 14), side="top")
 
-        # ── Listas Para / Cc (chips) ─────────────────────────────────
-        listas_area = tk.Frame(pad, bg=C["surface"])
-        listas_area.pack(fill="both", expand=True, pady=(12, 0))
+        def _salvar():
+            ok = EmailsInvertidoData.get().upsert(cnpj, nome, estado["para"], estado["cc"])
+            if not ok:
+                messagebox.showerror(
+                    "E-mails", "Não foi possível salvar agora (rede indisponível).",
+                    parent=self.controller)
+                return
+            self._fechar_edicao()
+            self._setup_cards()
+
+        styled_button(foot, "Cancelar", self._fechar_edicao).pack(side="left")
+        styled_button(foot, "Salvar", _salvar, accent=True).pack(side="right")
+
+        # ── Área central rolável — só as listas de Para/Cc ────────────
+        sf = ScrollableFrame(card, bg=C["surface"])
+        sf.pack(fill="both", expand=True, padx=0)
+        sf.link_wheel(card)
+        listas_area = tk.Frame(sf.inner, bg=C["surface"], padx=26)
+        listas_area.pack(fill="both", expand=True, pady=(4, 18))
 
         def _secao(titulo, chave):
             wrap = tk.Frame(listas_area, bg=C["surface"])
@@ -8456,7 +8483,7 @@ class EmailsInvertidoFrame(tk.Frame):
             add_row = tk.Frame(wrap, bg=C["surface"])
             add_row.pack(fill="x", pady=(6, 0))
             novo_var = tk.StringVar()
-            entry = styled_entry(add_row, textvariable=novo_var, width=34)
+            entry = styled_entry(add_row, textvariable=novo_var, width=30)
             entry.pack(side="left")
 
             def _adicionar():
@@ -8506,24 +8533,11 @@ class EmailsInvertidoFrame(tk.Frame):
                                   font=("Segoe UI", 8, "bold"), relief="flat", bd=0,
                                   padx=8, pady=2, cursor="hand2")
                     rm.pack(side="right", padx=(0, 4))
+            # Widgets dos chips são recriados a cada redraw — precisa
+            # rebindar a roda do mouse pra eles ficarem roláveis também.
+            sf.refresh_bindings()
 
         _redraw()
-
-        foot = tk.Frame(pad, bg=C["surface"])
-        foot.pack(fill="x", pady=(16, 0))
-
-        def _salvar():
-            ok = EmailsInvertidoData.get().upsert(cnpj, nome, estado["para"], estado["cc"])
-            if not ok:
-                messagebox.showerror(
-                    "E-mails", "Não foi possível salvar agora (rede indisponível).",
-                    parent=self.controller)
-                return
-            self._fechar_edicao()
-            self._setup_cards()
-
-        styled_button(foot, "Cancelar", self._fechar_edicao).pack(side="left")
-        styled_button(foot, "Salvar", _salvar, accent=True).pack(side="right")
 
     def _fechar_edicao(self):
         if self._edit_overlay is not None:
