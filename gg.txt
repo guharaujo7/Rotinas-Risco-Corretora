@@ -1,0 +1,32 @@
+Você vai analisar o código Python abaixo e me explicar, de forma curta e precisa, o que cada dado retornado representa e como é calculado. Contexto: mesa de operações de Risco Sacado (antecipação de recebíveis, operações invertido) em banco.
+
+Regras:
+- Baseie-se SOMENTE no que o código faz. Não presuma nada que não esteja no código; se algo for ambíguo, diga "não dá pra afirmar pelo código" e aponte a linha/função.
+- Sem explicação linha a linha. Quero uma visão por indicador/saída.
+
+Para cada dado/coluna/métrica que o código gera ou retorna, informe em uma linha:
+1. Nome (como aparece na saída)
+2. O que indica (significado de negócio)
+3. Como é calculado (fórmula real extraída do código, com as colunas/variáveis usadas)
+4. Origem dos dados (de onde vem cada coluna usada)
+
+Atenção especial a spreads, margens e médias ponderadas. Para cada um, responda explicitamente:
+- Ponderado por quê? (volume/valor financeiro, prazo, valor de face, outro?)
+- Qual a fórmula exata (ex.: Σ(spread × peso) / Σ(peso))?
+- Unidade: % a.m., % a.a. ou bps? Há conversão de base (30/360, 252, dias corridos)?
+- Quais linhas entram e quais são filtradas/excluídas (NaN, zeros, vencidos, cancelados, etc.)?
+- Se pondera só por volume e ignora prazo (ou vice-versa), sinalize.
+
+Spread x Margem (obrigatório):
+- Diga como o código define spread (ex.: taxa cobrada − custo de funding/CDI) e como define margem (em R$, em % ou ambos), e qual a base de cada um.
+- Explique por que a margem precisa ser lida junto com o spread: o spread mostra o preço da operação em termos de taxa, mas não o resultado financeiro. Considere volume e prazo (margem em R$ ≈ spread × volume × prazo/base de dias), custo de funding, impostos e consumo de limite/capital. Ex.: spread alto em volume pequeno e prazo curto rende pouco em R$; spread baixo em volume grande e prazo longo pode render mais.
+- Aponte se o spread médio ponderado do código pode mascarar operações de margem baixa ou negativa (mix de clientes, prazos ou sacados diferentes).
+- Indique, com base no que o código entrega, o que a mesa consegue concluir (ou não) olhando só o spread vs. olhando spread + margem.
+
+Ao final:
+- Liste possíveis inconsistências, riscos de interpretação ou bugs no cálculo (divisão por zero, média simples onde deveria ser ponderada, unidade misturada, spread sem margem correspondente).
+- Faça um resumo de 3 a 5 linhas do que o script entrega como um todo.
+
+Formato: tabela (Indicador | Significado | Cálculo | Origem) seguida das observações. Responda em português do Brasil.
+
+[COLE O CÓDIGO AQUI]
